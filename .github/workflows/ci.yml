@@ -1,0 +1,102 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# No AWS credentials are used anywhere in this workflow. Terraform runs with
+# -backend=false and never plans against an account.
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go build and vet
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/smoke/go.mod
+          cache-dependency-path: services/smoke/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  terraform:
+    name: terraform fmt and validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack: [infra/terraform/bootstrap, infra/terraform/envs/dev]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+
+      - run: terraform fmt -check -recursive
+        working-directory: ${{ matrix.stack }}
+
+      # -backend=false: no state, no credentials, no network calls to AWS.
+      - run: terraform init -backend=false -input=false
+        working-directory: ${{ matrix.stack }}
+
+      - run: terraform validate
+        working-directory: ${{ matrix.stack }}
+
+  smoke:
+    name: end-to-end smoke check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/smoke/go.mod
+          cache-dependency-path: services/smoke/go.sum
+
+      - name: Start core and messaging
+        run: |
+          docker compose -f local/docker-compose.yml \
+            --profile core --profile messaging up -d --wait --wait-timeout 300
+
+      - name: Seed AWS resources and Kafka topics
+        run: |
+          ./local/bootstrap/seed.sh
+          ./local/bootstrap/kafka-topics.sh
+
+      # The observability profile is deliberately left out: the smoke service
+      # treats tracing as best effort, so its absence must not fail the run.
+      # If this step fails, that contract is broken.
+      - name: Run smoke checks
+        working-directory: services/smoke
+        env:
+          AWS_ENDPOINT_URL: http://localhost:4566
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+        run: go run ./cmd/smoke
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose -f local/docker-compose.yml --profile all logs --tail=100
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f local/docker-compose.yml --profile all down -v

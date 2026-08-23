@@ -1,0 +1,220 @@
+# Local platform stack.
+#
+# Profiles let you bring up only what a given task needs, which keeps startup
+# fast and logs readable. Measured idle footprint of the full stack is ~1 GB
+# across all nine containers, so memory is not the binding constraint:
+#
+#   make up-core      floci (AWS surface) + postgres
+#   make up-messaging + kafka, kafka-ui, rabbitmq
+#   make up-obs       + otel-collector, prometheus, grafana, tempo
+#   make up           everything
+#
+# Every image is pinned. Floating :latest tags are how local stacks rot.
+
+name: mlp
+
+services:
+  # ---------------------------------------------------------------------------
+  # AWS surface: S3, SNS, SQS, SES, IAM, Secrets Manager, DynamoDB, ...
+  # floci emulates ~80 services on :4566 with no account or auth token.
+  # The docker socket is mounted because its RDS/EKS/Lambda emulation launches
+  # real sibling containers. See docs/adr/0002-floci-over-localstack.md.
+  # ---------------------------------------------------------------------------
+  # floci's entrypoint drops privileges to uid 1001 even when the container is
+  # started as root, so a root-owned named volume makes persistent storage fail
+  # at boot. Fix ownership once, before floci starts.
+  floci-init:
+    image: alpine:3
+    container_name: mlp-floci-init
+    profiles: [core, all]
+    user: root
+    command: ["sh", "-c", "mkdir -p /data && chown -R 1001:1001 /data"]
+    volumes:
+      - floci-data:/data
+
+  floci:
+    image: floci/floci:1.7.0
+    container_name: mlp-floci
+    profiles: [core, all]
+    ports:
+      - "4566:4566"
+    environment:
+      # Must match the service name so returned URLs (SQS queue URLs,
+      # pre-signed S3 links) resolve from inside the compose network.
+      FLOCI_HOSTNAME: floci
+      FLOCI_DEFAULT_REGION: us-east-1
+      # Default storage is in-memory, so recreating the container silently
+      # discards every seeded bucket, topic and queue. Persist to the volume.
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /data
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - floci-data:/data
+    user: root
+    depends_on:
+      floci-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_floci/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Postgres. Stands in for RDS for day-to-day app work: same engine, no
+  # control plane. floci's RDS is there when you want to learn the RDS *API*.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    container_name: mlp-postgres
+    profiles: [core, all]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      POSTGRES_DB: platform
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Real Apache Kafka in KRaft mode (no ZooKeeper).
+  # Deliberately NOT floci's MSK emulation, which is Redpanda underneath --
+  # Kafka-compatible, but not the thing you said you wanted to learn.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.1.0
+    container_name: mlp-kafka
+    profiles: [messaging, all]
+    ports:
+      - "9092:9092"    # from the host
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:19092,CONTROLLER://:9093,HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Single broker: everything must be replication factor 1 or topics fail.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: mlp-local-cluster-0001
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.2.0
+    container_name: mlp-kafka-ui
+    profiles: [messaging, all]
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    container_name: mlp-rabbitmq
+    profiles: [messaging, all]
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # management UI -- guest/guest
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Observability. Services speak OTLP to the collector; the collector decides
+  # where it goes. Datadog is one exporter among several, enabled by setting
+  # DD_API_KEY. Nothing in the app code knows Datadog exists.
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.137.0
+    container_name: mlp-otel-collector
+    profiles: [obs, all]
+    # Which config file is used decides whether Datadog receives telemetry.
+    command: ["--config=/etc/otel/${OTEL_COLLECTOR_CONFIG:-config.yaml}"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # prometheus scrape endpoint
+    environment:
+      DD_API_KEY: ${DD_API_KEY:-}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+    volumes:
+      - ./config/otel:/etc/otel:ro
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    container_name: mlp-prometheus
+    profiles: [obs, all]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    container_name: mlp-tempo
+    profiles: [obs, all]
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "3200:3200"   # query API -- handy for `curl`ing traces directly
+    volumes:
+      - ./config/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    container_name: mlp-grafana
+    profiles: [obs, all]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  floci-data:
+  pg-data:
+  kafka-data:
+  rabbit-data:
+  prom-data:
+  tempo-data:
+  grafana-data:

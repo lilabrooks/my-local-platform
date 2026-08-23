@@ -1,0 +1,38 @@
+# Secrets -- never commit
+.env
+*.pem
+*.key
+credentials
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# tfvars often carry account ids / real values; commit .example instead
+*.tfvars
+!*.tfvars.example
+
+# Go
+bin/
+dist/
+*.test
+*.out
+vendor/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local scratch
+tmp/

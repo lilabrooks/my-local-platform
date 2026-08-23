@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+region      = "us-east-1"
+environment = "dev"
+
+# Verify a real address you control -- AWS emails a confirmation link.
+ses_sender_email = ""
+
+# Both cost real money by the hour. Leave false unless you are actively
+# working on them, and `make aws-down` when you stop.
+enable_rds = false
+enable_eks = false
