@@ -54,3 +54,21 @@ Two operational gotchas found while wiring this up, both now handled in
 `make up-core && make seed` followed by `docker compose restart floci` leaves
 the bucket, topic and queue intact. The `s3`, `sns->sqs` and `ses` checks in
 `services/smoke` pass against it.
+
+**The fidelity concern above has been tested, not just noted.** The same smoke
+binary was run against the real AWS account with `MLP_USE_REAL_AWS=1`, using a
+Terraform-created bucket, topic and queue. S3 and SNS-to-SQS passed unchanged --
+no code differences, no conditionals, only different environment variables.
+
+Latency is the visible difference, and it is worth knowing before drawing
+conclusions from local timings:
+
+| Check | floci | real AWS |
+|---|---|---|
+| s3 round trip | ~25 ms | ~900-1100 ms |
+| sns to sqs fanout | ~15 ms | ~1250 ms |
+
+So floci is faithful enough for these APIs at the level this code uses them.
+It is roughly 50x faster, which is exactly why it is worth having, and exactly
+why a local pass says nothing about real-world timing. SES is skipped against
+real AWS deliberately: sending live email is not a smoke check's business.

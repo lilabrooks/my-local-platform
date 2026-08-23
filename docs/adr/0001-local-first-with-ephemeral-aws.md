@@ -50,6 +50,19 @@ environment. The discipline this relies on is remembering to run the latter.
 ## Verification
 
 `terraform plan` with both flags enabled resolves to 65 resources; the default
-plan is 10, all serverless. At the time of writing,
-`aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=my-local-platform`
-returns 0 resources -- nothing has been applied.
+plan is 10, all serverless.
+
+The cheap tier has been **applied to the real account and destroyed again**, so
+it is verified rather than merely planned:
+
+```text
+Apply complete! Resources: 10 added, 0 changed, 0 destroyed.
+Destroy complete! Resources: 10 destroyed.
+```
+
+Afterwards `aws resourcegroupstaggingapi get-resources --tag-filters
+Key=Project,Values=my-local-platform` returns 0, confirmed independently by
+listing S3, SNS, SQS and ECR by name. Total cost of the exercise was within the
+free tier.
+
+The expensive tier (`enable_rds`, `enable_eks`) remains plan-only.

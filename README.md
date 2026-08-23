@@ -164,6 +164,7 @@ Two gaps, stated plainly:
 
 - **The GitOps loop against this repository is untested**, because the repo is
   not published. ArgoCD reports `Repository not found` until it is.
-- **The Terraform has never been applied.** It validates and plans cleanly
-  against a real account — 65 resources with both expensive flags on, 10 with
-  the defaults — but nothing is proven against live EKS or RDS.
+- **The expensive Terraform tier has never been applied.** The cheap tier has:
+  it was applied to a real account, verified with the smoke checks, and
+  destroyed. EKS and RDS remain plan-only, so nothing is proven against live
+  clusters or databases.

@@ -25,9 +25,19 @@ type Config struct {
 }
 
 // Load reads configuration, applying defaults that match local/docker-compose.yml.
+//
+// Targeting real AWS requires MLP_USE_REAL_AWS=1 and nothing else. In
+// particular an empty or unset AWS_ENDPOINT_URL means "use the local
+// emulator", never "use real AWS" -- so a stray `export AWS_ENDPOINT_URL=`
+// cannot silently point these checks at a live account.
 func Load() Config {
+	endpoint := env("AWS_ENDPOINT_URL", "http://localhost:4566")
+	if os.Getenv("MLP_USE_REAL_AWS") == "1" {
+		endpoint = ""
+	}
+
 	return Config{
-		AWSEndpoint:  env("AWS_ENDPOINT_URL", "http://localhost:4566"),
+		AWSEndpoint:  endpoint,
 		AWSRegion:    env("AWS_DEFAULT_REGION", "us-east-1"),
 		Bucket:       env("MLP_BUCKET", "mlp-artifacts"),
 		TopicName:    env("MLP_TOPIC", "mlp-events"),

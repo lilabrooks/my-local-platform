@@ -58,6 +58,33 @@ aws sns list-topics
 and fails with `The config profile could not be found` — which looks like a
 floci problem and is not.
 
+## Running the smoke checks against real AWS
+
+The same binary works against the real account. Only environment changes:
+
+```bash
+cd infra/terraform/envs/dev
+terraform apply                       # creates the cheap tier, ~$0
+BUCKET=$(terraform output -raw bucket)
+
+cd ../../../services/smoke
+AWS_PROFILE=aws-public-change-feed \
+AWS_DEFAULT_REGION=us-east-1 \
+MLP_USE_REAL_AWS=1 \
+MLP_BUCKET="$BUCKET" \
+MLP_TOPIC=mlp-dev-events \
+MLP_QUEUE=mlp-dev-events \
+  go run ./cmd/smoke
+```
+
+`MLP_USE_REAL_AWS=1` is the **only** way to reach a live account. An empty or
+unset `AWS_ENDPOINT_URL` still means "local", so a stray
+`export AWS_ENDPOINT_URL=` cannot silently redirect these checks at production.
+
+Expect S3 and SNS-to-SQS to take roughly a second each rather than tens of
+milliseconds. SES is skipped on purpose — a smoke check should not send real
+email. Run `terraform destroy` when finished.
+
 ## Troubleshooting
 
 **`make smoke` fails on s3 or sns->sqs.** The resources are missing. Run
