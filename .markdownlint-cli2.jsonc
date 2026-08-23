@@ -1,0 +1,28 @@
+{
+  // Markdown lint rules. Disabled rules are stylistic choices this repo makes
+  // deliberately, not rules it fails to meet.
+  "config": {
+    "default": true,
+
+    // Prose wraps at ~80, but tables, links and command lines legitimately
+    // run longer, and hard-wrapping them hurts readability.
+    "MD013": false,
+
+    // Table pipe padding. Content rows are padded, separator rows are compact.
+    // GitHub renders both identically; enforcing one is churn.
+    "MD060": false,
+
+    // Bare URLs are correct in the endpoint tables -- `http://localhost:3000`
+    // reads better than a link whose text is its own href.
+    "MD034": false,
+
+    // The first heading is the repo name; duplicate sub-headings across
+    // different sections (e.g. "Verification" in every ADR) are fine.
+    "MD024": { "siblings_only": true }
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "**/.terraform/**",
+    "**/node_modules/**"
+  ]
+}

@@ -14,7 +14,7 @@ make up
 make smoke
 ```
 
-```
+```text
 smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
 
   PASS  s3               32ms  s3://mlp-artifacts/smoke/1787525730971651000.txt round trip
@@ -29,7 +29,7 @@ all components healthy
 
 ## What is here
 
-```
+```text
 local/          docker-compose stack, split into profiles
   bootstrap/    idempotent seed scripts for AWS resources and Kafka topics
   config/       OTel Collector, Prometheus, Tempo, Grafana provisioning
@@ -121,9 +121,35 @@ The default environment is ten serverless resources that cost approximately
 nothing idle. EKS and RDS are behind `enable_eks` and `enable_rds`, both
 `false` by default. **[docs/costs.md](docs/costs.md)** has the arithmetic.
 
+## Linting
+
+```bash
+make lint
+```
+
+Eight checks over the things that are not Go: YAML, shell, Markdown, GitHub
+Actions workflows, the Dockerfile, Terraform formatting, Terraform lint rules,
+and a secret scan across git history.
+
+Each linter uses a local binary when one is installed and a pinned container
+otherwise, so it works on a clean machine with only Docker. A linter that can
+run neither way reports `SKIP` rather than passing silently.
+
+| Check | Tool | Catches |
+|---|---|---|
+| YAML | yamllint | syntax errors, indentation |
+| Shell | shellcheck | quoting bugs, unsafe `cd`, bad assignments |
+| Markdown | markdownlint | broken structure, unlabelled code fences |
+| Actions | actionlint | workflow errors that otherwise appear only on push |
+| Docker | hadolint | Dockerfile antipatterns |
+| Terraform | fmt + tflint | formatting, deprecated syntax, invalid values |
+| Secrets | gitleaks | credentials committed to history |
+
 ## Requirements
 
-Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl.
+Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl. The
+linters need only Docker; installing `yamllint` and `shellcheck` locally makes
+them faster.
 `make help` lists every target. **[docs/runbook-local.md](docs/runbook-local.md)**
 covers ports, credentials and troubleshooting;
 **[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the cluster.

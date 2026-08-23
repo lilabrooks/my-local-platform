@@ -20,7 +20,7 @@ Set `ASSUME_YES=1` to skip that in automation.
 ArgoCD pulls manifests from a URL. It cannot read your working tree. Until this
 repository is pushed to GitHub with these files on `main`, applications report:
 
-```
+```text
 failed to list refs: authentication required: Repository not found.
 ```
 

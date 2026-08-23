@@ -38,7 +38,7 @@ cannot read a working tree. Until this repository is pushed to
 `https://github.com/lilabrooks/my-local-platform` with these files on `main`,
 the applications report:
 
-```
+```text
 Failed to load target state: ... failed to list refs:
 authentication required: Repository not found.
 ```

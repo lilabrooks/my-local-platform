@@ -110,3 +110,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t echo:ci services/echo
+
+  lint:
+    name: linters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, which needs more than the default shallow
+          # clone of one commit.
+          fetch-depth: 0
+
+      - name: yamllint
+        run: pipx run yamllint -f github .
+
+      - name: shellcheck
+        run: |
+          find . -name '*.sh' -not -path '*/.terraform/*' -print0 \
+            | xargs -0 shellcheck
+
+      - name: markdownlint
+        run: npx --yes markdownlint-cli2
+
+      - name: actionlint
+        uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: services/echo/Dockerfile
+
+      - name: terraform fmt
+        run: |
+          docker run --rm -v "$PWD":/data -w /data \
+            hashicorp/terraform:1.15.8 fmt -check -recursive infra/terraform
+
+      - name: tflint
+        run: |
+          for stack in infra/terraform/bootstrap infra/terraform/envs/dev; do
+            echo "== $stack"
+            docker run --rm -v "$PWD":/data -w "/data/$stack" \
+              -e TFLINT_CONFIG_FILE=/data/.tflint.hcl \
+              --entrypoint sh ghcr.io/terraform-linters/tflint:latest \
+              -c 'tflint --init >/dev/null 2>&1 && tflint --format compact'
+          done
+
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo \
+            zricethezav/gitleaks:latest detect --source=. --no-banner --redact

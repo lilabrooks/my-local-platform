@@ -22,7 +22,7 @@ Two collector configurations exist:
 
 Selected at runtime:
 
-```
+```bash
 OTEL_COLLECTOR_CONFIG=config.datadog.yaml make up-obs
 ```
 
@@ -46,7 +46,7 @@ out of the pipelines -- **fails**. The collector validates every *defined*
 exporter at startup, not only those a pipeline references, so an empty
 `DD_API_KEY` crashes it:
 
-```
+```text
 Error: invalid configuration: exporters::datadog: api.key is not set
 ```
 
@@ -56,7 +56,7 @@ End-to-end, with the default config: `make smoke` produces spans that reach
 Tempo, confirmed by querying it directly rather than by trusting that the SDK
 initialised.
 
-```
+```bash
 curl -sS "http://localhost:3200/api/search?tags=service.name%3Dsmoke&limit=5"
 # -> 2 traces, root span "smoke.run"
 ```

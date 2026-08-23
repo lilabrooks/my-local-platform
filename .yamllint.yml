@@ -1,0 +1,34 @@
+# yamllint config.
+#
+# Tuned for Kubernetes manifests and GitHub Actions, which both break several
+# of yamllint's defaults for good reasons.
+
+extends: default
+
+ignore: |
+  .terraform/
+  **/.terraform/
+
+rules:
+  # Kubernetes manifests and compose files conventionally omit "---".
+  document-start: disable
+
+  # `on:` in a GitHub workflow is parsed as the boolean True by YAML 1.1.
+  # It is still the correct key, so the check is noise here.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+
+  # 80 is too tight for image references and long shell one-liners.
+  line-length:
+    max: 120
+    allow-non-breakable-words: true
+    level: warning
+
+  comments:
+    min-spaces-from-content: 1
+
+  # Nested sequences read better indented, but both styles are fine.
+  indentation:
+    spaces: consistent
+    indent-sequences: consistent

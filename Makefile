@@ -83,6 +83,10 @@ test: ## Run Go tests across all modules
 tidy: ## go mod tidy
 	cd services/smoke && go mod tidy
 
+.PHONY: lint
+lint: ## Run every linter (yaml, shell, markdown, actions, docker, terraform, secrets)
+	./scripts/lint.sh
+
 .PHONY: fmt
 fmt: ## Format Go code
 	cd services/smoke && go fmt ./...
