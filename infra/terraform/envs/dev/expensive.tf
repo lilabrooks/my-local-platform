@@ -103,8 +103,14 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 21.25"
 
-  name               = local.name
-  kubernetes_version = "1.31"
+  name = local.name
+  # MUST stay on a version in STANDARD support. A version in extended support
+  # bills at $0.60/cluster/hour instead of $0.10 -- $438/month rather than $73,
+  # applied automatically with no approval step. Check before changing:
+  #   aws eks describe-cluster-versions \
+  #     --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
+  # 1.35 is in standard support until 2027-03-26.
+  kubernetes_version = "1.35"
 
   vpc_id     = module.vpc[0].vpc_id
   subnet_ids = module.vpc[0].private_subnets

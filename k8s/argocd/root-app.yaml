@@ -1,0 +1,30 @@
+# App-of-apps. This single Application watches k8s/apps/, so adding an
+# Application manifest there registers a new app with no further kubectl.
+#
+# It manages itself as well: edit this file, push, and ArgoCD reconciles it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    # Without this, deleting the root app orphans every child app.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: mlp
+
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: main
+    path: k8s/apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true      # remove resources whose manifests were deleted
+      selfHeal: true   # revert manual kubectl edits back to git
+    syncOptions:
+      - CreateNamespace=true

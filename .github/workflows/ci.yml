@@ -15,16 +15,18 @@ jobs:
   go:
     name: go build and vet
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [services/smoke, services/echo, k8s/validate]
     defaults:
       run:
-        working-directory: services/smoke
+        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: services/smoke/go.mod
-          cache-dependency-path: services/smoke/go.sum
+          go-version-file: ${{ matrix.module }}/go.mod
 
       - name: gofmt
         run: |
@@ -35,7 +37,8 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      # -count=1: k8s/validate reads manifests the test cache does not track.
+      - run: go test -count=1 ./...
 
   terraform:
     name: terraform fmt and validate
@@ -100,3 +103,10 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f local/docker-compose.yml --profile all down -v
+
+  image:
+    name: build the echo image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t echo:ci services/echo

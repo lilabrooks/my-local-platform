@@ -74,8 +74,10 @@ smoke: ## Run the end-to-end smoke check against the local stack
 	cd services/smoke && go run ./cmd/smoke
 
 .PHONY: test
-test: ## Run Go tests
+test: ## Run Go tests across all modules
 	cd services/smoke && go test ./...
+	cd services/echo && go test ./...
+	cd k8s/validate && go test -count=1 ./...
 
 .PHONY: tidy
 tidy: ## go mod tidy
@@ -88,6 +90,61 @@ fmt: ## Format Go code
 .PHONY: vet
 vet: ## go vet
 	cd services/smoke && go vet ./...
+
+# ---------------------------------------------------------------------------
+# Kubernetes + GitOps (local, free)
+# ---------------------------------------------------------------------------
+
+MINIKUBE_PROFILE ?= mlp
+REPO_URL         ?= https://github.com/lilabrooks/my-local-platform
+
+.PHONY: k8s-up
+k8s-up: ## Start the local Kubernetes cluster (minikube profile 'mlp')
+	minikube start -p $(MINIKUBE_PROFILE) --driver=docker --nodes=1 \
+	  --cpus=4 --memory=3g --kubernetes-version=v1.35.1
+	kubectl config use-context $(MINIKUBE_PROFILE)
+
+.PHONY: k8s-down
+k8s-down: ## Stop the cluster, keep its state
+	minikube stop -p $(MINIKUBE_PROFILE)
+
+.PHONY: k8s-delete
+k8s-delete: ## Delete the cluster entirely
+	minikube delete -p $(MINIKUBE_PROFILE)
+
+.PHONY: echo-image
+echo-image: ## Build the echo image and load it into the cluster
+	cd services/echo && docker build --build-arg VERSION=$$(git rev-parse --short HEAD) -t echo:dev .
+	minikube image load echo:dev -p $(MINIKUBE_PROFILE)
+
+.PHONY: argocd-install
+argocd-install: ## Install ArgoCD and register the app-of-apps
+	REPO_URL=$(REPO_URL) ./k8s/argocd/install.sh
+
+.PHONY: argocd-password
+argocd-password: ## Print the initial ArgoCD admin password
+	@kubectl -n argocd get secret argocd-initial-admin-secret \
+	  -o jsonpath='{.data.password}' | base64 -d; echo
+
+.PHONY: argocd-ui
+argocd-ui: ## Port-forward the ArgoCD UI to https://localhost:8081
+	@echo "https://localhost:8081  (admin / \`make argocd-password\`)"
+	kubectl port-forward -n argocd svc/argocd-server 8081:443
+
+.PHONY: k8s-apply-local
+k8s-apply-local: ## Apply manifests directly, bypassing git and ArgoCD
+	kubectl apply -f k8s/manifests/namespace.yaml
+	kubectl apply -k k8s/manifests/echo
+
+.PHONY: k8s-validate
+k8s-validate: ## Assert manifest invariants (selector immutability, probes, endpoints)
+	cd k8s/validate && go test -count=1 ./...
+
+.PHONY: k8s-status
+k8s-status: ## Show ArgoCD applications and the mlp namespace
+	@kubectl get applications -n argocd 2>/dev/null || echo "ArgoCD not installed"
+	@echo
+	@kubectl get pods,svc -n mlp 2>/dev/null || echo "namespace mlp not present"
 
 # ---------------------------------------------------------------------------
 # Real AWS -- costs money. Read docs/costs.md first.
@@ -127,5 +184,5 @@ aws-cost: ## Month-to-date spend on the account
 
 .PHONY: help
 help: ## Show this help
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'

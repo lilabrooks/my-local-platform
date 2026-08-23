@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  labels:
+    app.kubernetes.io/name: echo
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: echo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: echo
+        app.kubernetes.io/part-of: my-local-platform
+    spec:
+      # Spread across nodes when there is more than one, but do not block
+      # scheduling on a single-node minikube.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: echo
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Requests are what the scheduler reserves; limits cap the container.
+          # No CPU limit on purpose -- CPU throttling hurts latency far more
+          # than the noisy-neighbour risk it prevents on a dev cluster.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+      # Long enough for the process to fail readiness, drain, then shut down.
+      terminationGracePeriodSeconds: 20

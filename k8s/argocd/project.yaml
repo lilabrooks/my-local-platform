@@ -1,0 +1,27 @@
+# An AppProject is ArgoCD's blast-radius boundary. The default project allows
+# any repo to deploy anything anywhere; this one does not.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: mlp
+  namespace: argocd
+spec:
+  description: my-local-platform workloads
+
+  sourceRepos:
+    - __REPO_URL__
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: mlp
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+
+  # Namespaces are cluster-scoped, and the root app creates one.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

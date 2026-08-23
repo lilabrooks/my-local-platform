@@ -33,6 +33,28 @@ Breaking down `enable_eks`, because it is the one that hurts:
 - NAT gateway: ~$0.045/hour = **~$32/month**, plus $0.045/GB processed.
 - 2× `t3.small` on spot: **~$6/month** (on-demand would be ~$30).
 
+### The extended-support trap
+
+A Kubernetes version that falls out of standard support moves to **extended
+support at $0.60 per cluster-hour instead of $0.10** — $438/month rather than
+$73, a 6× jump applied automatically with no approval step. Those figures are
+from [AWS's own EKS pricing page](https://aws.amazon.com/eks/pricing/).
+
+This is not hypothetical. The first draft of `expensive.tf` pinned `1.31`,
+which is already in extended support and would have quietly billed at the
+higher rate. It is now pinned to `1.35`, in standard support until 2027-03-26.
+
+Check before changing the version:
+
+```bash
+aws eks describe-cluster-versions \
+  --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion' \
+  --profile aws-public-change-feed
+```
+
+Local Kubernetes has no such cliff — minikube is free. Use EKS when the goal is
+EKS specifically.
+
 Both flags default to `false`.
 
 ## Keeping the bill at zero

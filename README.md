@@ -4,8 +4,9 @@ A distributed-systems playground that runs on a laptop for free, and on real
 AWS when it needs to.
 
 Kafka, RabbitMQ, Postgres, S3, SNS, SQS, SES, OpenTelemetry, Prometheus, Tempo
-and Grafana come up with one command and no cloud account. EKS and RDS are one
-Terraform flag away when emulation is not enough.
+and Grafana come up with one command and no cloud account. ArgoCD deploys onto
+a local Kubernetes cluster from git. EKS and RDS are one Terraform flag away
+when emulation is not enough.
 
 ```bash
 cp .env.example .env
@@ -29,10 +30,16 @@ all components healthy
 ## What is here
 
 ```
-local/          docker-compose stack, profiled by memory footprint
+local/          docker-compose stack, split into profiles
   bootstrap/    idempotent seed scripts for AWS resources and Kafka topics
   config/       OTel Collector, Prometheus, Tempo, Grafana provisioning
-services/smoke/ Go service that writes to and reads back from every component
+services/
+  smoke/        Go service that writes to and reads back from every component
+  echo/         small HTTP service, the workload ArgoCD deploys
+k8s/
+  argocd/       ArgoCD install, AppProject, root Application
+  apps/         one Application per workload (app-of-apps)
+  manifests/    what those Applications point at
 infra/terraform/
   bootstrap/    remote state backend, run once
   envs/dev/     the AWS environment, split cheap vs expensive
@@ -49,12 +56,13 @@ docs/adr/       why each choice was made, and what was verified
 | Event streaming | Apache Kafka (KRaft) | MSK, or self-managed |
 | Message broker | RabbitMQ | Amazon MQ |
 | Relational | Postgres 17 | RDS (`enable_rds`) |
-| Kubernetes | minikube | EKS (`enable_eks`) |
+| Kubernetes | minikube (`mlp` profile) | EKS (`enable_eks`) |
+| Deployment | ArgoCD, app-of-apps | same manifests, ECR images |
 | Telemetry | OTel → Prometheus + Tempo + Grafana | OTel → Datadog |
 
 ## Design decisions
 
-Four choices shape this repository, each recorded with the evidence behind it:
+Five choices shape this repository, each recorded with the evidence behind it:
 
 - **[Local-first, ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)** —
   an always-on version of this stack runs ~$150-250/month on a personal
@@ -67,6 +75,9 @@ Four choices shape this repository, each recorded with the evidence behind it:
   code names no vendor.
 - **[Real Kafka, not emulated MSK](docs/adr/0004-real-kafka-not-emulated.md)** —
   the goal is learning Kafka, not learning MSK's control plane.
+- **[ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)** — pull-based
+  deployment onto a dedicated minikube profile, so an existing cluster on the
+  machine is left alone.
 
 ## The smoke service
 
@@ -79,6 +90,19 @@ as a CI gate.
 It is also the reference for how to talk to each component: the AWS SDK against
 a custom endpoint, a Kafka producer and consumer group, an AMQP round trip,
 `pgx`, and OTLP tracing that wraps every check in a span.
+
+## Kubernetes and GitOps
+
+```bash
+make k8s-up          # dedicated 'mlp' minikube profile
+make echo-image      # build and load the workload image
+make argocd-install  # ArgoCD + app-of-apps
+make argocd-ui       # https://localhost:8081
+```
+
+ArgoCD pulls from a git URL, so the sync loop needs this repository pushed to
+GitHub. Until then `make k8s-apply-local` applies the same manifests directly.
+**[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the details.
 
 ## Real AWS
 
@@ -99,13 +123,21 @@ nothing idle. EKS and RDS are behind `enable_eks` and `enable_rds`, both
 
 ## Requirements
 
-Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2. `make help` lists every
-target; **[docs/runbook-local.md](docs/runbook-local.md)** covers ports,
-credentials and troubleshooting.
+Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl.
+`make help` lists every target. **[docs/runbook-local.md](docs/runbook-local.md)**
+covers ports, credentials and troubleshooting;
+**[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the cluster.
 
 ## Status
 
-The local stack and the smoke checks are verified working end to end. The
-Terraform is validated and plans cleanly against a real account — 65 resources
-with both expensive flags on, 10 with the defaults — but has **not been
-applied**, so nothing here is proven against live EKS or RDS yet.
+The local stack and the smoke checks are verified working end to end. ArgoCD is
+installed and its sync engine verified against a public repo; the `echo`
+manifests apply cleanly and serve traffic.
+
+Two gaps, stated plainly:
+
+- **The GitOps loop against this repository is untested**, because the repo is
+  not published. ArgoCD reports `Repository not found` until it is.
+- **The Terraform has never been applied.** It validates and plans cleanly
+  against a real account — 65 resources with both expensive flags on, 10 with
+  the defaults — but nothing is proven against live EKS or RDS.
