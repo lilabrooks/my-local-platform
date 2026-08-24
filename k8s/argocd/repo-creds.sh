@@ -32,9 +32,11 @@ fi
 if gh repo deploy-key list --repo "$REPO_SLUG" 2>/dev/null | grep -q "argocd-${REPO_SLUG##*/}"; then
   say "deploy key already present on $REPO_SLUG"
 else
+  # Read-only is gh's default for deploy keys; write access requires an
+  # explicit --allow-write, which is exactly what we do NOT want here.
   say "adding the public key to $REPO_SLUG as read-only"
   gh repo deploy-key add "${KEY_PATH}.pub" \
-    --repo "$REPO_SLUG" --title "argocd-${REPO_SLUG##*/}" --read-only
+    --repo "$REPO_SLUG" --title "argocd-${REPO_SLUG##*/}"
 fi
 
 say "creating the ArgoCD repository Secret"

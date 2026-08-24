@@ -9,7 +9,14 @@ spec:
   project: mlp
 
   source:
-    repoURL: __REPO_URL__
+    # A REAL url, not the __REPO_URL__ placeholder used in k8s/argocd/.
+    # Those files are applied by install.sh, which substitutes as it applies.
+    # This file is read by ArgoCD straight from git, where nothing substitutes
+    # anything -- a placeholder here syncs literally and the app fails with
+    # "application repo __REPO_URL__ is not permitted in project 'mlp'".
+    #
+    # Forking? Change this line, and pass REPO_URL to install.sh.
+    repoURL: git@github.com:lilabrooks/my-local-platform.git
     targetRevision: main
     path: k8s/manifests/echo
 

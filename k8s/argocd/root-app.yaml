@@ -1,7 +1,11 @@
 # App-of-apps. This single Application watches k8s/apps/, so adding an
 # Application manifest there registers a new app with no further kubectl.
 #
-# It manages itself as well: edit this file, push, and ArgoCD reconciles it.
+# This file is NOT self-managed: the root app's source path is k8s/apps, which
+# does not include this file. Changing it means re-running install.sh.
+#
+# The __REPO_URL__ placeholder works here because install.sh substitutes it at
+# apply time. It would NOT work in k8s/apps/, which ArgoCD reads from git.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
