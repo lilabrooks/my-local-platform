@@ -159,6 +159,31 @@ config without `DD_API_KEY`, it exits with
 **Ports already in use.** This stack claims 3000, 3200, 4317, 4318, 4566, 5432,
 5672, 8080, 8889, 9090, 9092 and 15672.
 
+## Upgrading Postgres past 17
+
+Postgres 18 changed where the official image expects its volume. It now writes
+to a major-version subdirectory (`/var/lib/postgresql/18/docker`) so that
+`pg_upgrade --link` can run without crossing a mount boundary, and it refuses
+to start if the old `/var/lib/postgresql/data` path is mounted:
+
+```text
+there appears to be PostgreSQL data in: /var/lib/postgresql/data
+(unused mount/volume) ... container exits 1
+```
+
+The compose file mounts the new path, and the volume was renamed `pg-data` ->
+`postgres-data` at the same time. That rename is what keeps `git pull &&
+make up` working: the old volume holds a 17-format cluster at its root, which
+18 cannot read at the new mount point, so reusing the name would have turned a
+routine pull into a hard failure.
+
+Nothing is migrated — this database holds disposable smoke-check rows. The old
+volume is orphaned and safe to delete once you are happy:
+
+```bash
+docker volume rm mlp_pg-data
+```
+
 ## Resetting
 
 ```bash
