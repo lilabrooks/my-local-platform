@@ -69,8 +69,25 @@ Installed and checked on the `mlp` cluster (Kubernetes v1.35.1):
 - The `echo` manifests apply cleanly from scratch and both replicas serve
   traffic: `/`, `/healthz` and `/metrics` all respond over the ClusterIP
   Service.
-- The GitOps loop **against this repository is unverified**, because the repo
-  is not published. Only the two halves either side of it have been tested.
+- **The GitOps loop is verified end to end.** The repository is now a private
+  GitHub remote with a read-only deploy key. Pushing a commit that changed
+  `replicas: 2` to `3` produced a third running pod ~12s later with no
+  `kubectl` involved; reverting the commit scaled it back down just as fast.
+
+Verifying it also exposed a flaw in the placeholder scheme. `install.sh`
+substitutes `__REPO_URL__` as it applies `k8s/argocd/*.yaml`, but `k8s/apps/`
+is read by ArgoCD **straight from git**, where nothing substitutes anything.
+The placeholder synced literally and the app failed with `application repo
+__REPO_URL__ is not permitted in project 'mlp'`. The rule:
+
+| Directory | Applied by | Placeholder |
+|---|---|---|
+| `k8s/argocd/` | `install.sh` | works, substituted at apply time |
+| `k8s/apps/` | ArgoCD, from git | needs a real URL |
+
+`selfHeal` was confirmed the hard way while fixing it: applying the corrected
+Application with `kubectl` was reverted to the git version within seconds. The
+fix had to go through git, which is the entire point.
 
 Two install details worth recording:
 

@@ -101,7 +101,8 @@ make argocd-ui       # https://localhost:8081
 ```
 
 ArgoCD pulls from a git URL. This repository is private, so ArgoCD needs a
-read-only deploy key before it can sync — `make argocd-repo-creds` sets that up.
+read-only deploy key before it can sync — `make argocd-repo-creds` generates
+one, registers it, and repoints the Applications at the SSH URL.
 `make k8s-apply-local` applies the same manifests directly, without git.
 **[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the details.
 
@@ -161,11 +162,11 @@ The local stack and the smoke checks are verified working end to end. ArgoCD is
 installed and its sync engine verified against a public repo; the `echo`
 manifests apply cleanly and serve traffic.
 
-Two gaps, stated plainly:
+The GitOps loop is verified end to end: a commit pushed to GitHub changed the
+running replica count ~12 seconds later, with no `kubectl`. CI is green across
+all eight jobs on GitHub Actions.
 
-- **The GitOps loop against this repository is untested**, because the repo is
-  not published. ArgoCD reports `Repository not found` until it is.
-- **The expensive Terraform tier has never been applied.** The cheap tier has:
-  it was applied to a real account, verified with the smoke checks, and
-  destroyed. EKS and RDS remain plan-only, so nothing is proven against live
-  clusters or databases.
+One gap remains, stated plainly: **the expensive Terraform tier has never been
+applied.** The cheap tier has — applied to a real account, verified with the
+smoke checks against live S3 and SNS/SQS, then destroyed. EKS and RDS are
+plan-only, so nothing is proven against a live cluster or database.
