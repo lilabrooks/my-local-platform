@@ -40,6 +40,9 @@ locals {
   state_bucket = "mlp-tfstate-${data.aws_caller_identity.current.account_id}"
 }
 
+# trivy:ignore:AWS-0132 SSE-S3 (AES256) is configured below. A customer-managed
+# KMS key adds $1/month plus request charges; state files here are a single
+# person's dev infrastructure, not regulated data.
 resource "aws_s3_bucket" "state" {
   bucket = local.state_bucket
 
@@ -56,6 +59,14 @@ resource "aws_s3_bucket_versioning" "state" {
   }
 }
 
+# AWS-0132 wants a customer-managed KMS key. Accepted, not fixed: SSE-S3
+# (AES256) is configured below, and a CMK adds $1/month plus request charges to
+# protect one person's dev state files.
+#
+# Note this directive sits on the encryption-configuration resource, not on the
+# bucket -- that is where trivy anchors the finding, and a directive on the
+# wrong resource does nothing at all.
+#trivy:ignore:AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   bucket = aws_s3_bucket.state.id
   rule {
@@ -73,6 +84,11 @@ resource "aws_s3_bucket_public_access_block" "state" {
   restrict_public_buckets = true
 }
 
+# AWS-0024 wants point-in-time recovery. Accepted, not fixed: PITR protects
+# data worth restoring, and this table holds transient lock records that are
+# meaningless the moment they are released. There is nothing a restore would
+# recover.
+#trivy:ignore:AWS-0024
 resource "aws_dynamodb_table" "lock" {
   name         = "mlp-tfstate-lock"
   billing_mode = "PAY_PER_REQUEST"

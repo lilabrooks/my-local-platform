@@ -129,9 +129,9 @@ nothing idle. EKS and RDS are behind `enable_eks` and `enable_rds`, both
 make lint
 ```
 
-Eight checks over the things that are not Go: YAML, shell, Markdown, GitHub
-Actions workflows, the Dockerfile, Terraform formatting, Terraform lint rules,
-and a secret scan across git history.
+Ten checks: Go, YAML, shell, Markdown, GitHub Actions workflows, the
+Dockerfile, Terraform formatting and lint rules, infrastructure security, and a
+secret scan across git history.
 
 Each linter uses a local binary when one is installed and a pinned container
 otherwise, so it works on a clean machine with only Docker. A linter that can
@@ -144,7 +144,9 @@ run neither way reports `SKIP` rather than passing silently.
 | Markdown | markdownlint | broken structure, unlabelled code fences |
 | Actions | actionlint | workflow errors that otherwise appear only on push |
 | Docker | hadolint | Dockerfile antipatterns |
+| Go | golangci-lint | unchecked errors, dead code, staticcheck |
 | Terraform | fmt + tflint | formatting, deprecated syntax, invalid values |
+| Infra security | trivy | encryption, CVEs, misconfiguration |
 | Secrets | gitleaks | credentials committed to history |
 
 ## Agent tooling
@@ -170,9 +172,15 @@ truth rather than per-agent copies.
 
 ## Requirements
 
-Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl. The
-linters need only Docker; installing `yamllint` and `shellcheck` locally makes
-them faster.
+Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl.
+
+The linters need only Docker, and fall back to pinned containers for anything
+not installed. Two are worth having natively because they run on every change:
+
+```bash
+brew install trivy golangci-lint
+```
+
 `make help` lists every target. **[docs/runbook-local.md](docs/runbook-local.md)**
 covers ports, credentials and troubleshooting;
 **[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the cluster.

@@ -27,7 +27,7 @@ func Kafka(cfg platform.Config) Check {
 			AllowAutoTopicCreation: false, // topics come from bootstrap, not by accident
 			RequiredAcks:           kafka.RequireAll,
 		}
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 
 		if err := w.WriteMessages(ctx, kafka.Message{
 			Key:   []byte("smoke"),
@@ -46,7 +46,7 @@ func Kafka(cfg platform.Config) Check {
 			MinBytes:    1,
 			MaxBytes:    10e6,
 		})
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 
 		deadline, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
@@ -69,13 +69,13 @@ func RabbitMQ(cfg platform.Config) Check {
 		if err != nil {
 			return "", fmt.Errorf("dial: %w", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		ch, err := conn.Channel()
 		if err != nil {
 			return "", fmt.Errorf("channel: %w", err)
 		}
-		defer ch.Close()
+		defer func() { _ = ch.Close() }()
 
 		// Durable so the queue survives a broker restart, matching how a real
 		// service would declare it.
@@ -124,7 +124,7 @@ func Postgres(cfg platform.Config) Check {
 		if err != nil {
 			return "", fmt.Errorf("connect: %w", err)
 		}
-		defer conn.Close(ctx)
+		defer func() { _ = conn.Close(ctx) }()
 
 		if _, err := conn.Exec(ctx, `
 			CREATE TABLE IF NOT EXISTS smoke_check (

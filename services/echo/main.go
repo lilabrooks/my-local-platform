@@ -111,12 +111,18 @@ func (s *server) readyz(w http.ResponseWriter, _ *http.Request) {
 // client library and its dependency tree.
 func (s *server) metrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, "# HELP echo_requests_total Total HTTP requests received.\n")
-	fmt.Fprintf(w, "# TYPE echo_requests_total counter\n")
-	fmt.Fprintf(w, "echo_requests_total %d\n", s.requests.Load())
-	fmt.Fprintf(w, "# HELP echo_uptime_seconds Seconds since process start.\n")
-	fmt.Fprintf(w, "# TYPE echo_uptime_seconds gauge\n")
-	fmt.Fprintf(w, "echo_uptime_seconds %d\n", int(time.Since(s.started).Seconds()))
+
+	// One write rather than six. The discarded error is the client having
+	// hung up mid-response, which there is nothing useful to do about --
+	// discarding it explicitly says that, where ignoring it silently does not.
+	_, _ = fmt.Fprintf(w,
+		"# HELP echo_requests_total Total HTTP requests received.\n"+
+			"# TYPE echo_requests_total counter\n"+
+			"echo_requests_total %d\n"+
+			"# HELP echo_uptime_seconds Seconds since process start.\n"+
+			"# TYPE echo_uptime_seconds gauge\n"+
+			"echo_uptime_seconds %d\n",
+		s.requests.Load(), int(time.Since(s.started).Seconds()))
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

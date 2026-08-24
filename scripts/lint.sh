@@ -137,6 +137,44 @@ else
   skip "tflint" "needs docker"
 fi
 
+# --- Go ---------------------------------------------------------------------
+# go vet is a thin net. golangci-lint bundles errcheck, staticcheck, unused and
+# ineffassign, which is what actually catches unchecked errors and dead code.
+if has golangci-lint; then
+  go_fail=0 go_out=""
+  for mod in services/smoke services/echo k8s/validate; do
+    out=$(cd "$mod" && golangci-lint run --config ../../.golangci.yml --timeout 5m 2>&1) || {
+      go_fail=1
+      go_out="${go_out}${mod}:
+${out}
+"
+    }
+  done
+  report "golangci-lint" "$go_fail" "$go_out"
+else
+  skip "golangci-lint" "install with: brew install golangci-lint"
+fi
+
+# --- Infrastructure security ------------------------------------------------
+# tflint checks that Terraform is valid; trivy checks whether it is safe. They
+# overlap not at all -- trivy found six issues tflint passed clean.
+# --skip-dirs matters: .terraform/ holds vendored upstream modules whose
+# example manifests are not ours to fix.
+if has trivy; then
+  out=$(trivy fs --scanners misconfig,secret \
+        --severity MEDIUM,HIGH,CRITICAL \
+        --skip-dirs '**/.terraform' \
+        --exit-code 1 --quiet . 2>&1)
+  report "trivy" $? "$out"
+elif has_docker; then
+  out=$(docker run --rm -v "$PWD":/repo -w /repo aquasec/trivy:latest fs \
+        --scanners misconfig,secret --severity MEDIUM,HIGH,CRITICAL \
+        --skip-dirs '**/.terraform' --exit-code 1 --quiet . 2>&1)
+  report "trivy" $? "$out"
+else
+  skip "trivy" "needs docker or: brew install trivy"
+fi
+
 # --- Secrets ----------------------------------------------------------------
 # Runs last: it is the one whose failure should be impossible to miss.
 if has gitleaks; then

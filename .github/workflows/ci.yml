@@ -41,6 +41,15 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
+
+      # go vet is a thin net; this adds errcheck, staticcheck, unused and
+      # ineffassign. Config lives at the repo root.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.13.1
+          working-directory: ${{ matrix.module }}
+          args: --config=${{ github.workspace }}/.golangci.yml --timeout 5m
       # -count=1: k8s/validate reads manifests the test cache does not track.
       - run: go test -count=1 ./...
 
@@ -160,6 +169,18 @@ jobs:
               --entrypoint sh ghcr.io/terraform-linters/tflint:latest \
               -c 'tflint --init >/dev/null 2>&1 && tflint --format compact'
           done
+
+      # tflint says the Terraform is valid; trivy says whether it is safe.
+      # .terraform/ is skipped -- it holds vendored upstream modules.
+      - name: trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig,secret
+          severity: MEDIUM,HIGH,CRITICAL
+          skip-dirs: '**/.terraform'
+          exit-code: '1'
 
       - name: gitleaks
         run: |

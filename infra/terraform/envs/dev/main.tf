@@ -58,6 +58,21 @@ locals {
 # Cheap tier -- always created
 # =============================================================================
 
+# Two trivy findings are accepted here rather than fixed.
+#
+# AWS-0132 (customer-managed KMS key): SSE-S3 (AES256) is on by default and is
+# enough for throwaway build artifacts. A CMK costs $1/month per key plus
+# request charges, to protect data that expires after 30 days.
+#
+# AWS-0090 (versioning): deliberately off. This bucket holds disposable build
+# output with a 30-day expiry and force_destroy = true. The Terraform *state*
+# bucket in bootstrap/ IS versioned, which is where it actually matters.
+#
+# The directives must be the LAST comment lines before the resource, with no
+# prose between them and it -- trivy silently ignores a directive followed by
+# another comment line.
+#trivy:ignore:AWS-0132
+#trivy:ignore:AWS-0090
 resource "aws_s3_bucket" "artifacts" {
   bucket        = "${local.name}-artifacts-${local.suffix}"
   force_destroy = true # dev data; let destroy actually work
@@ -88,17 +103,33 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
   }
 }
 
+# The topic IS encrypted (see kms_master_key_id below), which cleared AWS-0095.
+# AWS-0136 is the stricter follow-on rule asking for a *customer-managed* key.
+# Accepted for the same reason as the buckets: a CMK is $1/month per key, and
+# the AWS-managed key already encrypts at rest.
+#trivy:ignore:AWS-0136
 resource "aws_sns_topic" "events" {
   name = "${local.name}-events"
+
+  # SNS has no free SSE equivalent to SQS's, so this uses the AWS-managed KMS
+  # key. Storage is free; requests bill at ~$0.03 per 10,000. Negligible at
+  # these volumes, but not literally zero.
+  kms_master_key_id = "alias/aws/sns"
 }
 
 resource "aws_sqs_queue" "events_dlq" {
   name                      = "${local.name}-events-dlq"
   message_retention_seconds = 1209600 # 14 days, the maximum
+
+  # SSE-SQS: encryption at rest with no KMS key and no request charges.
+  # Genuinely free, so there is no reason to leave it off.
+  sqs_managed_sse_enabled = true
 }
 
 resource "aws_sqs_queue" "events" {
   name = "${local.name}-events"
+
+  sqs_managed_sse_enabled = true
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.events_dlq.arn
@@ -132,8 +163,13 @@ resource "aws_sqs_queue_policy" "events" {
 }
 
 resource "aws_ecr_repository" "app" {
-  name                 = local.name
-  image_tag_mutability = "MUTABLE"
+  name = local.name
+
+  # IMMUTABLE means a tag can never be overwritten, which forces uniquely
+  # tagged images. `make echo-image` already stamps the short git SHA, so this
+  # costs nothing -- but pushing a fixed tag like `latest` twice will be
+  # rejected, and that is the point.
+  image_tag_mutability = "IMMUTABLE"
   force_delete         = true
 
   image_scanning_configuration {

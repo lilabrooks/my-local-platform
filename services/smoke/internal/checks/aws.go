@@ -65,7 +65,7 @@ func S3(cfg platform.Config) Check {
 		if err != nil {
 			return "", fmt.Errorf("get object: %w", err)
 		}
-		defer out.Body.Close()
+		defer func() { _ = out.Body.Close() }()
 
 		got, err := io.ReadAll(out.Body)
 		if err != nil {

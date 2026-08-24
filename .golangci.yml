@@ -1,0 +1,31 @@
+# golangci-lint configuration.
+#
+# Defaults, which is what found real unchecked errors here. Every finding it
+# reported has been fixed rather than excluded -- deferred Close calls now drop
+# their error with an explicit `_ =`, which states the intent instead of
+# leaving it ambiguous.
+#
+# errcheck's `check-blank` is deliberately OFF (the default). Turning it on
+# flags `_ = x.Close()` too, which punishes exactly the explicit-discard
+# pattern the fixes above adopted. It was tried and reverted.
+version: "2"
+
+linters:
+  default: standard
+
+  exclusions:
+    generated: lax
+    rules:
+      # A failed cleanup in a test surfaces as the next test failing, not as a
+      # silent production bug.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt

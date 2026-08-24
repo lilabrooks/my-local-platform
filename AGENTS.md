@@ -52,11 +52,25 @@ harness tracks.
 Run what the change touches. All of these are free and local:
 
 ```bash
-make lint          # yaml, shell, markdown, actions, docker, terraform, secrets
+make lint          # 10 checks: go, yaml, shell, md, actions, docker, tf, security, secrets
 make test          # Go tests across all three modules
 make k8s-validate  # manifest invariants
 make smoke         # end-to-end against the running local stack
 ```
+
+Two linting details that will waste your time otherwise:
+
+- **`trivy` ignore directives must be the LAST comment line before a resource.**
+  Prose between the directive and the resource silently disables it, as does a
+  reason that wraps onto a second line. The directive also has to sit on the
+  resource trivy anchors the finding to, which for S3 encryption is the
+  `aws_s3_bucket_server_side_encryption_configuration`, not the bucket.
+- **Do not turn on errcheck's `check-blank`.** It flags `_ = x.Close()`, which
+  is the explicit-discard pattern this repo uses deliberately. Tried, reverted.
+
+Accepted security findings are annotated inline with the reason. If you add a
+`#trivy:ignore:`, say why in the comment above it -- an unexplained suppression
+is worse than the finding.
 
 `make smoke` needs the stack up (`make up`). CI runs all of these.
 
