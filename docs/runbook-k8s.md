@@ -34,8 +34,33 @@ make k8s-apply-local
 make argocd-install REPO_URL=https://github.com/<you>/my-local-platform
 ```
 
-For a private repo, ArgoCD also needs credentials — `argocd repo add` with a
-token, or a `repo-creds` Secret.
+### Private repositories
+
+This repository is private, so ArgoCD cannot clone it anonymously. Without
+credentials the applications report:
+
+```text
+failed to list refs: authentication required: Repository not found.
+```
+
+One command fixes it:
+
+```bash
+make argocd-repo-creds
+```
+
+That generates a **read-only SSH deploy key**, registers it on the GitHub
+repository, stores the private key in an ArgoCD Secret, and repoints the
+Applications at the SSH URL.
+
+A deploy key rather than a personal access token, deliberately: a deploy key is
+scoped to this one repository, while a PAT with `repo` scope can read and write
+every repository you own. Read-only rather than read-write for the same reason
+— ArgoCD only ever pulls, and a writable key sitting in a cluster is a way for
+a compromised workload to rewrite your git history.
+
+The private key is written to `~/.ssh/` and into the cluster. It never enters
+the repository.
 
 ## The UI
 

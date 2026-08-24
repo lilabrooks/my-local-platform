@@ -100,8 +100,9 @@ make argocd-install  # ArgoCD + app-of-apps
 make argocd-ui       # https://localhost:8081
 ```
 
-ArgoCD pulls from a git URL, so the sync loop needs this repository pushed to
-GitHub. Until then `make k8s-apply-local` applies the same manifests directly.
+ArgoCD pulls from a git URL. This repository is private, so ArgoCD needs a
+read-only deploy key before it can sync — `make argocd-repo-creds` sets that up.
+`make k8s-apply-local` applies the same manifests directly, without git.
 **[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the details.
 
 ## Real AWS

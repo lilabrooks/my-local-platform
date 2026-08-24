@@ -125,6 +125,10 @@ echo-image: ## Build the echo image and load it into the cluster
 argocd-install: ## Install ArgoCD and register the app-of-apps
 	REPO_URL=$(REPO_URL) ./k8s/argocd/install.sh
 
+.PHONY: argocd-repo-creds
+argocd-repo-creds: ## Give ArgoCD read access to this private repo (deploy key)
+	./k8s/argocd/repo-creds.sh
+
 .PHONY: argocd-password
 argocd-password: ## Print the initial ArgoCD admin password
 	@kubectl -n argocd get secret argocd-initial-admin-secret \

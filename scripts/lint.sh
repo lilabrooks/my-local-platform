@@ -104,16 +104,35 @@ else
 fi
 
 if has_docker; then
+  # Cache the downloaded ruleset between runs. Without this every run refetches
+  # the plugin from the GitHub API, which is slow and rate-limited.
+  TFLINT_CACHE="${TMPDIR:-/tmp}/mlp-tflint-plugins"
+  mkdir -p "$TFLINT_CACHE"
+
   lint_fail=0 lint_out=""
   for stack in infra/terraform/bootstrap infra/terraform/envs/dev; do
-    out=$(docker run --rm -v "$PWD":/data -w "/data/$stack" \
+    # --init is NOT silenced. Hiding it once turned a GitHub 504 into an empty
+    # failure with no cause, which cost more time than the flake itself.
+    out=$(docker run --rm \
+      -v "$PWD":/data -v "$TFLINT_CACHE":/root/.tflint.d \
+      -w "/data/$stack" \
       -e TFLINT_CONFIG_FILE=/data/.tflint.hcl \
       --entrypoint sh ghcr.io/terraform-linters/tflint:latest \
-      -c 'tflint --init >/dev/null 2>&1 && tflint --format compact' 2>&1) || {
-        lint_fail=1; lint_out="${lint_out}\n${stack}:\n${out}"
+      -c 'tflint --init && tflint --format compact' 2>&1) || {
+        lint_fail=1
+        lint_out="${lint_out}${stack}:
+${out}
+"
       }
   done
-  report "tflint" "$lint_fail" "$lint_out"
+
+  # A plugin download failure is the network, not the code. Say so, because the
+  # fix is "retry", not "edit terraform".
+  if [ "$lint_fail" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'Failed to fetch GitHub releases'; then
+    skip "tflint" "plugin download failed (GitHub API); retry when it recovers"
+  else
+    report "tflint" "$lint_fail" "$lint_out"
+  fi
 else
   skip "tflint" "needs docker"
 fi

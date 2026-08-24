@@ -27,6 +27,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: ${{ matrix.module }}/go.mod
+          # Without this, setup-go looks for go.sum at the repo root and warns
+          # "Dependencies file is not found". go.mod is a valid cache key and
+          # always exists -- services/echo has no go.sum, being stdlib-only.
+          cache-dependency-path: ${{ matrix.module }}/go.mod
 
       - name: gofmt
         run: |
