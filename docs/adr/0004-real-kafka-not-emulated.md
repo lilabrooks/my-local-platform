@@ -46,6 +46,16 @@ Topics are created explicitly by `local/bootstrap/kafka-topics.sh`, with
 `KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"`, so a typo in a topic name surfaces
 as an error rather than silently creating a new topic.
 
+## Known defect
+
+The `kafka` check consumes from the earliest offset with a fresh group id, so
+it replays the entire topic before reaching its own marker and slows down as
+`mlp.events` grows. With 60,001 messages it times out; on a clean topic it
+passes in ~10s. Tracked in
+[backlog.md](../backlog.md) and
+[issue #1](https://github.com/lilabrooks/my-local-platform/issues/1), to be
+fixed alongside the first application that produces to this topic.
+
 ## Verification
 
 The `kafka` and `rabbitmq` checks in `services/smoke` each produce a message

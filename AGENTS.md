@@ -115,6 +115,15 @@ YAML those tests read.
 - **Real AWS requires `MLP_USE_REAL_AWS=1`.** An empty `AWS_ENDPOINT_URL` means
   local, deliberately, so a stray `export` cannot hit a live account.
 
+## Known defects
+
+[docs/backlog.md](docs/backlog.md) lists deferred work with the reason it was
+deferred and what "done" means. Read it before assuming a failure is new.
+
+One that will bite an app author specifically: the Kafka smoke check replays
+the topic from the earliest offset, so it slows down as `mlp.events` grows and
+eventually times out. Harmless today, real once something produces at volume.
+
 ## Secrets
 
 Never commit credentials. `make lint` runs `gitleaks` over full history. The
