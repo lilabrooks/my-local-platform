@@ -90,7 +90,7 @@ services:
   # control plane. floci's RDS is there when you want to learn the RDS *API*.
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     container_name: mlp-postgres
     profiles: [core, all]
     ports:
@@ -100,7 +100,13 @@ services:
       POSTGRES_PASSWORD: platform
       POSTGRES_DB: platform
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      # Postgres 18 changed the expected mount point. The image now puts data
+      # in a major-version subdirectory (/var/lib/postgresql/18/docker) so that
+      # `pg_upgrade --link` can work across versions without crossing a mount
+      # boundary. Mounting the old /var/lib/postgresql/data path makes 18 exit 1
+      # with "there appears to be PostgreSQL data in ... (unused mount/volume)".
+      # See docker-library/postgres#1259.
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
       interval: 5s
@@ -155,7 +161,7 @@ services:
   # own CLI (docker exec mlp-kafka /opt/kafka/bin/...) covers most needs.
   #   docker compose --profile messaging --profile tools up -d
   kafka-ui:
-    image: kafbat/kafka-ui:v1.2.0
+    image: kafbat/kafka-ui:v1.5.0
     container_name: mlp-kafka-ui
     profiles: [tools, all]
     mem_limit: 512m
@@ -248,7 +254,12 @@ services:
 
 volumes:
   floci-data:
-  pg-data:
+  # Renamed from pg-data at the Postgres 18 upgrade. The old volume holds a
+  # 17-format cluster at its root, which 18 refuses to read at the new mount
+  # point, so reusing the name would break `git pull && make up` with a wall of
+  # text. A new name makes the upgrade a no-op; the old volume is orphaned and
+  # safe to delete:  docker volume rm mlp_pg-data
+  postgres-data:
   kafka-data:
   rabbit-data:
   prom-data:
