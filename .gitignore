@@ -36,3 +36,13 @@ vendor/
 
 # Local scratch
 tmp/
+
+# Agent tooling caches -- machine-local indexes, not shareable state.
+# .codegraph/ has its own .gitignore that keeps only that file.
+.token-savior-cache.json
+.semble/
+.aider*
+
+# Claude Code local overrides. .claude/settings.json IS committed (shared
+# project config); settings.local.json is personal and is not.
+.claude/settings.local.json

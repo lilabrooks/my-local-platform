@@ -147,6 +147,27 @@ run neither way reports `SKIP` rather than passing silently.
 | Terraform | fmt + tflint | formatting, deprecated syntax, invalid values |
 | Secrets | gitleaks | credentials committed to history |
 
+## Agent tooling
+
+The repository declares its own MCP servers in `.mcp.json`, so a fresh clone
+gets the same code-intelligence tooling rather than depending on whatever each
+machine happens to have configured:
+
+| Server | Transport | Use |
+|---|---|---|
+| `codegraph` | stdio | symbol source, call paths, blast radius (`.codegraph/` is indexed) |
+| `semble` | stdio | semantic search when the symbol name is unknown |
+| `token-savior` | stdio | change impact, affected tests, routes, env usage |
+| `parallel-search` | http | web search and page fetch |
+
+`.claude/launch.json` adds attach-only browser targets for the stack's web UIs,
+so an agent can open Grafana or the ArgoCD UI against a running stack.
+
+**[AGENTS.md](AGENTS.md)** carries the working rules — cost guardrails, which
+lookup tool to reach for, how to verify a change, and the traps that have
+already caught someone. `CLAUDE.md` points at it so there is one source of
+truth rather than per-agent copies.
+
 ## Requirements
 
 Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl. The
