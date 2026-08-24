@@ -44,8 +44,10 @@ jobs:
 
       # go vet is a thin net; this adds errcheck, staticcheck, unused and
       # ineffassign. Config lives at the repo root.
+      # action v9, not v6: v6 rejects golangci-lint v2 outright. The linter
+      # version matches the one pinned locally so CI and `make lint` agree.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.13.1
           working-directory: ${{ matrix.module }}
@@ -173,8 +175,12 @@ jobs:
       # tflint says the Terraform is valid; trivy says whether it is safe.
       # .terraform/ is skipped -- it holds vendored upstream modules.
       - name: trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          # Pinned to the version the findings were triaged against. The
+          # action defaults to an older trivy, and a scanner version drifting
+          # between local and CI is how "passes locally" happens.
+          version: v0.74.0
           scan-type: fs
           scan-ref: .
           scanners: misconfig,secret
