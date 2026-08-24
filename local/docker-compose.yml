@@ -1,8 +1,19 @@
 # Local platform stack.
 #
-# Profiles let you bring up only what a given task needs, which keeps startup
-# fast and logs readable. Measured idle footprint of the full stack is ~1 GB
-# across all nine containers, so memory is not the binding constraint:
+# Profiles let you bring up only what a given task needs. Memory IS a real
+# constraint under sustained use, which an early measurement of this stack
+# missed by sampling 46 seconds after startup:
+#
+#   profile      sustained
+#   core             ~140 MB   floci + postgres
+#   messaging        ~660 MB   kafka + rabbitmq
+#   tools            ~285 MB   kafka-ui (optional; needs messaging)
+#   obs              ~490 MB   collector + prometheus + tempo + grafana
+#   ------------------------------------------------------------------
+#   all            ~1,570 MB
+#
+# A local minikube (`make k8s-up`) adds ~1.8 GB on top, which makes it the
+# single largest consumer -- `make k8s-down` when not doing GitOps work.
 #
 #   make up-core      floci (AWS surface) + postgres
 #   make up-messaging + kafka, kafka-ui, rabbitmq
@@ -110,6 +121,10 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       CLUSTER_ID: mlp-local-cluster-0001
+      # The image default is -Xmx1G -Xms1G. -Xms PRE-COMMITS the heap, so the
+      # broker trends to ~1GiB RSS no matter how little traffic it sees.
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+    mem_limit: 1g
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
@@ -123,10 +138,14 @@ services:
       retries: 20
       start_period: 20s
 
+  # Own profile, not `messaging`: this is a 285 MB JVM UI, and the broker's
+  # own CLI (docker exec mlp-kafka /opt/kafka/bin/...) covers most needs.
+  #   docker compose --profile messaging --profile tools up -d
   kafka-ui:
     image: kafbat/kafka-ui:v1.2.0
     container_name: mlp-kafka-ui
-    profiles: [messaging, all]
+    profiles: [tools, all]
+    mem_limit: 512m
     ports:
       - "8080:8080"
     environment:

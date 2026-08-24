@@ -13,14 +13,29 @@ take a few minutes while images download.
 
 ## Profiles
 
-The full stack idles at roughly 1 GB across all nine containers, so it fits a
-default Docker Desktop allocation comfortably. Profiles are about startup time
-and signal, not memory -- bring up only what you need:
+Profiles exist because memory is a real constraint. An earlier note here
+claimed the stack idles at ~1 GB and that memory was not the binding factor --
+that was measured 46 seconds after startup and was wrong. Under sustained use
+the JVM services grow substantially:
+
+| Profile | Sustained | Contains |
+|---|---|---|
+| `core` | ~140 MB | floci, postgres |
+| `messaging` | ~660 MB | kafka, rabbitmq |
+| `tools` | ~285 MB | kafka-ui (needs `messaging`) |
+| `obs` | ~490 MB | collector, prometheus, tempo, grafana |
+| **all** | **~1.6 GB** | everything above |
+
+A local minikube adds **~1.8 GB** on top, making it the single largest
+consumer. `make k8s-down` when you are not doing GitOps work.
+
+`make mem` prints current usage. Bring up only what you need:
 
 | Command | Starts |
 |---|---|
 | `make up-core` | floci (AWS surface), Postgres |
-| `make up-messaging` | Kafka, Kafka UI, RabbitMQ |
+| `make up-messaging` | Kafka, RabbitMQ |
+| `make up-tools` | adds Kafka UI |
 | `make up-obs` | OTel Collector, Prometheus, Tempo, Grafana |
 | `make up` | everything |
 

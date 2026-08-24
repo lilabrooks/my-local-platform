@@ -14,7 +14,7 @@ AWS_PROFILE_NAME ?= aws-public-change-feed
 # ---------------------------------------------------------------------------
 
 .PHONY: up
-up: ## Start the whole local stack (~1GB idle across 9 containers)
+up: ## Start everything (~1.6GB sustained; see docs/runbook-local.md)
 	$(COMPOSE) --profile all up -d
 	$(MAKE) seed
 
@@ -24,9 +24,17 @@ up-core: ## Start floci (AWS surface) + postgres only
 	./local/bootstrap/seed.sh
 
 .PHONY: up-messaging
-up-messaging: ## Start Kafka, Kafka UI and RabbitMQ
+up-messaging: ## Start Kafka and RabbitMQ (~660MB)
 	$(COMPOSE) --profile messaging up -d
 	./local/bootstrap/kafka-topics.sh
+
+.PHONY: up-tools
+up-tools: ## Add Kafka UI (~285MB; needs the messaging profile)
+	$(COMPOSE) --profile messaging --profile tools up -d
+
+.PHONY: mem
+mem: ## Show what the stack is actually using right now
+	@docker stats --no-stream --format '{{.MemUsage}}\t{{.Name}}' | sort -h -r
 
 .PHONY: up-obs
 up-obs: ## Start OTel collector, Prometheus, Tempo, Grafana

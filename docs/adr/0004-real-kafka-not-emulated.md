@@ -27,8 +27,18 @@ RabbitMQ management console on `:15672` -- and the broker's own CLI scripts via
 `docker exec`.
 
 The cost is more containers to run and reason about, which is why the compose
-file is split into profiles. Memory turned out not to be the issue: the full
-stack idles at ~1 GB, with Kafka the largest single consumer at ~330 MB. When the goal shifts to learning MSK's control
+file is split into profiles.
+
+Memory is a genuine cost, and an earlier version of this ADR understated it.
+It claimed the stack idles at ~1 GB with Kafka at ~330 MB, measured 46 seconds
+after startup. After four hours Kafka alone had reached **876 MB**, because the
+`apache/kafka` image defaults to `-Xmx1G -Xms1G` and `-Xms` pre-commits the
+heap -- the broker trends toward 1 GB regardless of traffic.
+
+Setting `KAFKA_HEAP_OPTS=-Xmx512m -Xms256m` brings it to **~460 MB** while
+producing and consuming 60,000 messages, a 48% reduction with no functional
+loss at this scale. Raise it if a workload actually needs more; `mem_limit: 1g`
+is a backstop, not a target. When the goal shifts to learning MSK's control
 plane specifically (cluster provisioning, IAM auth, configuration revisions),
 floci's MSK emulation or the real thing via Terraform is the right tool.
 
