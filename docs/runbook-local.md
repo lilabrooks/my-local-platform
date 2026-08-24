@@ -52,9 +52,33 @@ consumer. `make k8s-down` when you are not doing GitOps work.
 | RabbitMQ UI | http://localhost:15672 | guest/guest |
 | Postgres | localhost:5432 | platform/platform |
 | OTLP gRPC | localhost:4317 | none |
+| OTLP HTTP | localhost:4318 | none |
+| Collector metrics | localhost:8889 | none |
 | Prometheus | http://localhost:9090 | none |
 | Tempo | http://localhost:3200 | none |
 | Grafana | http://localhost:3000 | anonymous, admin role |
+
+## floci and the Docker socket
+
+The base compose file does **not** give floci the Docker socket. That mount
+grants a container effective root on the host, and everything the smoke checks
+use — S3, SNS, SQS, SES, Secrets Manager — works without it.
+
+floci's *container-backed* services do need it, because they start real sibling
+containers: **RDS, EKS, Lambda, MSK, ElastiCache, OpenSearch**. Without the
+socket they fail with a docker-java `UnixSocket` error and no container appears.
+
+Opt in only while you need them:
+
+```bash
+make up-core-containers
+```
+
+## Other make targets
+
+`make help` lists everything. Beyond the ones above: `make fmt`, `make vet`,
+`make tidy` for Go housekeeping, `make ps` and `make logs SVC=<name>` for
+inspecting the stack, and `make mem` for current memory use.
 
 ## Talking to the local AWS surface
 
@@ -109,8 +133,23 @@ floci volume.
 **Kafka check is slow (~10s).** Expected. The consumer uses a fresh group id
 each run and waits out the initial group-join.
 
-**Grafana shows no traces.** Tempo's ingester takes ~15-20 seconds after start
-before it reports ready. Check `curl http://localhost:3200/ready`.
+**Grafana shows no traces.** Three separate causes, in order of likelihood:
+
+1. **Tempo 3.x search needs an explicit time range.** A bare
+   `/api/search?tags=...` returns `{"traces":[]}` even when traces exist, which
+   looks like data loss and is not. Pass `start` and `end` as unix seconds:
+
+   ```bash
+   NOW=$(date +%s)
+   curl -sS "http://localhost:3200/api/search?tags=service.name%3Dsmoke&start=$((NOW-600))&end=${NOW}"
+   ```
+
+2. **The collector's connection to Tempo goes stale if Tempo restarts.** The
+   collector logs `no children to pick from` and retries forever.
+   `docker compose -f local/docker-compose.yml --profile obs restart otel-collector`.
+
+3. Tempo takes ~5-20 seconds after start to report ready. Check
+   `curl http://localhost:3200/ready`.
 
 **`otel-collector` container exits immediately.** Almost always a config error;
 `docker logs mlp-otel-collector` states it plainly. If you enabled the Datadog

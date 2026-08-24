@@ -51,6 +51,7 @@ docs/adr/       why each choice was made, and what was verified
 | Component | Local | Real AWS |
 |---|---|---|
 | Object storage | floci S3 | S3 |
+| Container-backed AWS | floci RDS/EKS (opt-in socket) | the real services |
 | Pub/sub + queues | floci SNS/SQS | SNS + SQS with a DLQ |
 | Email | floci SES | SES |
 | Event streaming | Apache Kafka (KRaft) | MSK, or self-managed |

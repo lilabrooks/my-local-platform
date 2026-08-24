@@ -1,0 +1,23 @@
+# Overlay: give floci access to the Docker socket.
+#
+# Only needed for floci's container-backed AWS services, which start real
+# sibling containers rather than emulating in-process:
+#
+#   RDS, EKS, Lambda, MSK, ElastiCache, OpenSearch, Neptune, DocumentDB
+#
+# The base compose file deliberately omits this. A container with the Docker
+# socket can start a privileged container that mounts the host filesystem, so
+# it is effective root on this machine -- worth granting on purpose and for a
+# bounded period, not by default.
+#
+#   docker compose -f local/docker-compose.yml \
+#                  -f local/docker-compose.floci-containers.yml \
+#                  --profile core up -d
+#
+# Everything the smoke checks use (S3, SNS, SQS, SES, Secrets Manager) works
+# WITHOUT this file.
+
+services:
+  floci:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -1,3 +1,15 @@
+# Tempo 3.x.
+#
+# The top-level `ingester` and `compactor` blocks that 2.x used were removed in
+# 3.0 -- the ingest path is now a "live-store" -- and leaving them in makes
+# Tempo refuse to start:
+#
+#   failed parsing config: field ingester not found in type app.Config
+#
+# Retention is left at the built-in default rather than carried over from the
+# 2.x `compactor.compaction.block_retention: 24h`. Local traces are disposable,
+# and `make clean` drops the volume outright.
+
 stream_over_http_enabled: true
 
 server:
@@ -9,13 +21,6 @@ distributor:
       protocols:
         grpc:
           endpoint: 0.0.0.0:4317
-
-ingester:
-  max_block_duration: 5m
-
-compactor:
-  compaction:
-    block_retention: 24h
 
 storage:
   trace:

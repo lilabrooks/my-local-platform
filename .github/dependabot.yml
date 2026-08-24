@@ -1,0 +1,45 @@
+# Pinning without update automation is just staleness with extra steps. This
+# repo pins every image, action and module deliberately, so something has to
+# propose the bumps -- otherwise pins rot silently, as they had by the time of
+# the first audit (otel-collector was 22 minor versions behind).
+#
+# Grouped so a week produces a few reviewable PRs rather than a dozen.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker-compose
+    directory: "/local"
+    schedule:
+      interval: weekly
+    groups:
+      compose-images:
+        patterns: ["*"]
+
+  - package-ecosystem: terraform
+    directories:
+      - "/infra/terraform/bootstrap"
+      - "/infra/terraform/envs/dev"
+    schedule:
+      interval: weekly
+    groups:
+      terraform:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directories:
+      - "/services/smoke"
+      - "/services/echo"
+      - "/k8s/validate"
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]

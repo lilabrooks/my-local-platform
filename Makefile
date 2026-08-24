@@ -23,6 +23,13 @@ up-core: ## Start floci (AWS surface) + postgres only
 	$(COMPOSE) --profile core up -d
 	./local/bootstrap/seed.sh
 
+.PHONY: up-core-containers
+up-core-containers: ## Start core WITH the docker socket (needed for floci RDS/EKS/Lambda)
+	@echo "Granting floci the docker socket: effective root on this host."
+	@echo "Only needed for floci's container-backed services. See ADR 0002."
+	$(COMPOSE) -f local/docker-compose.floci-containers.yml --profile core up -d
+	./local/bootstrap/seed.sh
+
 .PHONY: up-messaging
 up-messaging: ## Start Kafka and RabbitMQ (~660MB)
 	$(COMPOSE) --profile messaging up -d

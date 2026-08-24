@@ -41,7 +41,7 @@ echo
 if has yamllint; then
   out=$(yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/data -w /data pipelinecomponents/yamllint:latest \
+  out=$(docker run --rm -v "$PWD":/data -w /data pipelinecomponents/yamllint:0.35.10 \
         yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 else
   skip "yamllint" "install with: brew install yamllint"
@@ -56,7 +56,7 @@ while IFS= read -r f; do SCRIPTS+=("$f"); done < <(
 if has shellcheck; then
   out=$(shellcheck "${SCRIPTS[@]}" 2>&1); report "shellcheck" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/mnt -w /mnt koalaman/shellcheck:stable \
+  out=$(docker run --rm -v "$PWD":/mnt -w /mnt koalaman/shellcheck:v0.11.0 \
         "${SCRIPTS[@]}" 2>&1); report "shellcheck" $? "$out"
 else
   skip "shellcheck" "install with: brew install shellcheck"
@@ -76,7 +76,7 @@ fi
 if has actionlint; then
   out=$(actionlint 2>&1); report "actionlint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest 2>&1)
+  out=$(docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12 2>&1)
   report "actionlint" $? "$out"
 else
   skip "actionlint" "needs docker or: brew install actionlint"
@@ -86,7 +86,7 @@ fi
 if has hadolint; then
   out=$(hadolint services/echo/Dockerfile 2>&1); report "hadolint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -i hadolint/hadolint:latest-alpine hadolint - \
+  out=$(docker run --rm -i hadolint/hadolint:v2.15.1-alpine hadolint - \
         < services/echo/Dockerfile 2>&1); report "hadolint" $? "$out"
 else
   skip "hadolint" "needs docker or: brew install hadolint"
@@ -117,7 +117,7 @@ if has_docker; then
       -v "$PWD":/data -v "$TFLINT_CACHE":/root/.tflint.d \
       -w "/data/$stack" \
       -e TFLINT_CONFIG_FILE=/data/.tflint.hcl \
-      --entrypoint sh ghcr.io/terraform-linters/tflint:latest \
+      --entrypoint sh ghcr.io/terraform-linters/tflint:v0.64.0 \
       -c 'tflint --init && tflint --format compact' 2>&1) || {
         lint_fail=1
         lint_out="${lint_out}${stack}:
@@ -167,7 +167,7 @@ if has trivy; then
         --exit-code 1 --quiet . 2>&1)
   report "trivy" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo aquasec/trivy:latest fs \
+  out=$(docker run --rm -v "$PWD":/repo -w /repo aquasec/trivy:0.74.0 fs \
         --scanners misconfig,secret --severity MEDIUM,HIGH,CRITICAL \
         --skip-dirs '**/.terraform' --exit-code 1 --quiet . 2>&1)
   report "trivy" $? "$out"
@@ -180,7 +180,7 @@ fi
 if has gitleaks; then
   out=$(gitleaks detect --source=. --no-banner --redact 2>&1); report "gitleaks" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:latest \
+  out=$(docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:v8.30.1 \
         detect --source=. --no-banner --redact 2>&1); report "gitleaks" $? "$out"
 else
   skip "gitleaks" "needs docker or: brew install gitleaks"

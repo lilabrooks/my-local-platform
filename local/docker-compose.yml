@@ -28,14 +28,28 @@ services:
   # ---------------------------------------------------------------------------
   # AWS surface: S3, SNS, SQS, SES, IAM, Secrets Manager, DynamoDB, ...
   # floci emulates ~80 services on :4566 with no account or auth token.
-  # The docker socket is mounted because its RDS/EKS/Lambda emulation launches
-  # real sibling containers. See docs/adr/0002-floci-over-localstack.md.
+  #
+  # NO docker socket here, deliberately. Mounting /var/run/docker.sock grants
+  # a container effective root on the host, and the services this repo uses
+  # daily -- S3, SNS, SQS, SES, Secrets Manager -- do not need it. Verified by
+  # running floci without it: all five work.
+  #
+  # floci's CONTAINER-BACKED services do need it, because they launch real
+  # sibling containers: RDS, EKS, Lambda, MSK, ElastiCache, OpenSearch.
+  # Without the socket those fail with a docker-java UnixSocket error.
+  # Opt in for exactly as long as you need them:
+  #
+  #   docker compose -f local/docker-compose.yml \
+  #                  -f local/docker-compose.floci-containers.yml \
+  #                  --profile core up -d
+  #
+  # or `make up-core-containers`. See docs/adr/0002-floci-over-localstack.md.
   # ---------------------------------------------------------------------------
   # floci's entrypoint drops privileges to uid 1001 even when the container is
   # started as root, so a root-owned named volume makes persistent storage fail
   # at boot. Fix ownership once, before floci starts.
   floci-init:
-    image: alpine:3
+    image: alpine:3.24
     container_name: mlp-floci-init
     profiles: [core, all]
     user: root
@@ -59,7 +73,6 @@ services:
       FLOCI_STORAGE_MODE: persistent
       FLOCI_STORAGE_PERSISTENT_PATH: /data
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - floci-data:/data
     user: root
     depends_on:
@@ -100,7 +113,7 @@ services:
   # Kafka-compatible, but not the thing you said you wanted to learn.
   # ---------------------------------------------------------------------------
   kafka:
-    image: apache/kafka:4.1.0
+    image: apache/kafka:4.3.1
     container_name: mlp-kafka
     profiles: [messaging, all]
     ports:
@@ -181,7 +194,7 @@ services:
   # DD_API_KEY. Nothing in the app code knows Datadog exists.
   # ---------------------------------------------------------------------------
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.137.0
+    image: otel/opentelemetry-collector-contrib:0.159.0
     container_name: mlp-otel-collector
     profiles: [obs, all]
     # Which config file is used decides whether Datadog receives telemetry.
@@ -197,7 +210,7 @@ services:
       - ./config/otel:/etc/otel:ro
 
   prometheus:
-    image: prom/prometheus:v3.6.0
+    image: prom/prometheus:v3.14.0
     container_name: mlp-prometheus
     profiles: [obs, all]
     ports:
@@ -207,7 +220,7 @@ services:
       - prom-data:/prometheus
 
   tempo:
-    image: grafana/tempo:2.9.0
+    image: grafana/tempo:3.0.3
     container_name: mlp-tempo
     profiles: [obs, all]
     command: ["-config.file=/etc/tempo/tempo.yaml"]
@@ -218,7 +231,7 @@ services:
       - tempo-data:/var/tempo
 
   grafana:
-    image: grafana/grafana:12.2.0
+    image: grafana/grafana:13.2.0
     container_name: mlp-grafana
     profiles: [obs, all]
     ports:

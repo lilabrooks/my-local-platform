@@ -148,7 +148,7 @@ jobs:
         run: npx --yes markdownlint-cli2
 
       - name: actionlint
-        uses: docker://rhysd/actionlint:latest
+        uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color
 
@@ -168,7 +168,7 @@ jobs:
             echo "== $stack"
             docker run --rm -v "$PWD":/data -w "/data/$stack" \
               -e TFLINT_CONFIG_FILE=/data/.tflint.hcl \
-              --entrypoint sh ghcr.io/terraform-linters/tflint:latest \
+              --entrypoint sh ghcr.io/terraform-linters/tflint:v0.64.0 \
               -c 'tflint --init >/dev/null 2>&1 && tflint --format compact'
           done
 
@@ -191,4 +191,4 @@ jobs:
       - name: gitleaks
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
-            zricethezav/gitleaks:latest detect --source=. --no-banner --redact
+            zricethezav/gitleaks:v8.30.1 detect --source=. --no-banner --redact

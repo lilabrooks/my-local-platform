@@ -45,6 +45,22 @@ Two operational gotchas found while wiring this up, both now handled in
 - floci's entrypoint **drops privileges to uid 1001** even when the container
   is started as root, so a root-owned named volume makes persistent storage
   fail at boot. A `floci-init` container fixes ownership first.
+- **The Docker socket is not mounted by default.** floci's own docs mount
+  `/var/run/docker.sock`, which grants a container effective root on the host:
+  anything inside it can start a privileged container that mounts the host
+  filesystem. The services this repo uses daily do not need it, verified by
+  running floci without the socket — S3, SNS, SQS, SES and Secrets Manager all
+  work, healthy in 2 seconds.
+
+  floci's **container-backed** services do need it, because they launch real
+  sibling containers: RDS, EKS, Lambda, MSK, ElastiCache, OpenSearch. Also
+  verified: `rds create-db-instance` without the socket fails inside
+  docker-java's `UnixSocket` and creates nothing.
+
+  So it is opt-in rather than removed —
+  `local/docker-compose.floci-containers.yml`, or `make up-core-containers`.
+  Apps in this repo are expected to use RDS and friends eventually; the point
+  is that the grant is deliberate and bounded, not permanent and implicit.
 - Storage defaults to **in-memory**, so recreating the container silently
   discards every seeded bucket, topic and queue. `FLOCI_STORAGE_MODE=persistent`
   is set explicitly.

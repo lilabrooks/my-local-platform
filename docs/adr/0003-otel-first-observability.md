@@ -57,6 +57,16 @@ Tempo, confirmed by querying it directly rather than by trusting that the SDK
 initialised.
 
 ```bash
-curl -sS "http://localhost:3200/api/search?tags=service.name%3Dsmoke&limit=5"
-# -> 2 traces, root span "smoke.run"
+NOW=$(date +%s)
+curl -sS "http://localhost:3200/api/search?tags=service.name%3Dsmoke&start=$((NOW-600))&end=${NOW}"
+# -> traces with root span "smoke.run"
 ```
+
+Two things about Tempo 3.x that look like data loss and are not:
+
+- **Search needs an explicit time range.** Without `start`/`end` it returns
+  `{"traces":[]}` even when `tempo_distributor_spans_received_total` proves
+  spans arrived. The 2.x form of this command, with no range, silently returns
+  nothing.
+- **The collector's gRPC connection goes stale if Tempo restarts**, logging
+  `no children to pick from` and retrying forever. Restart the collector.
