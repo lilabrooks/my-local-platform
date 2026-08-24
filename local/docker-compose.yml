@@ -90,7 +90,7 @@ services:
   # control plane. floci's RDS is there when you want to learn the RDS *API*.
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     container_name: mlp-postgres
     profiles: [core, all]
     ports:
@@ -155,7 +155,7 @@ services:
   # own CLI (docker exec mlp-kafka /opt/kafka/bin/...) covers most needs.
   #   docker compose --profile messaging --profile tools up -d
   kafka-ui:
-    image: kafbat/kafka-ui:v1.2.0
+    image: kafbat/kafka-ui:v1.5.0
     container_name: mlp-kafka-ui
     profiles: [tools, all]
     mem_limit: 512m
