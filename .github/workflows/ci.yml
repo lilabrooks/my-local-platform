@@ -22,9 +22,9 @@ jobs:
       run:
         working-directory: ${{ matrix.module }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module }}/go.mod
           # Without this, setup-go looks for go.sum at the repo root and warns
@@ -62,9 +62,9 @@ jobs:
       matrix:
         stack: [infra/terraform/bootstrap, infra/terraform/envs/dev]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: 1.15.8
 
@@ -82,9 +82,9 @@ jobs:
     name: end-to-end smoke check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: services/smoke/go.mod
           cache-dependency-path: services/smoke/go.sum
@@ -123,14 +123,14 @@ jobs:
     name: build the echo image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t echo:ci services/echo
 
   lint:
     name: linters
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # gitleaks scans history, which needs more than the default shallow
           # clone of one commit.
@@ -153,7 +153,7 @@ jobs:
           args: -color
 
       - name: hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.4.0
         with:
           dockerfile: services/echo/Dockerfile
 
