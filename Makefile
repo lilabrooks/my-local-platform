@@ -51,6 +51,7 @@ up-obs: ## Start OTel collector, Prometheus, Tempo, Grafana
 seed: ## Create local AWS resources and Kafka topics (idempotent)
 	./local/bootstrap/seed.sh
 	./local/bootstrap/kafka-topics.sh
+	./local/bootstrap/relay-db.sh
 
 .PHONY: down
 down: ## Stop the stack, keep volumes
@@ -92,6 +93,7 @@ smoke: ## Run the end-to-end smoke check against the local stack
 test: ## Run Go tests across all modules
 	cd services/smoke && go test ./...
 	cd services/echo && go test ./...
+	cd services/relay && go test ./...
 	cd k8s/validate && go test -count=1 ./...
 
 .PHONY: tidy

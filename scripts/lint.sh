@@ -140,9 +140,15 @@ fi
 # --- Go ---------------------------------------------------------------------
 # go vet is a thin net. golangci-lint bundles errcheck, staticcheck, unused and
 # ineffassign, which is what actually catches unchecked errors and dead code.
+#
+# Modules are discovered rather than listed. A hardcoded list silently skipped
+# services/relay when it was added, and reported PASS -- a lint run that does
+# not lint the new code is worse than one that fails.
 if has golangci-lint; then
   go_fail=0 go_out=""
-  for mod in services/smoke services/echo k8s/validate; do
+  go_mods=$(find . -name go.mod -not -path './*/.terraform/*' -not -path './*/node_modules/*' \
+            -exec dirname {} \; | sed 's|^\./||' | sort)
+  for mod in $go_mods; do
     out=$(cd "$mod" && golangci-lint run --config ../../.golangci.yml --timeout 5m 2>&1) || {
       go_fail=1
       go_out="${go_out}${mod}:
