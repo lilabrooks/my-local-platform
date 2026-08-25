@@ -63,7 +63,7 @@ docs/adr/       why each choice was made, and what was verified
 
 ## Design decisions
 
-Five choices shape this repository, each recorded with the evidence behind it:
+Six choices shape this repository, each recorded with the evidence behind it:
 
 - **[Local-first, ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)** —
   an always-on version of this stack runs ~$150-250/month on a personal
@@ -79,6 +79,14 @@ Five choices shape this repository, each recorded with the evidence behind it:
 - **[ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)** — pull-based
   deployment onto a dedicated minikube profile, so an existing cluster on the
   machine is left alone.
+
+- **[Kafka over SNS to SQS for delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)** —
+  webhook delivery needs replay, and a queue deletes on acknowledgement. Cost is
+  what argues the other way, and an ephemeral stack never pays it.
+
+That last one covers `relay`, the first application — see
+**[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
+No code is written yet.
 
 ## The smoke service
 
