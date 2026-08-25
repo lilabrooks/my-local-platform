@@ -95,8 +95,8 @@ Concrete enough to test. These are the statements M1 and M2 have to make true.
    the broker is unreachable. It never receives a success for an event that was
    not durably written.
 2. Every accepted event reaches every active subscriber **at least once**, or
-   lands in `mlp.relay.deliveries.dlq` with a recorded reason after roughly 24
-   hours of trying.
+   lands in `mlp.relay.deliveries.dlq` with a recorded reason once its retry
+   budget is spent.
 3. Events for a single tenant are delivered in the order they were accepted.
 4. Every delivery carries a stable id, so a subscriber can dedupe. The contract
    is at-least-once, and the tenant-facing docs must say so -- a subscriber
@@ -132,7 +132,7 @@ Supabase.
 | Signature | HMAC-SHA256, base64-encoded, `v1,` prefix |
 | Timestamp tolerance | 5 minutes, for replay protection |
 | Payload | JSON, `type` plus `data` envelope |
-| Retry schedule | 5s, 5m, 30m, 2h, 5h, 10h, 16h -- give up at roughly 24h |
+| Retry schedule | 8 attempts: immediate, then 5s, 5m, 30m, 2h, 5h, 10h, 10h -- 27h35m5s total |
 | Idempotency key | `webhook-id`, reused by the subscriber |
 
 This closes what was an open question here: what retry budget is defensible, and
@@ -156,7 +156,7 @@ once the backoff logic is written and tested.
 | Setting | Meaning |
 |---|---|
 | `RELAY_RETRY_DELAYS` | Explicit comma-separated durations, e.g. `1s,2s,4s,8s` |
-| `standard` preset | The Standard Webhooks schedule: `5s,5m,30m,2h,5h,10h,16h` |
+| `standard` preset | Svix's published schedule: `5s,5m,30m,2h,5h,10h,10h` |
 | `demo` preset | `1s,2s,4s,8s` -- dead-letters in 15 seconds |
 | `RELAY_RETRY_JITTER` | On by default; off makes tests deterministic |
 
@@ -169,12 +169,16 @@ Four rules that keep the surface honest:
    dead-lettering is a fact an operator can read rather than compute.
 3. **Invalid schedules fail at startup** -- empty, negative, or unparseable.
 4. **A schedule longer than the consumer can survive is also rejected at
-   startup.** This is the constraint worth knowing about: a consumer sleeping
-   between retries still holds its partitions, and Kafka evicts one that does
-   not poll within `max.poll.interval.ms`. The `demo` preset fits comfortably;
-   the `standard` preset does not, and running it needs the parking mechanism
-   described in [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-consumer-group-liveness).
-   Rejecting it loudly beats being evicted from the group mid-retry.
+   startup.** A consumer sleeping between retries holds its partitions for the
+   whole wait, so nothing else on that partition moves — and a rebalance during
+   the wait reassigns the delivery, because the coordinator only allows
+   `RebalanceTimeout` (30s in `segmentio/kafka-go`) to rejoin. KEDA scaling
+   makes rebalances routine, so this is not a rare case.
+
+   `demo` totals 15s and passes. `standard` totals 27h35m5s and does not;
+   running it needs the parking mechanism in
+   [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-consumer-group-liveness).
+   Failing at startup beats losing the delivery mid-retry.
 
 ## The demo
 

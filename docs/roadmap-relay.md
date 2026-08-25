@@ -157,8 +157,8 @@ in; it arrives at a subscriber; a refusing subscriber sends it to the DLQ.
     [goal-relay.md](goal-relay.md#the-schedule-is-configuration-never-a-constant).
 
     M2 needs the DLQ reached in seconds while someone is watching, and the
-    spec's budget is roughly 24 hours. Retrofitting this after the backoff logic
-    is written and tested is the expensive version.
+    spec's budget is 27h35m5s. Retrofitting this after the backoff logic is
+    written and tested is the expensive version.
 - **`services/sink`** -- a test subscriber whose latency and failure rate are
   env-configured. Not a testing hack: a slow subscriber is what makes M2 work,
   so it is a first-class component.
