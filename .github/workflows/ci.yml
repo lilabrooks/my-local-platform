@@ -95,17 +95,28 @@ jobs:
           go-version-file: services/smoke/go.mod
           cache-dependency-path: services/smoke/go.sum
 
-      - name: Start core, messaging and apps
+      # Order matters. relay-deliver joins a consumer group at startup, and a
+      # group that joins before its topic exists is assigned no partitions.
+      # relay sets WatchPartitionChanges so it recovers anyway, but starting
+      # the infrastructure and its data before the services that consume them
+      # is the honest ordering -- and it keeps this job from depending on that
+      # recovery working.
+      - name: Start core and messaging
         run: |
           docker compose -f local/docker-compose.yml \
-            --profile core --profile messaging --profile apps \
-            up -d --build --wait --wait-timeout 600
+            --profile core --profile messaging up -d --wait --wait-timeout 300
 
       - name: Seed AWS resources, Kafka topics and relay subscriptions
         run: |
           ./local/bootstrap/seed.sh
           ./local/bootstrap/kafka-topics.sh
           ./local/bootstrap/relay-db.sh
+
+      - name: Start relay and the sink
+        run: |
+          docker compose -f local/docker-compose.yml \
+            --profile core --profile messaging --profile apps \
+            up -d --build --wait --wait-timeout 600
 
       # The observability profile is deliberately left out: the smoke service
       # treats tracing as best effort, so its absence must not fail the run.
