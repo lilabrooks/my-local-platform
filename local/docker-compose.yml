@@ -9,6 +9,7 @@
 #   messaging        ~660 MB   kafka + rabbitmq
 #   tools            ~285 MB   kafka-ui (optional; needs messaging)
 #   obs              ~490 MB   collector + prometheus + tempo + grafana
+#   apps              ~40 MB   relay ingest + deliver + sink (built from source)
 #   ------------------------------------------------------------------
 #   all            ~1,570 MB
 #
@@ -18,6 +19,7 @@
 #   make up-core      floci (AWS surface) + postgres
 #   make up-messaging + kafka, kafka-ui, rabbitmq
 #   make up-obs       + otel-collector, prometheus, grafana, tempo
+#   make up-apps      + relay and sink (needs core and messaging)
 #   make up           everything
 #
 # Every image is pinned. Floating :latest tags are how local stacks rot.
@@ -251,6 +253,83 @@ services:
     volumes:
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
+
+  # ---------------------------------------------------------------------------
+  # relay -- the webhook delivery service, and the sink it delivers to.
+  #
+  # Own profile: these are built from source rather than pulled, so `make up`
+  # should not pay for them unless you are working on relay.
+  #
+  #   docker compose --profile core --profile messaging --profile apps up -d
+  #   make up-apps
+  #
+  # No container HEALTHCHECK on any of the three: they ship on scratch, which
+  # has no shell to run one with. /healthz and /readyz exist for Kubernetes,
+  # which probes over HTTP and needs nothing inside the image.
+  # ---------------------------------------------------------------------------
+  relay-ingest:
+    build:
+      context: ../services/relay
+    image: mlp-relay:dev
+    container_name: mlp-relay-ingest
+    profiles: [apps, all]
+    mem_limit: 128m
+    ports:
+      - "8082:8080"
+    environment:
+      RELAY_MODE: ingest
+      # The internal listener: kafka advertises localhost:9092 to the host and
+      # kafka:19092 inside this network. A container using the former resolves
+      # to itself.
+      KAFKA_BOOTSTRAP: kafka:19092
+      RELAY_TOPIC: mlp.relay.deliveries
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  relay-deliver:
+    build:
+      context: ../services/relay
+    image: mlp-relay:dev
+    container_name: mlp-relay-deliver
+    profiles: [apps, all]
+    mem_limit: 128m
+    ports:
+      - "8083:8080"   # health only; a consumer has no inbound traffic
+    environment:
+      RELAY_MODE: deliver
+      KAFKA_BOOTSTRAP: kafka:19092
+      RELAY_TOPIC: mlp.relay.deliveries
+      RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
+      DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
+      # demo rather than standard: the published schedule gives up at 27h35m5s,
+      # which is useless to watch. relay refuses to start on `standard` anyway,
+      # because a consumer cannot hold a partition that long -- see
+      # docs/adr/0006-kafka-over-sqs-for-delivery.md.
+      RELAY_RETRY_DELAYS: demo
+      RELAY_DELIVERY_TIMEOUT: 2s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  sink:
+    build:
+      context: ../services/sink
+    image: mlp-sink:dev
+    container_name: mlp-sink
+    profiles: [apps, all]
+    mem_limit: 64m
+    ports:
+      - "8081:8081"
+    environment:
+      # Must match what local/bootstrap/relay-db.sh wrote into the
+      # subscriptions table, or every delivery is rejected 401. Both default to
+      # the same local value; override both together to change it.
+      RELAY_SIGNING_SECRET: ${RELAY_SIGNING_SECRET:-mlp-local-dev-signing-key}
+      # /hooks/flaky always fails, so the dead-letter path is deterministic.
+      SINK_FLAKY_FAIL_RATE: "1"
 
 volumes:
   floci-data:
