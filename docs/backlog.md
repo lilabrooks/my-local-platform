@@ -9,7 +9,35 @@ network access and that agents read alongside [AGENTS.md](../AGENTS.md).
 
 ## Open
 
-Nothing currently open.
+### relay delivery targets are not checked against internal addresses
+
+**Issue:** [#16](https://github.com/lilabrooks/my-local-platform/issues/16) ·
+**Found:** 2026-08-25 · **Address:** before anything lets tenants register their
+own endpoints
+
+`subscriptions.ValidateURL` checks that a delivery URL parses, uses http or
+https, and has a host. Nothing else. A subscription pointing at
+`http://169.254.169.254/latest/meta-data/`, `http://localhost:9200` or an
+RFC1918 address is delivered to, and relay makes those requests from inside the
+cluster network, on a schedule, with retries, signed.
+
+Not exploitable today: subscriptions are operator-seeded configuration in
+`local/bootstrap/relay-db.sh` and nothing writes the table at runtime, so every
+target was chosen by whoever ran the seed. That is the only thing holding it,
+which is why the trigger above is a change rather than a date.
+
+The dynamic half is already closed — `delivery.NewDeliverer` sets `CheckRedirect`
+to refuse, so a subscriber cannot bounce a signed payload elsewhere at request
+time. This is the static half: the configured URL itself.
+
+Done means the resolved IP is checked at dial time, not the hostname string. A
+hostname check is bypassed by DNS resolving to a private address, and
+re-resolving after checking is a TOCTOU gap; `net.Dialer.Control` sees the
+address actually being dialled. A refused target should dead-letter immediately
+rather than retry, since the address will not become public on attempt three.
+The local stack legitimately delivers to `http://sink:8081`, so the check needs
+an allowlist rather than an off switch. Full acceptance criteria are in the
+issue.
 
 ## Resolved
 
