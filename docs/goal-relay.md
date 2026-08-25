@@ -193,8 +193,9 @@ deliverable, not a byproduct. Target: **three minutes, scripted as
 5. Point a second subscriber at a sink that always fails. That delivery lands in
    the DLQ with a reason, visible in Kafka UI, while the healthy subscriber is
    unaffected.
-6. Reset the consumer group offset. Everything is delivered again -- the thing a
-   queue could not have done.
+6. `make relay-replay SINCE=10m`. Everything in the window is delivered again --
+   the thing a queue could not have done. `make relay-replay-verify` asserts it,
+   and CI runs that on every push.
 
 Steps 2 through 4 are the part that is hard to fake, and step 6 is the part that
 justifies [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md).
@@ -219,6 +220,11 @@ A claim not covered by one of these is a claim this project has not earned.
   low volume, SQS FIFO or Postgres would likely be cheaper and simpler.
 - **Competing with a real webhook product** on features. Replay, retry, DLQ and
   ordering are the interesting quarter of one.
+- **Authenticating anyone.** `tenant_id` is an unvalidated string in the request
+  body, so whoever can reach ingest can publish as any tenant. Per-tenant
+  ordering is real; per-tenant *isolation* is nominal until a caller has to
+  prove who it is. Worth stating because ordering-per-tenant is a headline
+  property and the tenant is currently self-asserted.
 - **High throughput.** Correctness and observable behaviour under backpressure
   matter here; records per second do not.
 
