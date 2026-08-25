@@ -174,19 +174,33 @@ func (s RetrySchedule) jittered(d time.Duration, frac float64) time.Duration {
 // So the bound is the rebalance timeout, not a poll interval. Long schedules
 // need the record parked and the offset committed -- tiered retry topics, or a
 // due-at row with a scheduler -- which is M3 work.
-func (s RetrySchedule) ValidateLiveness(rebalanceTimeout time.Duration) error {
+func (s RetrySchedule) ValidateLiveness(rebalanceTimeout, attemptTimeout time.Duration) error {
 	if len(s.Delays) == 0 {
 		return ErrEmptySchedule
 	}
-	if total := s.Total(); total >= rebalanceTimeout {
+	if attemptTimeout <= 0 {
+		return fmt.Errorf("delivery attempt timeout %s must be positive", attemptTimeout)
+	}
+	// Worst case for one record is every attempt timing out with every delay
+	// waited in full. Summing only the delays understates it by the time the
+	// attempts themselves take, which for a short schedule is most of it.
+	worst := s.WorstCase(attemptTimeout)
+	if worst >= rebalanceTimeout {
 		return fmt.Errorf(
-			"retry schedule %q totals %s, which is not under the %s rebalance timeout: "+
-				"a consumer asleep that long cannot rejoin its group, so the delivery is "+
-				"reassigned and redelivered. Use the \"demo\" preset, shorten the schedule, "+
-				"or implement long-retry parking (see docs/adr/0006-kafka-over-sqs-for-delivery.md)",
-			s.Name, total, rebalanceTimeout)
+			"retry schedule %q needs up to %s per record (%s of delays plus %d attempts at %s), "+
+				"which is not under the %s rebalance timeout: a consumer busy that long cannot "+
+				"rejoin its group, so the delivery is reassigned and redelivered. Shorten the "+
+				"schedule, shorten RELAY_DELIVERY_TIMEOUT, or implement long-retry parking "+
+				"(see docs/adr/0006-kafka-over-sqs-for-delivery.md)",
+			s.Name, worst, s.Total(), s.MaxAttempts(), attemptTimeout, rebalanceTimeout)
 	}
 	return nil
+}
+
+// WorstCase is the longest one record can occupy its partition: every delay
+// waited in full, and every attempt running to its timeout.
+func (s RetrySchedule) WorstCase(attemptTimeout time.Duration) time.Duration {
+	return s.Total() + time.Duration(s.MaxAttempts())*attemptTimeout
 }
 
 // String is what gets logged at startup, so the longest an event can sit before
