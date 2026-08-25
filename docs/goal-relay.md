@@ -239,9 +239,14 @@ A claim not covered by one of these is a claim this project has not earned.
   producer code exists.
 - How pods in minikube reach the compose broker. Three viable answers, none
   chosen yet; see the roadmap's M2 risk.
-- Whether the `type` plus `data` envelope Standard Webhooks recommends should be
-  the Kafka record's shape too, or only the HTTP body's. Coupling them is
-  convenient and makes the log's schema an external contract.
+Resolved while building ingest: **the record and the subscriber body are
+deliberately different shapes.** The record carries routing metadata the
+delivery consumer needs — tenant, event id, when it happened — and none of that
+belongs in a subscriber's request body. Coupling them would make the log's
+schema an external contract, so every field the consumer ever needs would become
+a field subscribers can see and depend on. `event.Record` is internal and may
+grow; `event.Payload` is exactly the specification's `type` plus `data`, with a
+test asserting it carries nothing else.
 
 ---
 
