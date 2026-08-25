@@ -90,17 +90,41 @@ on the log.
 2. **Add the relay topics** to `local/bootstrap/kafka-topics.sh`, using the same
    idempotent `topic` helper the existing two use.
 
-3. **Settle the Kafka client.** `services/smoke` uses `segmentio/kafka-go`. MSK
-   IAM auth in M4 needs a SASL/OAUTHBEARER token provider from
-   `aws/aws-msk-iam-sasl-signer-go`. Read that library's exported interface
-   against kafka-go's `sasl.Mechanism` and confirm they compose -- `franz-go`
-   has first-class MSK IAM support if they do not.
+3. **Settle the Kafka client. Resolved on 2026-08-24: stay on
+   `segmentio/kafka-go`, and expect to write a small adapter at M4.**
 
-   Free to check now, expensive to discover at M4, because switching clients
-   touches every producer and consumer in the service.
+   `aws/aws-msk-iam-sasl-signer-go` v1.0.4 exposes
+   `signer.GenerateAuthToken(ctx, region) (string, int64, error)` -- token,
+   expiry in milliseconds, error -- plus variants for a named profile, an
+   assumed role, a credentials provider, and `GenerateAuthTokenFromWebIdentity`,
+   which is the one IRSA needs. The library is client-agnostic; the only worked
+   example in its README is Sarama, through `sarama.SASLTypeOAuth` and an
+   `AccessTokenProvider`.
 
-**Exit:** `make smoke` passes against a topic seeded with 100k messages in under
-15s. `make lint && make test` green.
+   kafka-go ships exactly two SASL mechanisms, `plain` and `scram` -- the whole
+   contents of its `sasl/` directory. **There is no OAUTHBEARER mechanism.** So
+   the two compose only through an adapter this repository would own: an
+   implementation of `sasl.Mechanism` whose `Name()` returns `OAUTHBEARER` and
+   whose `Start()` returns a one-shot state machine emitting the RFC 7628
+   initial client response, `n,,\x01auth=Bearer <token>\x01\x01`, with the token
+   from `GenerateAuthToken`. On the order of 60 lines.
+
+   Staying on kafka-go anyway, for three reasons. It is already the client in
+   `services/smoke`, so one library covers the repository. The adapter is small,
+   bounded, and unit-testable with no MSK cluster involved, because the
+   assertion is the initial-response bytes. And KEDA's own `apache-kafka` scaler
+   is built on kafka-go and authenticates to MSK with IAM, so the combination is
+   demonstrated rather than hoped for.
+
+   Sarama is the fallback if per-connection token refresh turns out to be
+   something kafka-go's interface cannot express. Switching is cheapest before
+   M1 writes producers, which is why this was settled here.
+
+**Exit: met on 2026-08-24.** The `kafka` check runs 206/199/208ms against
+100,007 messages, against 211ms on an empty topic -- flat, where the target was
+merely "under 15s". `make lint` 10/10 and `make test` green. Evidence and
+commands in [ADR 0004](adr/0004-real-kafka-not-emulated.md#verification);
+[backlog #1](backlog.md) moved to Resolved.
 
 ---
 
@@ -279,13 +303,23 @@ that shift, narrow enough to name precisely.
 - MSK Serverless in the existing VPC's private subnets.
 - IRSA or Pod Identity for relay pods **and** the KEDA operator -- both need the
   role, which is its own lesson.
-- KEDA `type: apache-kafka` with `sasl: aws_msk_iam`, `tls: enable`, `awsRegion`.
+- KEDA. **Both** Kafka scalers support MSK IAM, by different routes, and the two
+  spellings are not interchangeable:
 
-  **The older `type: kafka` scaler does not support MSK IAM.** Getting this wrong
-  produces an "unexpected EOF" that reads as a networking fault. It is a
-  documented source of confusion in KEDA's own issue tracker. The `apache-kafka`
-  scaler is marked experimental and is built on `segmentio/kafka-go`, the same
-  client `services/smoke` already uses.
+  | Scaler | Underlying client | MSK IAM configuration |
+  |---|---|---|
+  | `apache-kafka` (experimental) | `segmentio/kafka-go` | `sasl: aws_msk_iam`, `tls: enable`, `awsRegion` |
+  | `kafka` | Sarama | `sasl: oauthbearer` **plus** `saslTokenProvider: aws_msk_iam` |
+
+  An earlier draft of this roadmap said the `kafka` scaler had no MSK IAM
+  support at all. That was true of the 2.12-era documentation and stopped being
+  true with kedacore/keda#5692; re-checked against the KEDA 2.20 docs on
+  2026-08-24. Prefer `apache-kafka` regardless, since it shares kafka-go with
+  the service.
+
+  Mixing the two spellings produces an "unexpected EOF" that reads as a
+  networking fault, which is a documented source of confusion in KEDA's own
+  tracker.
 
 **Exit:** the same `ScaledObject` from M2 scales `relay-deliver` against MSK.
 `terraform destroy` runs clean, `make aws-cost` confirms the meter stopped, and

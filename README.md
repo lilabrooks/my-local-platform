@@ -17,12 +17,12 @@ make smoke
 ```text
 smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
 
-  PASS  s3               32ms  s3://mlp-artifacts/smoke/1787525730971651000.txt round trip
-  PASS  sns->sqs         17ms  fanout delivered smoke-1787525731015236000
-  PASS  ses              24ms  sent message b4be37fb-9614-4a34-8c5e-02aa26220736
-  PASS  kafka         10091ms  mlp.events partition 0 offset 1
-  PASS  rabbitmq          7ms  queue mlp.smoke round trip
-  PASS  postgres         11ms  row 2 on postgres 17.11
+  PASS  s3               18ms  s3://mlp-artifacts/smoke/1787624424137397000.txt round trip
+  PASS  sns->sqs         16ms  fanout delivered smoke-1787624424165875000
+  PASS  ses               4ms  sent message 3254d6c8-84f5-4225-ab89-6e88607344ed
+  PASS  kafka           211ms  mlp.events partition 0 offset 6
+  PASS  rabbitmq         14ms  queue mlp.smoke round trip
+  PASS  postgres         17ms  row 6 on postgres 18.6
 
 all components healthy
 ```
