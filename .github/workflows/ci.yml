@@ -17,7 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [services/smoke, services/echo, k8s/validate]
+        # Kept in step with the modules that exist. This was hardcoded to
+        # smoke/echo/validate, so services/relay and services/sink merged with
+        # a green tick that built none of their code. scripts/lint.sh derives
+        # its list from go.mod for the same reason; a matrix cannot, so adding a
+        # module means adding it here -- and `discover` below fails the build if
+        # anyone forgets.
+        module: [services/smoke, services/echo, services/relay, services/sink, k8s/validate]
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -89,15 +95,17 @@ jobs:
           go-version-file: services/smoke/go.mod
           cache-dependency-path: services/smoke/go.sum
 
-      - name: Start core and messaging
+      - name: Start core, messaging and apps
         run: |
           docker compose -f local/docker-compose.yml \
-            --profile core --profile messaging up -d --wait --wait-timeout 300
+            --profile core --profile messaging --profile apps \
+            up -d --build --wait --wait-timeout 600
 
-      - name: Seed AWS resources and Kafka topics
+      - name: Seed AWS resources, Kafka topics and relay subscriptions
         run: |
           ./local/bootstrap/seed.sh
           ./local/bootstrap/kafka-topics.sh
+          ./local/bootstrap/relay-db.sh
 
       # The observability profile is deliberately left out: the smoke service
       # treats tracing as best effort, so its absence must not fail the run.
@@ -120,11 +128,58 @@ jobs:
         run: docker compose -f local/docker-compose.yml --profile all down -v
 
   image:
-    name: build the echo image
+    name: build the ${{ matrix.service }} image
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [echo, relay, sink]
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t ${{ matrix.service }}:ci services/${{ matrix.service }}
+
+  # The go matrix above cannot be computed from the repository -- GitHub needs
+  # it before any step runs -- so this job checks it after the fact. It exists
+  # because services/relay and services/sink were merged while the matrix still
+  # listed three modules, and CI reported success over code it never built.
+  go-modules-covered:
+    name: every go module is in the build matrix
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -t echo:ci services/echo
+      - name: compare go.mod discovery against the matrix
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          root = pathlib.Path(".")
+          found = sorted(
+              str(p.parent).lstrip("./")
+              for p in root.rglob("go.mod")
+              if ".terraform" not in p.parts and "node_modules" not in p.parts
+          )
+
+          ci = pathlib.Path(".github/workflows/ci.yml").read_text()
+          m = re.search(r"^\s*module: \[(.+?)\]\s*$", ci, re.M)
+          if not m:
+              sys.exit("could not find the go job's module matrix in ci.yml")
+          listed = sorted(x.strip() for x in m.group(1).split(","))
+
+          missing = [x for x in found if x not in listed]
+          stale = [x for x in listed if x not in found]
+
+          if missing:
+              print("These modules have a go.mod but are NOT in the go job matrix.")
+              print("CI would report success without building them:")
+              for x in missing:
+                  print("  " + x)
+          if stale:
+              print("These are in the matrix but have no go.mod:")
+              for x in stale:
+                  print("  " + x)
+          if missing or stale:
+              sys.exit(1)
+          print("matrix covers every module: " + ", ".join(found))
+          PY
 
   lint:
     name: linters

@@ -39,6 +39,15 @@ up-messaging: ## Start Kafka and RabbitMQ (~660MB)
 up-tools: ## Add Kafka UI (~285MB; needs the messaging profile)
 	$(COMPOSE) --profile messaging --profile tools up -d
 
+.PHONY: up-apps
+up-apps: ## Start relay and sink (built from source; brings core and messaging too)
+	docker compose -f local/docker-compose.yml \
+		--profile core --profile messaging --profile apps up -d --build --wait
+	@echo "  relay ingest  http://localhost:8082  (POST /v1/events)"
+	@echo "  relay deliver http://localhost:8083/readyz"
+	@echo "  sink          http://localhost:8081/received"
+	@echo "  run 'make seed' if you have not already -- relay needs its subscriptions"
+
 .PHONY: mem
 mem: ## Show what the stack is actually using right now
 	@docker stats --no-stream --format '{{.MemUsage}}\t{{.Name}}' | sort -h -r
@@ -80,6 +89,9 @@ urls: ## Print the local endpoints
 	@echo "OTLP gRPC       localhost:4317"
 	@echo "Prometheus      http://localhost:9090"
 	@echo "Grafana         http://localhost:3000    (anonymous admin)"
+	@echo "relay ingest    http://localhost:8082    (POST /v1/events; apps profile)"
+	@echo "relay deliver   http://localhost:8083    (/readyz only; apps profile)"
+	@echo "sink            http://localhost:8081    (/received; apps profile)"
 
 # ---------------------------------------------------------------------------
 # Smoke service

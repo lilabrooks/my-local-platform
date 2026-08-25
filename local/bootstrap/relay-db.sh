@@ -9,10 +9,14 @@ PG_CONTAINER="${PG_CONTAINER:-mlp-postgres}"
 PG_USER="${POSTGRES_USER:-platform}"
 PG_DB="${POSTGRES_DB:-platform}"
 
-# Signing secrets are per-subscription and must not be committed. Generate one
-# unless the caller supplies it, and print it so the sink can be pointed at the
-# same value.
-RELAY_SIGNING_SECRET="${RELAY_SIGNING_SECRET:-$(openssl rand -hex 24)}"
+# The signing secret has to match what the sink verifies with, or every
+# delivery is rejected 401. Both this and local/docker-compose.yml default to
+# the same value so `make up && make seed` works with no further setup -- the
+# same reasoning as the postgres and rabbitmq credentials already in compose.
+#
+# It is a local development value, not a secret. Override it here and in the
+# sink's environment together to use something else.
+RELAY_SIGNING_SECRET="${RELAY_SIGNING_SECRET:-mlp-local-dev-signing-key}"
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -62,7 +66,6 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -c \
 
 cat <<EOF
 
-  Signing secret for this seed: $RELAY_SIGNING_SECRET
-  Point the sink at it with RELAY_SIGNING_SECRET=$RELAY_SIGNING_SECRET,
-  or set that variable before running this script to choose your own.
+  Subscriptions signed with: $RELAY_SIGNING_SECRET
+  The sink defaults to the same value. If you override one, override both.
 EOF
