@@ -23,6 +23,7 @@ smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
   PASS  kafka           211ms  mlp.events partition 0 offset 6
   PASS  rabbitmq         14ms  queue mlp.smoke round trip
   PASS  postgres         17ms  row 6 on postgres 18.6
+  PASS  relay           685ms  evt_9b68cf19c73ed58a53d441f25a3bd5cb delivered to /hooks/ok, dead-lettered http://sink:8081/hooks/flaky after 3 attempts
 
 all components healthy
 ```
@@ -36,6 +37,8 @@ local/          docker-compose stack, split into profiles
 services/
   smoke/        Go service that writes to and reads back from every component
   echo/         small HTTP service, the workload ArgoCD deploys
+  relay/        webhook delivery service: ingest to Kafka, deliver with retries
+  sink/         subscriber relay delivers to, deliberately slow or failing
 k8s/
   argocd/       ArgoCD install, AppProject, root Application
   apps/         one Application per workload (app-of-apps)
@@ -56,7 +59,7 @@ docs/adr/       why each choice was made, and what was verified
 | Email | floci SES | SES |
 | Event streaming | Apache Kafka (KRaft) | MSK, or self-managed |
 | Message broker | RabbitMQ | Amazon MQ |
-| Relational | Postgres 17 | RDS (`enable_rds`) |
+| Relational | Postgres 18 | RDS (`enable_rds`) |
 | Kubernetes | minikube (`mlp` profile) | EKS (`enable_eks`) |
 | Deployment | ArgoCD, app-of-apps | same manifests, ECR images |
 | Telemetry | OTel → Prometheus + Tempo + Grafana | OTel → Datadog |
@@ -79,14 +82,14 @@ Six choices shape this repository, each recorded with the evidence behind it:
 - **[ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)** — pull-based
   deployment onto a dedicated minikube profile, so an existing cluster on the
   machine is left alone.
-
 - **[Kafka over SNS to SQS for delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)** —
   webhook delivery needs replay, and a queue deletes on acknowledgement. Cost is
   what argues the other way, and an ephemeral stack never pays it.
 
 That last one covers `relay`, the first application — see
 **[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
-No code is written yet.
+Its MVP is built: `make up-apps` starts it, and `make smoke` exercises the
+whole pipeline end to end.
 
 ## The smoke service
 

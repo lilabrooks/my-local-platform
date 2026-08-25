@@ -164,9 +164,21 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 		// mean anything.
 		CommitInterval:   0,
 		RebalanceTimeout: rebalanceTimeout,
-		MinBytes:         1,
-		MaxBytes:         10e6,
-		MaxWait:          250 * time.Millisecond,
+		// Without this, a consumer that joins before its topic exists is
+		// assigned zero partitions and never notices when they appear -- it
+		// sits in the group consuming nothing, looking healthy. That is
+		// exactly what happened in CI, where kafka-topics.sh runs after
+		// `docker compose up`: the group stabilised with one member and no
+		// assignment, and every event produced afterwards went undelivered.
+		//
+		// Topics are created by local/bootstrap/kafka-topics.sh and auto
+		// creation is off, so a consumer outliving a topic change is a normal
+		// startup ordering, not an exotic case.
+		WatchPartitionChanges:  true,
+		PartitionWatchInterval: 2 * time.Second,
+		MinBytes:               1,
+		MaxBytes:               10e6,
+		MaxWait:                250 * time.Millisecond,
 		// A new group starts at the beginning so nothing already produced is
 		// skipped on first deploy.
 		StartOffset: kafka.FirstOffset,
