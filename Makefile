@@ -45,7 +45,7 @@ up-apps: ## Start relay and sink (built from source; brings core and messaging t
 		--profile core --profile messaging --profile apps up -d --build --wait
 	@echo "  relay ingest  http://localhost:8082  (POST /v1/events)"
 	@echo "  relay deliver http://localhost:8083/readyz"
-	@echo "  sink          http://localhost:8081/received"
+	@echo "  sink          http://localhost:8084/received"
 	@echo "  run 'make seed' if you have not already -- relay needs its subscriptions"
 
 .PHONY: mem
@@ -91,7 +91,7 @@ urls: ## Print the local endpoints
 	@echo "Grafana         http://localhost:3000    (anonymous admin)"
 	@echo "relay ingest    http://localhost:8082    (POST /v1/events; apps profile)"
 	@echo "relay deliver   http://localhost:8083    (/readyz only; apps profile)"
-	@echo "sink            http://localhost:8081    (/received; apps profile)"
+	@echo "sink            http://localhost:8084    (/received; apps profile)"
 
 # ---------------------------------------------------------------------------
 # Smoke service

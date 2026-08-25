@@ -54,7 +54,7 @@ func Load() Config {
 
 		RelayIngestURL: env("RELAY_INGEST_URL", "http://localhost:8082"),
 		RelayDLQTopic:  env("MLP_RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq"),
-		SinkURL:        env("SINK_URL", "http://localhost:8081"),
+		SinkURL:        env("SINK_URL", "http://localhost:8084"),
 
 		RabbitURL:    env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		DatabaseURL:  env("DATABASE_URL", "postgres://platform:platform@localhost:5432/platform?sslmode=disable"),

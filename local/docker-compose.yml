@@ -326,7 +326,9 @@ services:
     profiles: [apps, all]
     mem_limit: 64m
     ports:
-      - "8081:8081"
+      # 8084 on the host, not 8081: `make argocd-ui` port-forwards the
+      # ArgoCD UI to 8081, and the two collide when both are running.
+      - "8084:8081"
     environment:
       # Must match what local/bootstrap/relay-db.sh wrote into the
       # subscriptions table, or every delivery is rejected 401. Both default to
