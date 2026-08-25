@@ -164,30 +164,50 @@ replay -- but that is a secondhand report and should be treated as such.
 
 ### Retry duration is bounded by consumer group liveness
 
-A delivery consumer that sleeps between retries still holds its partition
-assignment, and Kafka evicts a consumer that does not poll within
-`max.poll.interval.ms` -- five minutes by default. So **in-process retry cannot
-span the Standard Webhooks schedule**, whose later intervals run to 16 hours and
-whose budget is roughly 24. A consumer waiting out that tail would be kicked
-from the group, its partitions reassigned, and the delivery redelivered
-elsewhere while it slept.
+A delivery consumer that sleeps between retries holds its partition assignment
+for the whole wait. So **in-process retry cannot span Svix's published schedule**
+-- eight attempts across 27h35m5s -- and the production preset has to be
+rejected rather than merely discouraged.
 
-This is a genuine asymmetry with option B that the driver list above missed. SQS
-visibility timeout extends to 12 hours, so a queue absorbs long retries without
-a second mechanism. On a log, the record must be parked and the offset
-committed. Two ways to do that:
+An earlier version of this section named the wrong mechanism. It said Kafka
+evicts a consumer that does not poll within `max.poll.interval.ms`, five minutes
+by default. That is the Java client's design, and this service uses
+`segmentio/kafka-go`, which has no such setting: a background goroutine
+heartbeats every `HeartbeatInterval` (3s) independently of what the application
+is doing, so a sleeping consumer is **never dropped for being slow**. Caught
+while implementing the startup check that this paragraph justifies.
+
+What actually goes wrong is worse in one way and narrower in another:
+
+- **Nothing else on that partition moves for the entire wait.** The consumer is
+  alive, heartbeating, and holding the assignment. One subscriber that is down
+  stalls every tenant hashing to the same partition -- head-of-line blocking
+  again, on a scale set by the retry budget rather than by one slow request.
+- **A rebalance during the wait is not survivable.** The coordinator gives
+  members `RebalanceTimeout` (30s by default in kafka-go) to rejoin. A consumer
+  asleep in a retry misses it, its partitions are reassigned, and the delivery
+  is redelivered elsewhere. KEDA scaling makes rebalances routine rather than
+  rare, which is precisely the M2 demo.
+
+So the bound is the rebalance timeout, not a poll interval, and it is 30s rather
+than 5 minutes.
+
+This remains a genuine asymmetry with option B that the driver list above
+missed. SQS visibility timeout extends to 12 hours, so a queue absorbs long
+retries without a second mechanism. On a log, the record must be parked and the
+offset committed. Two ways to do that:
 
 - **Tiered retry topics** -- a 5s topic, a 5m topic, a 30m topic, each with a
-  consumer that sleeps within its own poll interval. The conventional Kafka
-  answer.
+  consumer whose sleep fits inside its own rebalance window. The conventional
+  Kafka answer.
 - **A due-at row in Postgres with a scheduler**, which is Centrifuge again,
   arrived at from the opposite direction.
 
 Neither is MVP work. What M1 owes is a config surface that cannot lie: a
-schedule whose total exceeds the poll interval is **rejected at startup**, not
-discovered through consumer eviction under load. The demo profile fits inside a
-single poll interval with room to spare; the production profile does not, and
-enabling it is what forces the mechanism above.
+schedule whose total reaches the rebalance timeout is **rejected at startup**,
+not discovered through reassignment under load. `demo` totals 15s against a 30s
+default and passes; `standard` does not, and enabling it is what forces the
+mechanism above.
 
 **Files that change together.** `local/bootstrap/kafka-topics.sh` (topics),
 `services/relay` (producer and consumer), `services/smoke` (the round-trip
@@ -200,7 +220,7 @@ this choice.
 |---|---|---|
 | Broker unreachable at ingest | Return 503; the tenant retries | Accepting into memory and dropping is the one unrecoverable outcome |
 | Delivery returns 5xx | Retry on the Standard Webhooks schedule, offset uncommitted | At-least-once |
-| Retry budget exhausted (~24h) | Produce to the DLQ with the failure reason, then commit | The event is parked, not lost |
+| Retry budget exhausted | Produce to the DLQ with the failure reason, then commit | The event is parked, not lost |
 | DLQ produce itself fails | Do not commit; the record is redelivered | A duplicate delivery beats a silent loss |
 | Consumer dies after delivering, before commit | The subscriber receives a duplicate | Accepted; every delivery carries a stable `webhook-id` so subscribers can dedupe |
 | One subscriber of several fails | Only that subscriber's delivery is dead-lettered; the offset commits once all subscribers reach a terminal state | Partial success must not replay the successful deliveries |
