@@ -232,36 +232,71 @@ someone.
 
 ## Verification
 
-**Nothing here has been run. This ADR is a proposal, and the claims below are
-the ones that will confirm or break it.**
-
-Checked on 2026-08-24: MSK and SQS pricing against
+Sources checked on 2026-08-24: MSK and SQS pricing against
 <https://aws.amazon.com/msk/pricing/> and two independent calculators; SQS FIFO
 quotas against AWS published limits; KEDA's `aws-sqs-queue` and `apache-kafka`
 scalers against KEDA documentation for 2.12 through 2.21; Segment's figures
 against their Centrifuge post; Stripe and Shopify retry windows against their
 published webhook documentation.
 
-Planned verification, in the order it becomes possible:
+### Replay, the load-bearing supporting claim -- measured 2026-08-25
+
+Driver 3 is the only technical argument that separates this from option B, so
+it is the one that had to be executed rather than described. It was not, through
+the whole of M1, which is why it is recorded here in detail.
 
 ```bash
-make up && make seed && make smoke   # M1: relay round-trip passes
+make up-apps && make seed
+make relay-replay-verify
 ```
 
-- **Replay**, the load-bearing supporting claim: reset the `relay-deliver` group
-  offset and assert every event in the window is redelivered. If this is awkward
-  in practice, driver 3 is weaker than stated and this ADR should be revised
-  rather than defended.
+The check posts events, waits for delivery, **wipes the sink's record of them**
+-- so a redelivery cannot be confused with a memory of the first one -- moves
+the consumer group back in time, and asserts the same `webhook-id`s arrive
+again.
+
+```text
+PASS delivered 3 events
+==> resetting relay-deliver to 2026-08-25T14:13:16.000 UTC (last 2m)
+    partition 7   -> offset 8
+    (11 other partitions -> offset 0)
+==> starting relay-deliver
+PASS every event was delivered again after an offset reset
+
+  events posted and redelivered: 3
+  total delivered in the window:  9
+```
+
+It runs in CI, so the argument is guarded rather than asserted.
+
+Two things the exercise taught that the ADR had not anticipated:
+
+- **Kafka refuses to move a group's offsets while it has members** --
+  "Assignments can only be reset if the group is inactive". Replay therefore
+  costs a consumer restart, which is a real operational property and not
+  obvious from the design. `scripts/relay-replay.sh` handles it rather than
+  leaving it as a trap.
+- **A replay redelivers the whole window, not a selected event.** Nine
+  deliveries for three events under test. That is correct for "resend
+  everything from the last six hours" and wrong for "resend this one", which
+  would need a different mechanism.
+
+Driver 3 holds. Replay cost one shell script and no application code, because
+the log already had the events -- which is the thing option B could not offer.
+
+### Still planned
+
 - **Ordering**: produce a known sequence for one tenant, assert delivery order
   at the sink.
-- **Dead-lettering**: point a subscriber at a sink that always fails, assert the
-  event lands in `mlp.relay.deliveries.dlq` with a reason.
 - **Duplicate on crash**: kill the consumer between delivery and commit, assert
   the subscriber sees the same `webhook-id` twice.
 - **Head-of-line blocking**: degrade one subscriber and measure delivery delay
   for an unrelated tenant on the same partition. This should reproduce Segment's
   first architecture in miniature, and demonstrating it deliberately is more
   useful than avoiding it.
+
+Dead-lettering is covered: the `relay` smoke check asserts a failed delivery
+reaches `mlp.relay.deliveries.dlq` with a reason on every `make smoke`.
 
 ## Rollback
 

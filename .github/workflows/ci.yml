@@ -130,6 +130,12 @@ jobs:
           AWS_SECRET_ACCESS_KEY: test
         run: go run ./cmd/smoke
 
+      # ADR 0006 chose Kafka over SNS-to-SQS because a queue cannot resend what
+      # it has already acknowledged. That argument went unexercised through all
+      # of M1; this is what stops it being a claim.
+      - name: Verify replay redelivers acknowledged events
+        run: ./scripts/verify-replay.sh
+
       - name: Dump container logs on failure
         if: failure()
         run: docker compose -f local/docker-compose.yml --profile all logs --tail=100
