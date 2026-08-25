@@ -18,10 +18,16 @@ type Config struct {
 	SESSender    string
 	KafkaBrokers string
 	KafkaTopic   string
-	RabbitURL    string
-	DatabaseURL  string
-	OTLPEndpoint string
-	ServiceName  string
+	// relay, in the `apps` compose profile. Empty RelayIngestURL disables the
+	// relay check, so `make smoke` still passes on a stack brought up without
+	// that profile.
+	RelayIngestURL string
+	RelayDLQTopic  string
+	SinkURL        string
+	RabbitURL      string
+	DatabaseURL    string
+	OTLPEndpoint   string
+	ServiceName    string
 }
 
 // Load reads configuration, applying defaults that match local/docker-compose.yml.
@@ -45,6 +51,11 @@ func Load() Config {
 		SESSender:    env("MLP_SES_SENDER", "platform@localhost.test"),
 		KafkaBrokers: env("KAFKA_BOOTSTRAP", "localhost:9092"),
 		KafkaTopic:   env("MLP_KAFKA_TOPIC", "mlp.events"),
+
+		RelayIngestURL: env("RELAY_INGEST_URL", "http://localhost:8082"),
+		RelayDLQTopic:  env("MLP_RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq"),
+		SinkURL:        env("SINK_URL", "http://localhost:8081"),
+
 		RabbitURL:    env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		DatabaseURL:  env("DATABASE_URL", "postgres://platform:platform@localhost:5432/platform?sslmode=disable"),
 		OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),

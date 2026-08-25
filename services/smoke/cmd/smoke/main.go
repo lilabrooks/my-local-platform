@@ -51,6 +51,7 @@ func main() {
 		checks.Kafka(cfg),
 		checks.RabbitMQ(cfg),
 		checks.Postgres(cfg),
+		checks.Relay(cfg),
 	}
 
 	// Wrap each check in a span so a run shows up as one trace in Grafana

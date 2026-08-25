@@ -302,11 +302,15 @@ services:
       RELAY_TOPIC: mlp.relay.deliveries
       RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
       DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
-      # demo rather than standard: the published schedule gives up at 27h35m5s,
-      # which is useless to watch. relay refuses to start on `standard` anyway,
-      # because a consumer cannot hold a partition that long -- see
+      # Not the `demo` preset: that is 15s to reach the dead-letter queue,
+      # which every `make smoke` run would then wait out. This is the same
+      # shape, compressed, so the DLQ path is exercised in about a second.
+      #
+      # The `demo` preset is for the M2 minikube demo, where 15s of lag is the
+      # point rather than the cost. Neither can be `standard` -- relay refuses
+      # to start on a schedule it cannot outlive, see
       # docs/adr/0006-kafka-over-sqs-for-delivery.md.
-      RELAY_RETRY_DELAYS: demo
+      RELAY_RETRY_DELAYS: 200ms,400ms
       RELAY_DELIVERY_TIMEOUT: 2s
     depends_on:
       kafka:
