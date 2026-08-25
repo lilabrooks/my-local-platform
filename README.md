@@ -17,12 +17,12 @@ make smoke
 ```text
 smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
 
-  PASS  s3               32ms  s3://mlp-artifacts/smoke/1787525730971651000.txt round trip
-  PASS  sns->sqs         17ms  fanout delivered smoke-1787525731015236000
-  PASS  ses              24ms  sent message b4be37fb-9614-4a34-8c5e-02aa26220736
-  PASS  kafka         10091ms  mlp.events partition 0 offset 1
-  PASS  rabbitmq          7ms  queue mlp.smoke round trip
-  PASS  postgres         11ms  row 2 on postgres 17.11
+  PASS  s3               18ms  s3://mlp-artifacts/smoke/1787624424137397000.txt round trip
+  PASS  sns->sqs         16ms  fanout delivered smoke-1787624424165875000
+  PASS  ses               4ms  sent message 3254d6c8-84f5-4225-ab89-6e88607344ed
+  PASS  kafka           211ms  mlp.events partition 0 offset 6
+  PASS  rabbitmq         14ms  queue mlp.smoke round trip
+  PASS  postgres         17ms  row 6 on postgres 18.6
 
 all components healthy
 ```
@@ -63,7 +63,7 @@ docs/adr/       why each choice was made, and what was verified
 
 ## Design decisions
 
-Five choices shape this repository, each recorded with the evidence behind it:
+Six choices shape this repository, each recorded with the evidence behind it:
 
 - **[Local-first, ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)** —
   an always-on version of this stack runs ~$150-250/month on a personal
@@ -79,6 +79,14 @@ Five choices shape this repository, each recorded with the evidence behind it:
 - **[ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)** — pull-based
   deployment onto a dedicated minikube profile, so an existing cluster on the
   machine is left alone.
+
+- **[Kafka over SNS to SQS for delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)** —
+  webhook delivery needs replay, and a queue deletes on acknowledgement. Cost is
+  what argues the other way, and an ephemeral stack never pays it.
+
+That last one covers `relay`, the first application — see
+**[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
+No code is written yet.
 
 ## The smoke service
 

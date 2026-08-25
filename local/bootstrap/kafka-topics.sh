@@ -29,6 +29,18 @@ done
 topic mlp.events 3
 topic mlp.events.dlq 1
 
+# relay, the webhook delivery service. Records are keyed by tenant id, so the
+# partition count is the ceiling on delivery-consumer parallelism -- KEDA will
+# not scale a consumer group past it, because the extra pods would sit idle.
+# Twelve leaves room for the M2 autoscaling demo; three did not.
+#
+# Raising this later is disruptive rather than merely awkward: --alter
+# --partitions only increases, and increasing reshuffles the key-to-partition
+# mapping, which breaks per-tenant ordering for records already on the log.
+# Set it before there is data. See docs/adr/0006-kafka-over-sqs-for-delivery.md.
+topic mlp.relay.deliveries 12
+topic mlp.relay.deliveries.dlq 1
+
 say "Kafka topics ready"
 docker exec "$BROKER_CONTAINER" /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server "$BOOTSTRAP" --list

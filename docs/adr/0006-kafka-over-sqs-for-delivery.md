@@ -1,0 +1,262 @@
+# 6. Kafka rather than SNS to SQS for webhook delivery
+
+Date: 2026-08-24
+Status: Accepted
+
+## Context
+
+`relay`, the first application on this platform, is a webhook delivery service:
+tenants POST events to it, and it delivers them to subscriber URLs with retry,
+backoff and a dead-letter path. See [the goal](../goal-relay.md) and
+[the roadmap](../roadmap-relay.md).
+
+Something has to sit between accepting an event and delivering it. This
+repository already contains two candidates, both working:
+
+- Apache Kafka in KRaft mode, local and free ([ADR 0004](0004-real-kafka-not-emulated.md)).
+- An SNS topic fanning out to an SQS queue with a DLQ and a queue policy, built
+  by Terraform at `infra/terraform/envs/dev/main.tf:111-163`, and emulated
+  locally by floci ([ADR 0002](0002-floci-over-localstack.md)).
+
+The decision must be made now because M1 of the roadmap writes the producer, and
+the producer is the part that encodes the choice.
+
+## Decision drivers
+
+The first two drivers decided this. The rest are why the decision is also
+defensible on its merits, which is a different claim and is recorded separately
+so a reader can tell them apart.
+
+**Deciding:**
+
+1. **Working with Kafka is the goal.** This repository exists to learn and
+   demonstrate a distributed-systems stack, and Kafka is the thing being
+   learned. [ADR 0004](0004-real-kafka-not-emulated.md) already made this
+   reasoning explicit when it rejected emulated MSK: "the goal is learning
+   Kafka, not learning MSK's control plane." The same logic applies one layer
+   up.
+2. **Cost is out of scope.** The AWS deployment is ephemeral by design --
+   minutes to hours, a demo, a screen capture, then `terraform destroy`. MSK's
+   ~$547/month floor is never paid. A cost comparison against SQS would be
+   comparing a number this project incurs against one it does not.
+
+**Supporting, and genuinely load-bearing at this scope:**
+
+- **Driver 3, replay.** Redelivering events a subscriber missed is a core
+  webhook product feature. Stripe retries for 3 days; Shopify for 48 hours.
+- **Driver 4, independent consumers added after the fact** -- delivery, audit
+  and analytics reading the same history, each at its own position.
+- **Driver 5, lag as a scaling signal** for M2's KEDA work.
+
+**Checked and found not to separate the options:**
+
+- **Ordering.** SQS FIFO offers ordering per `MessageGroupId`, a genuine
+  equivalent of the partition key. Its limits (300 TPS ungrouped, 3,000 batched,
+  20,000 in flight) are far beyond anything `relay` will reach.
+- **Scaling signal.** KEDA has an `aws-sqs-queue` scaler on queue depth. Lag is
+  not uniquely Kafka's.
+
+Recording these two matters. The easy version of this argument -- "a log beats a
+queue" -- is too broad, and a reader who knows SQS FIFO would spot it.
+
+## Options considered
+
+### A. Kafka topic partitioned by tenant -- chosen
+
+`mlp.relay.deliveries` keyed by tenant id, with `mlp.relay.deliveries.dlq` for
+exhausted retries. Replay is an offset reset. A later audit consumer is a new
+group id reading retained history. Ordering per tenant follows from the key.
+
+### B. SNS to SQS with a DLQ
+
+Already built in Terraform, zero idle cost, no partition planning, no consumer
+group rebalancing, operated by AWS.
+
+Loses on driver 3 decisively: **SQS deletes on acknowledgement.** Once a
+delivery succeeds the message is gone, so replay needs a separate event store --
+which is the thing Kafka already is. Driver 4 fails similarly: a consumer
+subscribed later cannot see events that predate it.
+
+### C. Postgres as the queue
+
+`SELECT ... FOR UPDATE SKIP LOCKED` over a table. Postgres is already in the
+`core` profile, so this adds no infrastructure, and at `relay`'s realistic
+volume it would work. It is also, per the evidence below, what Segment
+eventually built for this exact problem.
+
+Rejected on driver 1: it does not involve Kafka, which is the point. Worth
+stating plainly that a cost-optimised low-volume production service should
+probably pick this.
+
+### D. RabbitMQ
+
+In the `messaging` profile. Good routing, per-queue ordering. Rejected on driver
+3 for the same reason as SQS: messages leave the broker on acknowledgement.
+
+## Decision
+
+Back `relay` delivery with Kafka, option A.
+
+The decision is driven by drivers 1 and 2 -- this is a project for working with
+Kafka, and the cost that would argue against it is never incurred. Drivers 3
+through 5 mean the choice is also sound on its merits at this scope rather than
+merely permitted.
+
+The SNS to SQS resources stay in Terraform. Running `relay` against both and
+writing up where each breaks down is optional later work, and that comparison
+needs both alive.
+
+## Consequences
+
+**What this makes easier.** Replay becomes an offset reset. An audit consumer
+becomes a new group id. Per-tenant ordering follows from the key. Consumer lag
+becomes the scaling signal M2 needs, and it is the honest signal -- a consumer
+blocked on a slow HTTP call burns no CPU, so an HPA on CPU cannot see the
+backlog at all.
+
+**Partition count becomes a hard ceiling** on consumer parallelism, fixed early
+and awkward to change: `--alter --partitions` only increases, and increasing
+reshuffles the key-to-partition mapping, breaking ordering for records already
+on the log. The roadmap sets 12 partitions in M0 for this reason.
+
+### Head-of-line blocking, and the scale at which it becomes fatal
+
+One event may have several subscribers. The MVP handles all of an event's
+subscribers before committing the offset, so one slow subscriber delays every
+other subscriber on that partition, and cross-tenant isolation holds only to the
+degree tenants hash to different partitions.
+
+This is not a caveat invented here. It is the documented failure mode of this
+design, and the canonical writeup is Segment's
+[Centrifuge post](https://segment.com/blog/introducing-centrifuge) (May 2018,
+now hosted by Twilio). Segment was already running Kafka at roughly 1M
+messages/sec and still built something else for the delivery layer, after
+working through the same architectures in order:
+
+| Their architecture | What broke |
+|---|---|
+| Single shared queue | One slow endpoint backpressures everything. With 200+ endpoints at 99.9% availability each, an hour-long pipeline outage roughly once a day |
+| Queue per destination | Fixes endpoint isolation, but one large customer's contiguous batch blocks every other tenant behind it |
+| Queue per (source, destination) -- the ideal | 42,000 sources averaging 2.1 destinations each = 88,000 queues. No log or queue system supports that cardinality at acceptable cost |
+
+They ended up storing jobs as immutable rows in MySQL, so delivery order became
+a SQL query rather than a physical position in a log. Their framing of the crux
+is the sharpest statement of the problem: a queue supports push and pop and
+nothing else, and delivery order is fixed by the producer at write time, so
+reordering around a failure means rewriting the data.
+
+**The variable that decides this is not throughput. It is the cardinality of
+isolation domains** -- how many `(tenant, subscriber)` pairs must be able to
+fail independently. Kafka gives exactly as many as there are partitions.
+
+For `relay` that is 12, against a handful of demo tenants, so the design is
+comfortably inside its envelope. It becomes wrong as concurrently-degraded
+`(tenant, subscriber)` pairs approach the partition count -- and past that point
+no configuration fixes it, only a different primitive. The intermediate fix, a
+second topic keyed by `(tenant, subscriber)` so each delivery is its own record,
+buys headroom but does not change the shape of the limit.
+
+Worth being explicit: Svix and Convoy, the two dominant webhook gateways, both
+use queues rather than logs for delivery. Kafka-backed webhook delivery does
+exist in production at scale -- Toss Payments reportedly runs hundreds of
+millions of webhooks a day on one, with a Redis idempotency cache and dashboard
+replay -- but that is a secondhand report and should be treated as such.
+
+### Retry duration is bounded by consumer group liveness
+
+A delivery consumer that sleeps between retries still holds its partition
+assignment, and Kafka evicts a consumer that does not poll within
+`max.poll.interval.ms` -- five minutes by default. So **in-process retry cannot
+span the Standard Webhooks schedule**, whose later intervals run to 16 hours and
+whose budget is roughly 24. A consumer waiting out that tail would be kicked
+from the group, its partitions reassigned, and the delivery redelivered
+elsewhere while it slept.
+
+This is a genuine asymmetry with option B that the driver list above missed. SQS
+visibility timeout extends to 12 hours, so a queue absorbs long retries without
+a second mechanism. On a log, the record must be parked and the offset
+committed. Two ways to do that:
+
+- **Tiered retry topics** -- a 5s topic, a 5m topic, a 30m topic, each with a
+  consumer that sleeps within its own poll interval. The conventional Kafka
+  answer.
+- **A due-at row in Postgres with a scheduler**, which is Centrifuge again,
+  arrived at from the opposite direction.
+
+Neither is MVP work. What M1 owes is a config surface that cannot lie: a
+schedule whose total exceeds the poll interval is **rejected at startup**, not
+discovered through consumer eviction under load. The demo profile fits inside a
+single poll interval with room to spare; the production profile does not, and
+enabling it is what forces the mechanism above.
+
+**Files that change together.** `local/bootstrap/kafka-topics.sh` (topics),
+`services/relay` (producer and consumer), `services/smoke` (the round-trip
+check), and in M2 the KEDA `ScaledObject`, whose trigger type is coupled to
+this choice.
+
+## Failure semantics
+
+| Failure | Behaviour | Why |
+|---|---|---|
+| Broker unreachable at ingest | Return 503; the tenant retries | Accepting into memory and dropping is the one unrecoverable outcome |
+| Delivery returns 5xx | Retry on the Standard Webhooks schedule, offset uncommitted | At-least-once |
+| Retry budget exhausted (~24h) | Produce to the DLQ with the failure reason, then commit | The event is parked, not lost |
+| DLQ produce itself fails | Do not commit; the record is redelivered | A duplicate delivery beats a silent loss |
+| Consumer dies after delivering, before commit | The subscriber receives a duplicate | Accepted; every delivery carries a stable `webhook-id` so subscribers can dedupe |
+| One subscriber of several fails | Only that subscriber's delivery is dead-lettered; the offset commits once all subscribers reach a terminal state | Partial success must not replay the successful deliveries |
+
+The contract offered to subscribers is **at-least-once with a stable delivery
+id**, not exactly-once. Saying so in the tenant-facing docs is part of the work,
+because a subscriber assuming exactly-once will eventually double-charge
+someone.
+
+## Verification
+
+**Nothing here has been run. This ADR is a proposal, and the claims below are
+the ones that will confirm or break it.**
+
+Checked on 2026-08-24: MSK and SQS pricing against
+<https://aws.amazon.com/msk/pricing/> and two independent calculators; SQS FIFO
+quotas against AWS published limits; KEDA's `aws-sqs-queue` and `apache-kafka`
+scalers against KEDA documentation for 2.12 through 2.21; Segment's figures
+against their Centrifuge post; Stripe and Shopify retry windows against their
+published webhook documentation.
+
+Planned verification, in the order it becomes possible:
+
+```bash
+make up && make seed && make smoke   # M1: relay round-trip passes
+```
+
+- **Replay**, the load-bearing supporting claim: reset the `relay-deliver` group
+  offset and assert every event in the window is redelivered. If this is awkward
+  in practice, driver 3 is weaker than stated and this ADR should be revised
+  rather than defended.
+- **Ordering**: produce a known sequence for one tenant, assert delivery order
+  at the sink.
+- **Dead-lettering**: point a subscriber at a sink that always fails, assert the
+  event lands in `mlp.relay.deliveries.dlq` with a reason.
+- **Duplicate on crash**: kill the consumer between delivery and commit, assert
+  the subscriber sees the same `webhook-id` twice.
+- **Head-of-line blocking**: degrade one subscriber and measure delivery delay
+  for an unrelated tenant on the same partition. This should reproduce Segment's
+  first architecture in miniature, and demonstrating it deliberately is more
+  useful than avoiding it.
+
+## Rollback
+
+Before M1 ships, reverting is deleting `services/relay`. After it ships,
+switching to option B means rewriting the producer and consumer and building an
+event store for replay -- roughly the whole service.
+
+## Revisit when
+
+- Concurrently-degraded `(tenant, subscriber)` pairs approach the partition
+  count. First move is the per-subscriber topic; past that it is a different
+  primitive, as Segment found.
+- `relay` is ever considered for real production use at low volume, where SQS
+  FIFO or option C would be cheaper and simpler.
+- Replay turns out to be awkward enough in practice that it stops justifying the
+  operational cost.
+- The project's goal stops being "work with Kafka." Driver 1 is the load-bearing
+  one, and it is a goal rather than a technical property.
