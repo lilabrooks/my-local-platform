@@ -115,14 +115,26 @@ YAML those tests read.
 - **Real AWS requires `MLP_USE_REAL_AWS=1`.** An empty `AWS_ENDPOINT_URL` means
   local, deliberately, so a stray `export` cannot hit a live account.
 
-## Known defects
+## Known defects and tracking
 
 [docs/backlog.md](docs/backlog.md) lists deferred work with the reason it was
 deferred and what "done" means. Read it before assuming a failure is new.
 
-One that will bite an app author specifically: the Kafka smoke check replays
-the topic from the earliest offset, so it slows down as `mlp.events` grows and
-eventually times out. Harmless today, real once something produces at volume.
+GitHub Issues are the tracker; backlog.md is the copy that survives without
+network access and that agents read. Two records of the same thing drift unless
+something holds them together — issue #1 sat open for a while after backlog.md
+called it resolved — so:
+
+**End the commit or PR that resolves an item with `Closes #N`.** GitHub closes
+the issue on merge, and that is the only part of this arrangement that does not
+depend on someone remembering to do it.
+
+Milestones group issues by roadmap stage. The roadmap document holds the detail;
+a milestone is a pointer to it, never a second copy.
+
+The Kafka smoke check defect that used to be described here was fixed in M0. Its
+measurements are in
+[ADR 0004](docs/adr/0004-real-kafka-not-emulated.md#verification).
 
 ## Secrets
 
