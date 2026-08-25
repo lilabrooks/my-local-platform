@@ -2,7 +2,7 @@
 // selected by RELAY_MODE.
 //
 //	ingest   accept events over HTTP and produce them to Kafka
-//	deliver  consume them and POST to subscribers (issue #6, not yet built)
+//	deliver  consume them and POST to subscribers, retrying and dead-lettering
 //
 // One image with a mode switch rather than two binaries, because the two roles
 // share the record format and the configuration surface, and a Deployment per
@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,24 +22,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/config"
+	"github.com/lilabrooks/my-local-platform/relay/internal/delivery"
 	"github.com/lilabrooks/my-local-platform/relay/internal/ingest"
+	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
 
 // Set at build time: -ldflags "-X main.version=..."
 var version = "dev"
 
-// rebalanceTimeout must match the delivery consumer's kafka-go ReaderConfig.
-// It is the bound the retry schedule is validated against: a consumer asleep
-// in a retry for longer than this cannot rejoin its group after a rebalance.
-// See docs/adr/0006-kafka-over-sqs-for-delivery.md.
+// rebalanceTimeout is given to the consumer group and is the bound the retry
+// schedule is validated against: a consumer busy with one record for longer
+// than this cannot rejoin its group after a rebalance, so the delivery is
+// reassigned. See docs/adr/0006-kafka-over-sqs-for-delivery.md.
 const rebalanceTimeout = 30 * time.Second
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "relay", "version", version)
-
 	if err := run(log); err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
@@ -48,76 +51,71 @@ func main() {
 func run(log *slog.Logger) error {
 	mode := envOr("RELAY_MODE", "ingest")
 
-	// The retry schedule is validated in every mode, not just deliver. Both
-	// Deployments read the same ConfigMap, so a typo should stop the rollout
-	// rather than pass in one role and fail in the other.
-	schedule, err := config.ParseRetrySchedule(envOr("RELAY_RETRY_DELAYS", "demo"), envOr("RELAY_RETRY_JITTER", "true") == "true")
+	// Validated in every mode, not just deliver. Both Deployments read the
+	// same ConfigMap, so a typo should stop the rollout rather than pass in
+	// one role and fail in the other.
+	schedule, err := config.ParseRetrySchedule(
+		envOr("RELAY_RETRY_DELAYS", "demo"),
+		envOr("RELAY_RETRY_JITTER", "true") == "true",
+	)
 	if err != nil {
 		return fmt.Errorf("RELAY_RETRY_DELAYS: %w", err)
 	}
-	if err := schedule.ValidateLiveness(rebalanceTimeout); err != nil {
+	attemptTimeout, err := time.ParseDuration(envOr("RELAY_DELIVERY_TIMEOUT", "2s"))
+	if err != nil {
+		return fmt.Errorf("RELAY_DELIVERY_TIMEOUT: %w", err)
+	}
+	if err := schedule.ValidateLiveness(rebalanceTimeout, attemptTimeout); err != nil {
 		return err
 	}
-	// Logged so the longest an event can sit before dead-lettering is a fact an
-	// operator reads rather than computes.
-	log.Info("retry schedule", "schedule", schedule.String())
+	log.Info("retry schedule",
+		"schedule", schedule.String(),
+		"attempt_timeout", attemptTimeout,
+		"worst_case_per_record", schedule.WorstCase(attemptTimeout),
+		"rebalance_timeout", rebalanceTimeout)
 
 	switch mode {
 	case "ingest":
-		return runIngest(log, schedule)
+		return runIngest(log)
 	case "deliver":
-		return errors.New("RELAY_MODE=deliver is not implemented yet (issue #6)")
+		return runDeliver(log, schedule, attemptTimeout)
 	default:
 		return fmt.Errorf("RELAY_MODE %q is not one of: ingest, deliver", mode)
 	}
 }
 
-func runIngest(log *slog.Logger, _ config.RetrySchedule) error {
-	brokers := strings.Split(envOr("KAFKA_BOOTSTRAP", "localhost:9092"), ",")
+func brokers() []string { return strings.Split(envOr("KAFKA_BOOTSTRAP", "localhost:9092"), ",") }
+
+func runIngest(log *slog.Logger) error {
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	addr := ":" + envOr("PORT", "8080")
 
 	writer := &kafka.Writer{
-		Addr:  kafka.TCP(brokers...),
+		Addr:  kafka.TCP(brokers()...),
 		Topic: topic,
 		// Hash on the record key so a tenant always lands on one partition.
 		// LeastBytes would spread a tenant across partitions and lose ordering.
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: false, // topics come from bootstrap, not by accident
-		// The default is 1s, and a batch of 100 that never fills makes every
-		// request wait it out -- the same default that cost the smoke check a
-		// flat second per run. 10ms still batches under load.
+		// The default is 1s waiting for a batch of 100 that a low-rate ingest
+		// never fills -- the same default that cost the smoke check a flat
+		// second per run. 10ms still batches under load.
 		BatchTimeout: 10 * time.Millisecond,
 	}
 	defer func() { _ = writer.Close() }()
 
-	server := newServer(writer, topic, log)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           server.Routes(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	return serve(srv, server, log, addr, topic, brokers)
-}
+	server := ingest.New(writer, topic, log)
+	// Safe to be ready immediately: kafka.Writer connects lazily, and an
+	// unreachable broker surfaces as a 503 per request rather than at startup.
+	server.MarkReady(true)
 
-// newServer exists so runIngest reads in one direction; it also marks the
-// server ready, which is safe because kafka.Writer connects lazily and an
-// unreachable broker surfaces as a 503 per request rather than at startup.
-func newServer(w ingest.Producer, topic string, log *slog.Logger) *ingest.Server {
-	s := ingest.New(w, topic, log)
-	s.MarkReady(true)
-	return s
-}
-
-func serve(srv *http.Server, server *ingest.Server, log *slog.Logger, addr, topic string, brokers []string) error {
+	srv := &http.Server{Addr: addr, Handler: server.Routes(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
 		<-ctx.Done()
-		// Fail readiness first so the endpoint leaves its Service before
-		// connections stop being accepted, then drain.
 		log.Info("shutdown signal received, failing readiness")
 		server.MarkReady(false)
 		time.Sleep(3 * time.Second)
@@ -128,12 +126,106 @@ func serve(srv *http.Server, server *ingest.Server, log *slog.Logger, addr, topi
 		}
 	}()
 
-	log.Info("listening", "addr", addr, "topic", topic, "brokers", brokers, "mode", "ingest")
+	log.Info("listening", "addr", addr, "topic", topic, "brokers", brokers(), "mode", "ingest")
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("server: %w", err)
 	}
 	log.Info("stopped")
 	return nil
+}
+
+func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout time.Duration) error {
+	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
+	dlqTopic := envOr("RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq")
+	group := envOr("RELAY_CONSUMER_GROUP", "relay-deliver")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, envOr("DATABASE_URL",
+		"postgres://platform:platform@localhost:5432/platform?sslmode=disable"))
+	if err != nil {
+		return fmt.Errorf("database pool: %w", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		// Unlike the writer, the subscription store is needed for every
+		// record, so a database that is not there at startup is fatal rather
+		// than a per-record failure.
+		return fmt.Errorf("database unreachable: %w", err)
+	}
+
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: brokers(),
+		Topic:   topic,
+		GroupID: group,
+		// CommitInterval zero means CommitMessages commits synchronously,
+		// which is what makes "commit only after every subscriber is done"
+		// mean anything.
+		CommitInterval:   0,
+		RebalanceTimeout: rebalanceTimeout,
+		MinBytes:         1,
+		MaxBytes:         10e6,
+		MaxWait:          250 * time.Millisecond,
+		// A new group starts at the beginning so nothing already produced is
+		// skipped on first deploy.
+		StartOffset: kafka.FirstOffset,
+	})
+	defer func() { _ = reader.Close() }()
+
+	dlq := &kafka.Writer{
+		Addr:                   kafka.TCP(brokers()...),
+		Topic:                  dlqTopic,
+		Balancer:               &kafka.Hash{},
+		RequiredAcks:           kafka.RequireAll,
+		AllowAutoTopicCreation: false,
+		BatchTimeout:           10 * time.Millisecond,
+	}
+	defer func() { _ = dlq.Close() }()
+
+	consumer := delivery.NewConsumer(
+		reader, dlq, subscriptions.New(pool),
+		delivery.NewDeliverer(schedule, attemptTimeout), log,
+	)
+
+	// Health endpoints run alongside the consume loop: a consumer has no
+	// inbound traffic, but Kubernetes still needs to know it is alive.
+	srv := healthServer(":"+envOr("PORT", "8080"), consumer)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("health server", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	log.Info("consuming", "topic", topic, "dlq", dlqTopic, "group", group,
+		"brokers", brokers(), "mode", "deliver")
+	return consumer.Run(ctx)
+}
+
+func healthServer(addr string, c *delivery.Consumer) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !c.Ready() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "stats": c.Stats()})
+	})
+	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func envOr(key, def string) string {

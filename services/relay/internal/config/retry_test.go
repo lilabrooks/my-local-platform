@@ -143,9 +143,15 @@ func TestValidateLiveness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	// 15s against kafka-go's 30s default rebalance timeout.
-	if err := demo.ValidateLiveness(30 * time.Second); err != nil {
+	// demo is 15s of delays plus 5 attempts. At a 2s attempt timeout that is
+	// 25s, which fits inside kafka-go's 30s default rebalance timeout.
+	if err := demo.ValidateLiveness(30*time.Second, 2*time.Second); err != nil {
 		t.Errorf("demo preset rejected against a 30s rebalance timeout: %v", err)
+	}
+	// The same schedule with a longer per-attempt timeout does not fit, which
+	// is the case summing only the delays used to miss.
+	if err := demo.ValidateLiveness(30*time.Second, 5*time.Second); err == nil {
+		t.Error("demo at a 5s attempt timeout (40s worst case) was accepted against a 30s rebalance timeout")
 	}
 
 	std, err := ParseRetrySchedule("standard", false)
@@ -154,7 +160,7 @@ func TestValidateLiveness(t *testing.T) {
 	}
 	// The whole point: the production schedule cannot run in process, and that
 	// has to surface at startup rather than as a mid-retry reassignment.
-	err = std.ValidateLiveness(30 * time.Second)
+	err = std.ValidateLiveness(30*time.Second, 2*time.Second)
 	if err == nil {
 		t.Fatal("standard preset accepted against a 30s rebalance timeout, want rejection")
 	}
@@ -172,11 +178,39 @@ func TestValidateLivenessBoundaryIsExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if err := s.ValidateLiveness(30 * time.Second); err == nil {
-		t.Error("a 30s schedule was accepted against a 30s rebalance timeout, want rejection")
+	// 30s of delays plus 4 attempts at 1s = 34s worst case.
+	if err := s.ValidateLiveness(34*time.Second, time.Second); err == nil {
+		t.Error("a 34s worst case was accepted against a 34s rebalance timeout, want rejection")
 	}
-	if err := s.ValidateLiveness(31 * time.Second); err != nil {
-		t.Errorf("a 30s schedule was rejected against a 31s rebalance timeout: %v", err)
+	if err := s.ValidateLiveness(35*time.Second, time.Second); err != nil {
+		t.Errorf("a 34s worst case was rejected against a 35s rebalance timeout: %v", err)
+	}
+}
+
+func TestWorstCaseCountsAttempts(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseRetrySchedule("1s,2s", false)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// 3s of delays, 3 attempts at 4s = 12s, total 15s.
+	if got, want := s.WorstCase(4*time.Second), 15*time.Second; got != want {
+		t.Errorf("WorstCase = %s, want %s", got, want)
+	}
+}
+
+func TestValidateLivenessRejectsNonPositiveAttemptTimeout(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseRetrySchedule("demo", false)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, bad := range []time.Duration{0, -time.Second} {
+		if err := s.ValidateLiveness(time.Minute, bad); err == nil {
+			t.Errorf("attempt timeout %s accepted, want rejection", bad)
+		}
 	}
 }
 
@@ -229,7 +263,7 @@ func TestEmptyScheduleIsSentinel(t *testing.T) {
 	if _, err := ParseRetrySchedule("", false); !errors.Is(err, ErrEmptySchedule) {
 		t.Errorf("empty spec error = %v, want ErrEmptySchedule", err)
 	}
-	if err := (RetrySchedule{}).ValidateLiveness(time.Minute); !errors.Is(err, ErrEmptySchedule) {
+	if err := (RetrySchedule{}).ValidateLiveness(time.Minute, time.Second); !errors.Is(err, ErrEmptySchedule) {
 		t.Errorf("zero schedule error = %v, want ErrEmptySchedule", err)
 	}
 }
