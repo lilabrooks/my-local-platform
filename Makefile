@@ -200,6 +200,17 @@ argocd-ui: ## Port-forward the ArgoCD UI to https://localhost:8081
 k8s-apply-local: ## Apply manifests directly, bypassing git and ArgoCD
 	kubectl apply -f k8s/manifests/namespace.yaml
 	kubectl apply -k k8s/manifests/echo
+	kubectl apply -k k8s/manifests/relay
+	kubectl apply -k k8s/manifests/sink
+	@echo
+	@echo "  relay and the sink read the compose Kafka and Postgres over"
+	@echo "  host.minikube.internal, so 'make up' and 'make seed' first."
+	@echo
+	@echo "  BUT NOT 'make up-apps'. The compose and cluster delivery consumers"
+	@echo "  join the SAME Kafka group and split the partitions between them, so"
+	@echo "  half the events get delivered to whichever sink you are not looking"
+	@echo "  at. Run one or the other:  docker compose -f local/docker-compose.yml \\"
+	@echo "                               stop relay-ingest relay-deliver sink" 
 
 .PHONY: k8s-validate
 k8s-validate: ## Assert manifest invariants (selector immutability, probes, endpoints)

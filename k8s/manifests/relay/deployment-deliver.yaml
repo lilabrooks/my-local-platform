@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-deliver
+  labels:
+    app.kubernetes.io/name: relay-deliver
+    app.kubernetes.io/component: deliver
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  # One replica to start. KEDA takes over this number in #31 -- 12 is the
+  # ceiling that matters, because the topic has 12 partitions and a consumer
+  # group cannot usefully exceed them.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-deliver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: relay-deliver
+        app.kubernetes.io/component: deliver
+        app.kubernetes.io/part-of: my-local-platform
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: relay-deliver
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: relay:dev
+          # The tag exists in no registry; `make relay-image` loads it into the
+          # cluster. Always would sit in ImagePullBackOff reaching for Docker Hub.
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RELAY_MODE
+              value: deliver
+          envFrom:
+            - configMapRef:
+                name: relay
+            - secretRef:
+                name: relay
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+      # Must outlive the worst case for one record: RELAY_RETRY_DELAYS=demo is
+      # 15s of delays plus 5 attempts at RELAY_DELIVERY_TIMEOUT=2s, so 25s.
+      # SIGKILL before that leaves the offset uncommitted and the record is
+      # redelivered -- correct, but it means every KEDA scale-down manufactures
+      # duplicates, and scale-down is half the demo. k8s/validate asserts this
+      # against the ConfigMap rather than trusting the two to stay in step.
+      terminationGracePeriodSeconds: 45

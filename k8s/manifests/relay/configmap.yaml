@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay
+  labels:
+    app.kubernetes.io/part-of: my-local-platform
+data:
+  # Both roles read this one ConfigMap, which is why relay validates the retry
+  # schedule in every mode rather than only in `deliver`: a typo should stop the
+  # rollout instead of passing in one Deployment and failing in the other.
+
+  # host.minikube.internal:9094 is the CLUSTER listener. Not localhost:9092 --
+  # inside a pod that is the pod. See docs/runbook-k8s.md.
+  KAFKA_BOOTSTRAP: host.minikube.internal:9094
+  RELAY_TOPIC: mlp.relay.deliveries
+  RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
+  RELAY_CONSUMER_GROUP: relay-deliver
+
+  # The `demo` preset here, unlike compose. 15s to reach the dead-letter queue
+  # is the point when someone is watching a demo, and the cost when a smoke
+  # check is waiting for it.
+  #
+  # Worst case per record is 15s of delays plus 5 attempts at 2s = 25s, which
+  # is what terminationGracePeriodSeconds has to outlive. k8s/validate asserts
+  # that relationship rather than trusting these two numbers to stay in step.
+  RELAY_RETRY_DELAYS: demo
+  RELAY_DELIVERY_TIMEOUT: 2s
+  RELAY_RETRY_JITTER: "true"

@@ -1,0 +1,39 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: relay
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: mlp
+
+  source:
+    # A REAL url, not the __REPO_URL__ placeholder used in k8s/argocd/.
+    # ArgoCD reads this file straight from git, where nothing substitutes
+    # anything -- a placeholder here syncs literally and the app fails with
+    # "application repo __REPO_URL__ is not permitted in project 'mlp'".
+    repoURL: git@github.com:lilabrooks/my-local-platform.git
+    targetRevision: main
+    path: k8s/manifests/relay
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlp
+
+  syncPolicy:
+    automated:
+      # selfHeal reverts manual kubectl edits back to git. That includes the
+      # replica count -- so once KEDA owns it (#31), the Deployment's replicas
+      # field has to leave these manifests or ArgoCD and KEDA will fight over
+      # it, each undoing the other every few seconds.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m

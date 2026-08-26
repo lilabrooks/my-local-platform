@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sink
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: mlp
+
+  source:
+    # A REAL url, not the __REPO_URL__ placeholder used in k8s/argocd/.
+    # ArgoCD reads this file straight from git, where nothing substitutes
+    # anything -- a placeholder here syncs literally and the app fails with
+    # "application repo __REPO_URL__ is not permitted in project 'mlp'".
+    repoURL: git@github.com:lilabrooks/my-local-platform.git
+    targetRevision: main
+    path: k8s/manifests/sink
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlp
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
