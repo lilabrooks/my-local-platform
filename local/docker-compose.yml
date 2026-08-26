@@ -300,7 +300,7 @@ services:
   relay-ingest:
     build:
       context: ../services/relay
-    image: mlp-relay:dev
+    image: relay:dev
     container_name: mlp-relay-ingest
     profiles: [apps, all]
     # relay treats a broker fetch failure as fatal and exits. That is a
@@ -326,7 +326,7 @@ services:
   relay-deliver:
     build:
       context: ../services/relay
-    image: mlp-relay:dev
+    image: relay:dev
     container_name: mlp-relay-deliver
     profiles: [apps, all]
     # relay treats a broker fetch failure as fatal and exits. That is a
@@ -363,7 +363,7 @@ services:
   sink:
     build:
       context: ../services/sink
-    image: mlp-sink:dev
+    image: sink:dev
     container_name: mlp-sink
     profiles: [apps, all]
     # relay treats a broker fetch failure as fatal and exits. That is a
