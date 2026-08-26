@@ -135,6 +135,37 @@ kubectl run kafkatest --rm -i --restart=Never --image=apache/kafka:4.3.1 \
 M4 changes this wiring again: MSK is reached over its own bootstrap endpoint
 with IAM, and none of these three listeners apply.
 
+## Do not run the compose apps and the cluster apps together
+
+They are alternatives, not complements.
+
+`make up-apps` and `make k8s-apply-local` each start a delivery consumer, and
+both join the Kafka consumer group `relay-deliver` against the same topic. Kafka
+does what it should: it splits the twelve partitions between them.
+
+```text
+GROUP           HOST            #PARTITIONS
+relay-deliver   /172.18.0.2     6      <- the compose container
+relay-deliver   /172.18.0.1     6      <- the pod
+```
+
+Each event is still delivered exactly once, but by whichever consumer owns its
+partition -- and the two deliver to different sinks. Half the traffic lands
+somewhere you are not looking. `make smoke` fails with
+
+```text
+FAIL  relay  45000ms  event evt_... was not delivered to the sink
+```
+
+even though nothing is broken. Stop one side:
+
+```bash
+docker compose -f local/docker-compose.yml stop relay-ingest relay-deliver sink
+```
+
+The same applies to the M2 demo: it runs in the cluster, so the compose apps
+have to be down or the lag and pod-count picture is measuring half the work.
+
 ## Troubleshooting
 
 **`kubectl apply` fails installing ArgoCD** with `metadata.annotations: Too

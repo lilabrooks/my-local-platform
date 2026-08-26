@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-ingest
+  labels:
+    app.kubernetes.io/name: relay-ingest
+    app.kubernetes.io/component: ingest
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  # Two replicas: ingest is stateless HTTP and a rolling update should not
+  # drop events on the floor.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-ingest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: relay-ingest
+        app.kubernetes.io/component: ingest
+        app.kubernetes.io/part-of: my-local-platform
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: relay-ingest
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: relay:dev
+          # The tag exists in no registry; `make relay-image` loads it into the
+          # cluster. Always would sit in ImagePullBackOff reaching for Docker Hub.
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RELAY_MODE
+              value: ingest
+          envFrom:
+            - configMapRef:
+                name: relay
+            - secretRef:
+                name: relay
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+      terminationGracePeriodSeconds: 20
