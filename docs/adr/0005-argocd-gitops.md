@@ -57,11 +57,18 @@ docker-compose on the host, not in the cluster. Wiring `echo` to an endpoint
 that does not resolve from inside minikube would ship a config that silently
 fails, which is worse than an honest gap.
 
-> [ADR 0008](0008-in-cluster-observability-for-the-demo.md) proposes reversing
-> this paragraph, and only this paragraph, for the cluster case. The reasoning
-> above held while the only workload was `echo` and there was nothing to look
-> at; the M2 demo makes the picture the deliverable. That ADR is Proposed, so
-> this consequence still stands as written.
+> **Amended 2026-08-26 by
+> [ADR 0008](0008-in-cluster-observability-for-the-demo.md), accepted.** This
+> paragraph, and only this paragraph, no longer holds: Prometheus and Grafana
+> now run in the cluster, installed by `make monitoring-install`.
+>
+> The reasoning above was not wrong for its time. It held while the only
+> workload was `echo` and there was nothing to look at, and what it was
+> protecting against -- shipping a config that silently fails -- is still the
+> right instinct. ADR 0008 inherits it: the chart's `serviceMonitorSelector`
+> drops an unlabelled `ServiceMonitor` without an error, so the demo asserts
+> the panel's own query before it starts rather than trusting that the pieces
+> exist. The rest of ADR 0005 stands.
 
 ## Verification
 

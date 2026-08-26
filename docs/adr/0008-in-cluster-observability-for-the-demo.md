@@ -1,7 +1,7 @@
 # 8. In-cluster Prometheus and Grafana for the M2 demo
 
 Date: 2026-08-26
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -34,8 +34,9 @@ says in-cluster telemetry is deliberately absent, because wiring `echo` to an
 endpoint that does not resolve from inside minikube would ship a config that
 silently fails. That reasoning held while the only workload was `echo` and there
 was nothing to look at. It stops holding when the deliverable *is* the picture.
-ADR 0005 needs an amendment rather than supersession: its subject is ArgoCD, and
-only the telemetry paragraph in its Consequences changes.
+This amends ADR 0005 rather than superseding it: that record's subject is
+ArgoCD, and only the telemetry paragraph in its Consequences changes. It is
+marked as amended there, and ADR 0005 otherwise stands.
 
 ## Decision drivers
 

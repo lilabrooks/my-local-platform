@@ -72,7 +72,7 @@ count, delivery latency, and the outcomes behind both. Details in the
 
 ## Design decisions
 
-Six choices shape this repository, each recorded with the evidence behind it:
+Seven choices shape this repository, each recorded with the evidence behind it:
 
 - **[Local-first, ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)** —
   an always-on version of this stack runs ~$150-250/month on a personal
@@ -91,8 +91,17 @@ Six choices shape this repository, each recorded with the evidence behind it:
 - **[Kafka over SNS to SQS for delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)** —
   webhook delivery needs replay, and a queue deletes on acknowledgement. Cost is
   what argues the other way, and an ephemeral stack never pays it.
+- **[In-cluster Prometheus and Grafana](docs/adr/0008-in-cluster-observability-for-the-demo.md)** —
+  the autoscaling demo's argument is a picture, so the thing that draws it has
+  to live where the pods do. Amends ADR 0005, which had kept telemetry out of
+  the cluster on purpose.
 
-That last one covers `relay`, the first application — see
+ADR 0007 is deliberately absent, not missing: the number is held for the
+lag-based autoscaling decision, which
+[#33](https://github.com/lilabrooks/my-local-platform/issues/33) requires be
+written from a measured demo run rather than from predictions.
+
+The Kafka one covers `relay`, the first application — see
 **[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
 Its MVP is built: `make up-apps` starts it, and `make smoke` exercises the
 whole pipeline end to end.
