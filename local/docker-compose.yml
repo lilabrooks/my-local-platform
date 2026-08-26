@@ -126,13 +126,31 @@ services:
     profiles: [messaging, all]
     ports:
       - "9092:9092"    # from the host
+      - "9094:9094"    # from inside minikube
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: INTERNAL://:19092,CONTROLLER://:9093,HOST://:9092
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,HOST:PLAINTEXT
+      # Three client listeners, because a Kafka client is told where to go next
+      # rather than reusing the address it bootstrapped with. Whatever a
+      # listener advertises has to resolve *from the client's own network*, so
+      # each network that reaches this broker needs its own.
+      #
+      #   INTERNAL  kafka:19092                    other compose containers
+      #   HOST      localhost:9092                 the laptop
+      #   CLUSTER   host.minikube.internal:9094    pods in minikube
+      #
+      # Without CLUSTER, a pod bootstraps to the host fine and then fails on the
+      # follow-up connection, because HOST advertises "localhost" and inside a
+      # pod that is the pod. It looks like a broker fault and is not one.
+      #
+      # host.minikube.internal rather than the host's LAN address: minikube
+      # provides it, and a hardcoded 192.168.x.y stops working the moment the
+      # laptop joins a different network. It only resolves inside minikube,
+      # which is correct -- this listener has exactly one audience.
+      KAFKA_LISTENERS: INTERNAL://:19092,CONTROLLER://:9093,HOST://:9092,CLUSTER://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://localhost:9092,CLUSTER://host.minikube.internal:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CLUSTER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       # Single broker: everything must be replication factor 1 or topics fail.
@@ -142,6 +160,18 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       CLUSTER_ID: mlp-local-cluster-0001
+      # Without this the broker writes to its own default, /tmp/kraft-broker-logs
+      # inside the container, and the kafka-data volume below is decorative --
+      # mounted, empty, and doing nothing. Every container recreation then
+      # destroys every topic and message, which was true here until 2026-08-25.
+      #
+      # It hides well: data survives `docker compose restart`, because the
+      # container's writable layer survives. It only disappears when the
+      # container is recreated, which is what a config change does.
+      #
+      # A log that does not outlive a config change cannot support replay, and
+      # replay is the argument ADR 0006 rests on.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       # The image default is -Xmx1G -Xms1G. -Xms PRE-COMMITS the heap, so the
       # broker trends to ~1GiB RSS no matter how little traffic it sees.
       KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
@@ -273,6 +303,12 @@ services:
     image: mlp-relay:dev
     container_name: mlp-relay-ingest
     profiles: [apps, all]
+    # relay treats a broker fetch failure as fatal and exits. That is a
+    # reasonable stance for a consumer -- a restart rejoins the group cleanly --
+    # but only if something restarts it. Kubernetes would; compose will not
+    # unless told. Restarting Kafka killed this container twice while wiring
+    # up #27.
+    restart: unless-stopped
     mem_limit: 128m
     ports:
       - "8082:8080"
@@ -293,6 +329,12 @@ services:
     image: mlp-relay:dev
     container_name: mlp-relay-deliver
     profiles: [apps, all]
+    # relay treats a broker fetch failure as fatal and exits. That is a
+    # reasonable stance for a consumer -- a restart rejoins the group cleanly --
+    # but only if something restarts it. Kubernetes would; compose will not
+    # unless told. Restarting Kafka killed this container twice while wiring
+    # up #27.
+    restart: unless-stopped
     mem_limit: 128m
     ports:
       - "8083:8080"   # health only; a consumer has no inbound traffic
@@ -324,6 +366,12 @@ services:
     image: mlp-sink:dev
     container_name: mlp-sink
     profiles: [apps, all]
+    # relay treats a broker fetch failure as fatal and exits. That is a
+    # reasonable stance for a consumer -- a restart rejoins the group cleanly --
+    # but only if something restarts it. Kubernetes would; compose will not
+    # unless told. Restarting Kafka killed this container twice while wiring
+    # up #27.
+    restart: unless-stopped
     mem_limit: 64m
     ports:
       # 8084 on the host, not 8081: `make argocd-ui` port-forwards the

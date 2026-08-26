@@ -96,6 +96,45 @@ make echo-image
 kubectl rollout restart deployment/echo -n mlp
 ```
 
+## Reaching the compose Kafka from a pod
+
+Use `host.minikube.internal:9094`. Not `localhost:9092`, and not `kafka:19092`.
+
+A Kafka client is told where to go after it bootstraps, rather than reusing the
+address it dialled, so **whatever a listener advertises has to resolve from the
+client's own network**. The broker runs three client listeners for that reason:
+
+| Listener | Advertises | For |
+|---|---|---|
+| `INTERNAL` | `kafka:19092` | other compose containers |
+| `HOST` | `localhost:9092` | the laptop |
+| `CLUSTER` | `host.minikube.internal:9094` | pods in minikube |
+
+Point a pod at `:9092` and it bootstraps fine, then fails on the follow-up
+connection, because `localhost` inside a pod is the pod:
+
+```text
+WARN Connection to node 1 (localhost/127.0.0.1:9092) could not be established.
+```
+
+That reads as a broker fault and is not one. The broker is healthy; it just
+handed out an address that means something else where the client is standing.
+
+`host.minikube.internal` rather than the host's LAN address because minikube
+provides it and a hardcoded `192.168.x.y` stops working the moment the laptop
+changes network. It resolves only inside minikube, which is correct -- that
+listener has exactly one audience. Verified with a pod round trip:
+
+```bash
+kubectl run kafkatest --rm -i --restart=Never --image=apache/kafka:4.3.1 \
+  --image-pull-policy=IfNotPresent --command -- bash -c \
+  'echo hi | /opt/kafka/bin/kafka-console-producer.sh \
+     --bootstrap-server host.minikube.internal:9094 --topic mlp.events'
+```
+
+M4 changes this wiring again: MSK is reached over its own bootstrap endpoint
+with IAM, and none of these three listeners apply.
+
 ## Troubleshooting
 
 **`kubectl apply` fails installing ArgoCD** with `metadata.annotations: Too
