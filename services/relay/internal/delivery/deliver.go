@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lilabrooks/my-local-platform/relay/internal/config"
+	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
