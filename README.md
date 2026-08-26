@@ -184,7 +184,16 @@ truth rather than per-agent copies.
 
 ## Requirements
 
-Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube and kubectl.
+Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube, kubectl and Helm.
+
+Helm is needed only by `make monitoring-install`, which renders
+`kube-prometheus-stack` into the cluster so the relay demo has a panel to point
+at — see [ADR 0008](docs/adr/0008-in-cluster-observability-for-the-demo.md).
+Everything else in the cluster is plain manifests applied by kubectl or synced
+by ArgoCD, and no CI job touches a cluster, so nothing else needs it.
+
+Tested with **Helm v4.2.4**. 3.x is untested rather than known-broken — the
+chart declares `apiVersion: v2`, which both majors read.
 
 The linters need only Docker, and fall back to pinned containers for anything
 not installed. Two are worth having natively because they run on every change:

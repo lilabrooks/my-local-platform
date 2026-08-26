@@ -146,6 +146,22 @@ the relay roles and the sink, and the dashboard `ConfigMap`.
 - **`make relay-demo` is the watchable path**: no hands, eyes on Grafana, no
   self-assertion. The asserting path is a separate target shaped like the
   existing `relay-replay-verify`.
+- **`make monitoring-install` calls Helm directly, and Helm joins the
+  requirements.** The alternative was rendering the chart to a pinned manifest
+  in the repository, which would have kept the toolchain unchanged and made the
+  applied YAML reviewable in a diff. Rejected because it buys review at the
+  price of a regeneration step that has to be remembered on every version bump,
+  and a generated 6,900-line manifest is not meaningfully reviewed anyway.
+
+  This departs from `make keda-install` in mechanism while matching it in
+  category: both are cluster capabilities installed at a pinned version outside
+  ArgoCD, but KEDA applies a released manifest with kubectl and this shells out
+  to Helm. The chart has no released flat manifest to apply, so the divergence
+  is forced rather than chosen.
+
+  Helm is needed by nothing else here. Every other manifest is applied by
+  kubectl or synced by ArgoCD, and no CI job touches the cluster, so
+  `.github/workflows/ci.yml` does not need it either.
 
 ## Consequences
 
@@ -229,6 +245,11 @@ Checked:
   `LABEL: grafana_dashboard`, `LABEL_VALUE: "1"`), so a ConfigMap deployed into
   `mlp` by ArgoCD is collected by a Grafana running in `monitoring`.
 - **`serviceMonitorSelector` requires the release label**, quoted above.
+- **Helm 4 renders the chart.** The template above was produced by Helm
+  **v4.2.4**, which is what is installed here. The chart declares `apiVersion:
+  v2` and `kubeVersion: '>=1.25.0-0'`, and the cluster runs v1.35.1. Helm 3.x
+  was not tested, so the requirement is stated as the version actually used
+  rather than as a floor nobody has checked.
 
 Still to run:
 
@@ -248,13 +269,6 @@ Still to run:
 
 ## Open questions
 
-- **How `make monitoring-install` invokes the chart.** Helm is now installed
-  locally but is not in the README's requirements, and `make keda-install` --
-  the precedent this follows -- applies a released manifest with `kubectl apply
-  --server-side` and no Helm at all. Either add Helm to the requirements, or
-  render the chart to a pinned manifest checked into the repository. The second
-  keeps the toolchain as it is and makes the applied YAML reviewable, at the
-  cost of a regeneration step on every version bump.
 - **The Helm release name is a coupling.** It appears in the Makefile and in
   every `ServiceMonitor`'s labels. `monitoring` is assumed throughout this
   record; the validate invariant is what keeps the two honest.
