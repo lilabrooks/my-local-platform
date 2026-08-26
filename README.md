@@ -64,6 +64,12 @@ docs/adr/       why each choice was made, and what was verified
 | Deployment | ArgoCD, app-of-apps | same manifests, ECR images |
 | Telemetry | OTel → Prometheus + Tempo + Grafana | OTel → Datadog |
 
+`relay` and its sink are scraped by Prometheus directly and come with a
+provisioned Grafana dashboard at
+**<http://localhost:3000/d/relay-delivery>** — consumer lag against consumer
+count, delivery latency, and the outcomes behind both. Details in the
+[local runbook](docs/runbook-local.md#metrics-and-the-relay-dashboard).
+
 ## Design decisions
 
 Six choices shape this repository, each recorded with the evidence behind it:

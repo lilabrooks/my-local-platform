@@ -12,9 +12,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 )
 
 type fakeProducer struct {
@@ -209,4 +211,45 @@ func TestGetOnEventsIsRejected(t *testing.T) {
 		t.Errorf("GET /v1/events returned 200, want a rejection")
 	}
 	_, _ = io.Copy(io.Discard, rr.Body)
+}
+
+func TestMetricsEndpointCountsOutcomes(t *testing.T) {
+	// The counters are package-level in internal/metrics, so this asserts on
+	// the delta rather than an absolute value: other tests in this binary
+	// increment the same series.
+	before := func(outcome string) float64 {
+		return testutil.ToFloat64(metrics.IngestEvents.WithLabelValues(outcome))
+	}
+	acceptedBefore, invalidBefore := before("accepted"), before("invalid")
+
+	h := newTestServer(&fakeProducer{})
+
+	if got := post(t, h, `{"tenant_id":"acme","type":"order.created","data":{"n":1}}`).Code; got != http.StatusAccepted {
+		t.Fatalf("POST /v1/events = %d, want 202", got)
+	}
+	// Missing tenant_id: rejected by Record.Validate, so it lands under
+	// "invalid" and not under "malformed", which is reserved for JSON that
+	// would not decode at all.
+	if got := post(t, h, `{"type":"order.created","data":{"n":1}}`).Code; got != http.StatusBadRequest {
+		t.Fatalf("POST with no tenant_id = %d, want 400", got)
+	}
+
+	if got := before("accepted") - acceptedBefore; got != 1 {
+		t.Errorf("accepted counter moved by %v, want 1", got)
+	}
+	if got := before("invalid") - invalidBefore; got != 1 {
+		t.Errorf("invalid counter moved by %v, want 1", got)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics = %d, want 200", rec.Code)
+	}
+	// Routed on the same mux as POST /v1/events rather than on a second
+	// listener, because the Deployment exposes one port and Prometheus has to
+	// reach this through the same Service as everything else.
+	if !strings.Contains(rec.Body.String(), "relay_ingest_events_total") {
+		t.Error("GET /metrics did not expose relay_ingest_events_total")
+	}
 }

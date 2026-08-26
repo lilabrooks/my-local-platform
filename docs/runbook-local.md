@@ -57,6 +57,48 @@ consumer. `make k8s-down` when you are not doing GitOps work.
 | Prometheus | http://localhost:9090 | none |
 | Tempo | http://localhost:3200 | none |
 | Grafana | http://localhost:3000 | anonymous, admin role |
+| relay dashboard | http://localhost:3000/d/relay-delivery | anonymous, admin role |
+
+## Metrics and the relay dashboard
+
+relay and the sink expose Prometheus text on `/metrics`, and Prometheus scrapes
+them directly rather than through the OTel collector. The collector re-exports
+what arrives over OTLP, and putting a consumer-lag gauge through that hop adds
+a place for it to be lost between the thing that measures it and the panel that
+plots it.
+
+```bash
+curl -s localhost:8082/metrics | grep relay_consumer_group_lag_total
+curl -s localhost:8083/metrics | grep relay_deliveries_total
+curl -s localhost:8084/metrics | grep sink_latency_ms
+```
+
+**Consumer lag is published by ingest, not by the consumers.** A deliver pod
+knows only the partitions it holds, and the M2 demo moves that group between one
+and twelve members, so per-pod lag series appear and vanish and their sum is
+least trustworthy exactly while someone is watching it. `relay-ingest` reads the
+group's committed offsets straight from the broker instead, which is also where
+KEDA reads them — so the dashboard and the scaler agree by construction.
+
+`relay_lag_refreshed_timestamp_seconds` is how you tell a drained topic from a
+lag nobody could measure. The gauges hold their last value when a poll fails,
+so the dashboard carries an **Age of the lag measurement** panel; anything past
+about 20s means the lag panels are stale rather than calm. The 20s is a 5s poll
+interval (`RELAY_LAG_INTERVAL`) plus up to a 15s Prometheus scrape interval.
+
+Prometheus finds relay through DNS service discovery rather than a static
+target, so `docker compose --profile apps up -d --scale relay-deliver=3` is
+scraped as three instances and `count(relay_build_info{role="deliver"})` is a
+real consumer count. With only `make up-obs` running, the `apps` names do not
+resolve and those jobs simply have no targets — expected, not a fault.
+
+Provisioning lives in `local/config/grafana/provisioning/`. Dashboards are files
+in this repository and `allowUiUpdates` is false, so an accidental save in the
+browser is discarded on restart; edit `dashboards/relay.json` instead. The
+datasource uids are pinned (`prometheus`, `tempo`) because a provisioned
+dashboard has to name one, and an unpinned uid is generated per install — the
+panels would work on the machine they were authored on and come up "Datasource
+not found" everywhere else.
 
 ## floci and the Docker socket
 
@@ -158,6 +200,24 @@ config without `DD_API_KEY`, it exits with
 
 **Ports already in use.** This stack claims 3000, 3200, 4317, 4318, 4566, 5432,
 5672, 8080, 8889, 9090, 9092 and 15672.
+
+### Grafana exits with "Datasource provisioning error: data source not found"
+
+A `grafana-data` volume created before the datasource uids were pinned holds
+`Prometheus` under a generated uid. Provisioning matches by uid, not by name, so
+it finds nothing to update and **fails the whole provisioning module** — Grafana
+then exits rather than starting without datasources, and the container restart
+loops.
+
+`datasources.yml` deletes both datasources by name before recreating them, which
+makes it idempotent against either kind of volume. If a stale volume still gets
+in the way:
+
+```bash
+docker compose -f local/docker-compose.yml rm -sf grafana && docker volume rm mlp_grafana-data
+```
+
+Nothing is lost. Every dashboard and datasource here is provisioned from files.
 
 ## Upgrading Postgres past 17
 

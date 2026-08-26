@@ -89,9 +89,10 @@ urls: ## Print the local endpoints
 	@echo "OTLP gRPC       localhost:4317"
 	@echo "Prometheus      http://localhost:9090"
 	@echo "Grafana         http://localhost:3000    (anonymous admin)"
-	@echo "relay ingest    http://localhost:8082    (POST /v1/events; apps profile)"
-	@echo "relay deliver   http://localhost:8083    (/readyz only; apps profile)"
-	@echo "sink            http://localhost:8084    (/received; apps profile)"
+	@echo "relay dashboard http://localhost:3000/d/relay-delivery"
+	@echo "relay ingest    http://localhost:8082    (POST /v1/events, /metrics; apps profile)"
+	@echo "relay deliver   http://localhost:8083    (/readyz, /metrics; apps profile)"
+	@echo "sink            http://localhost:8084    (/received, /metrics; apps profile)"
 
 # ---------------------------------------------------------------------------
 # Smoke service

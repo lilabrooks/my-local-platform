@@ -95,6 +95,22 @@ proves a port is listening, which is a different claim.
 | `k8s/argocd/` | `install.sh`, which substitutes | works |
 | `k8s/apps/` | ArgoCD, read from git | must be a real URL |
 
+**Metrics libraries are a per-service call, not a repository default.**
+`services/relay` uses `prometheus/client_golang` because it needs a latency
+histogram, labelled counters and per-partition gauges — bucket arithmetic and
+label handling are what the library is for, and those numbers are the evidence
+the M2 demo rests on. `services/echo` and `services/sink` hand-write the
+exposition format and stay standard-library-only, which is what keeps them on
+`scratch` with a fast build. Do not "unify" these; each is written down where it
+is, and the split is the decision.
+
+**Consumer lag is measured once, by `relay-ingest`, from the broker.** Not by
+the consumers. A deliver pod knows only its own partitions, KEDA moves that
+group between one and twelve members, and the sum of appearing-and-vanishing
+per-pod series is least trustworthy exactly while the demo is being watched.
+Reading the group's committed offsets from the broker is also where KEDA reads
+them, so the panel and the scaler cannot disagree.
+
 **Do not put a mutable label in a Deployment selector.** Selectors are immutable
 after creation, so it applies once and fails forever after. `k8s/validate`
 tests this; run it with `-count=1`, because Go's test cache does not track the

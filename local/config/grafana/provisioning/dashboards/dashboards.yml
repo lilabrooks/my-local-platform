@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: mlp
+    type: file
+    # Dashboards are files in this repository, not objects edited in the
+    # Grafana UI and lost with the volume. allowUiUpdates stays false so an
+    # accidental save in the browser cannot diverge from what is committed.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

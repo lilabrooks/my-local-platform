@@ -1,13 +1,34 @@
 apiVersion: 1
 
+# Grafana matches a provisioned datasource by uid, not by name. Adding a uid to
+# a datasource that an existing grafana-data volume already holds under a
+# generated one therefore fails the whole provisioning module at startup --
+# "Datasource provisioning error: data source not found" -- and Grafana exits
+# rather than starting without them.
+#
+# Deleting by name first makes the file idempotent against both a fresh volume
+# and one created before the uids were pinned. These datasources are defined
+# here and nowhere else, so there is nothing to lose by recreating them.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+  - name: Tempo
+    orgId: 1
+
 datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
+    # Pinned rather than generated, so a provisioned dashboard can name it.
+    # Without a fixed uid Grafana assigns a random one per install, and every
+    # panel in relay.json comes up "Datasource not found" on someone else's
+    # machine while working perfectly on the one it was authored on.
+    uid: prometheus
     url: http://prometheus:9090
     isDefault: true
 
   - name: Tempo
     type: tempo
     access: proxy
+    uid: tempo
     url: http://tempo:3200

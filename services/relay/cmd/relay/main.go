@@ -28,6 +28,7 @@ import (
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/delivery"
 	"github.com/lilabrooks/my-local-platform/relay/internal/ingest"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
 
@@ -91,6 +92,7 @@ func brokers() []string { return strings.Split(envOr("KAFKA_BOOTSTRAP", "localho
 func runIngest(log *slog.Logger) error {
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	addr := ":" + envOr("PORT", "8080")
+	metrics.BuildInfo.WithLabelValues(version, "ingest").Set(1)
 
 	writer := &kafka.Writer{
 		Addr:  kafka.TCP(brokers()...),
@@ -116,6 +118,25 @@ func runIngest(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Consumer group lag is published here rather than by the consumers, even
+	// though it is entirely about them.
+	//
+	// A deliver pod knows only its own partitions, and KEDA moves that group
+	// between one and twelve members during the demo -- so per-pod lag series
+	// come and go, and their sum is least trustworthy exactly when someone is
+	// watching it. ingest is single-replica and already holds a broker
+	// connection, so it can read the group's committed offsets straight from
+	// the broker and publish one stable series per partition. That is also
+	// where KEDA reads lag, which is why the panel and the scaler agree by
+	// construction rather than by coincidence.
+	go metrics.NewLagPoller(
+		brokers(),
+		envOr("RELAY_CONSUMER_GROUP", "relay-deliver"),
+		topic,
+		lagInterval(log),
+		log,
+	).Run(ctx)
+
 	go func() {
 		<-ctx.Done()
 		log.Info("shutdown signal received, failing readiness")
@@ -137,6 +158,7 @@ func runIngest(log *slog.Logger) error {
 }
 
 func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout time.Duration) error {
+	metrics.BuildInfo.WithLabelValues(version, "deliver").Set(1)
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	dlqTopic := envOr("RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq")
 	group := envOr("RELAY_CONSUMER_GROUP", "relay-deliver")
@@ -223,6 +245,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 
 func healthServer(addr string, c *delivery.Consumer) *http.Server {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -240,6 +263,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// lagInterval bounds itself rather than trusting the environment: a poll every
+// few milliseconds would hammer the broker with three requests a round, and one
+// every ten minutes would make the demo's lag panel a flat line that moves
+// after the interesting part is over.
+func lagInterval(log *slog.Logger) time.Duration {
+	const def = 5 * time.Second
+	raw := envOr("RELAY_LAG_INTERVAL", def.String())
+	d, err := time.ParseDuration(raw)
+	switch {
+	case err != nil:
+		log.Warn("RELAY_LAG_INTERVAL is not a duration, using the default", "value", raw, "default", def)
+		return def
+	case d < time.Second, d > time.Minute:
+		log.Warn("RELAY_LAG_INTERVAL is outside 1s..1m, using the default", "value", d, "default", def)
+		return def
+	}
+	return d
 }
 
 func envOr(key, def string) string {

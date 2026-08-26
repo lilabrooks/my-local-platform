@@ -11,6 +11,7 @@ import (
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
 
@@ -159,8 +160,14 @@ func (d *Deliverer) attempt(ctx context.Context, sub subscriptions.Subscription,
 	req.Header.Set(HeaderTimestamp, Timestamp(now))
 	req.Header.Set(HeaderSignature, Sign([]byte(sub.Secret), rec.ID, now, body))
 
+	// Timed around the round trip including the drain below, because a
+	// subscriber that answers headers promptly and then dribbles the body is
+	// occupying this consumer for the whole of it. That occupancy is what
+	// becomes lag, so it is what the histogram has to measure.
+	start := time.Now()
 	resp, err := d.client.Do(req)
 	if err != nil {
+		observeAttempt(0, time.Since(start))
 		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -170,5 +177,16 @@ func (d *Deliverer) attempt(ctx context.Context, sub subscriptions.Subscription,
 	// per retry.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 
+	observeAttempt(resp.StatusCode, time.Since(start))
 	return resp.StatusCode, nil
+}
+
+// observeAttempt records one HTTP attempt under its status class. A status of
+// 0 means no response arrived, which metrics.StatusClass reports as "error"
+// rather than folding it into 5xx -- a refused connection and a subscriber
+// replying 500 need different fixes.
+func observeAttempt(status int, took time.Duration) {
+	class := metrics.StatusClass(status)
+	metrics.DeliveryAttempts.WithLabelValues(class).Inc()
+	metrics.AttemptDuration.WithLabelValues(class).Observe(took.Seconds())
 }
