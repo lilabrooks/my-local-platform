@@ -27,6 +27,19 @@ dist/
 *.test
 *.out
 vendor/
+# Compiled service binaries. In a module whose only package is main --
+# services/echo and services/sink -- `go build ./...` writes the executable
+# beside the source, named after the last element of the module path rather
+# than the directory. services/sink/sink was committed that way in cccef79.
+# relay and smoke keep main under cmd/, so a whole-module build discards the
+# executable, but `go build ./cmd/relay` from the module root still writes one.
+# Nothing consumes these: the Dockerfiles build from source inside the image.
+# One line per module, because a gitignore pattern cannot match "the directory
+# name repeated"; add a line when a service is added.
+/services/echo/echo
+/services/relay/relay
+/services/sink/sink
+/services/smoke/smoke
 
 # Editors / OS
 .DS_Store
