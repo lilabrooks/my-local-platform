@@ -25,7 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
-	"github.com/lilabrooks/my-local-platform/relay/internal/config"
+	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/delivery"
 	"github.com/lilabrooks/my-local-platform/relay/internal/ingest"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
@@ -38,7 +38,9 @@ var version = "dev"
 // schedule is validated against: a consumer busy with one record for longer
 // than this cannot rejoin its group after a rebalance, so the delivery is
 // reassigned. See docs/adr/0006-kafka-over-sqs-for-delivery.md.
-const rebalanceTimeout = 30 * time.Second
+//
+// Defined in config so k8s/validate checks manifests against the same value.
+const rebalanceTimeout = config.DefaultRebalanceTimeout
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "relay", "version", version)

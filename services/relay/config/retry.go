@@ -1,5 +1,12 @@
 // Package config resolves relay's settings from the environment and refuses to
 // start on a combination that cannot work.
+//
+// It sits outside internal/ on purpose. k8s/validate asserts that a delivery
+// Deployment's terminationGracePeriodSeconds outlives the worst case implied by
+// its own ConfigMap, and that check has to compute the worst case the same way
+// the service does. Copying the preset table into the validator would let the
+// two drift the moment a preset changed -- the assertion would still pass,
+// against numbers nothing uses.
 package config
 
 import (
@@ -58,6 +65,12 @@ var presets = map[string][]time.Duration{
 		8 * time.Second,
 	},
 }
+
+// DefaultRebalanceTimeout is what the delivery consumer gives its group, and
+// therefore the ceiling every retry schedule is checked against. It lives here
+// rather than beside the reader so k8s/validate can assert a manifest's
+// schedule is one relay would actually start on, using the same number.
+const DefaultRebalanceTimeout = 30 * time.Second
 
 // ErrEmptySchedule is returned for a schedule with no delays in it. A zero
 // retry budget is more likely a typo than a decision; spell it "0s" to mean
