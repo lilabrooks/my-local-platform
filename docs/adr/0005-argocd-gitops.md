@@ -57,6 +57,12 @@ docker-compose on the host, not in the cluster. Wiring `echo` to an endpoint
 that does not resolve from inside minikube would ship a config that silently
 fails, which is worse than an honest gap.
 
+> [ADR 0008](0008-in-cluster-observability-for-the-demo.md) proposes reversing
+> this paragraph, and only this paragraph, for the cluster case. The reasoning
+> above held while the only workload was `echo` and there was nothing to look
+> at; the M2 demo makes the picture the deliverable. That ADR is Proposed, so
+> this consequence still stands as written.
+
 ## Verification
 
 Installed and checked on the `mlp` cluster (Kubernetes v1.35.1):
