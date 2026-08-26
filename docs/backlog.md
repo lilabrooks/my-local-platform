@@ -1,11 +1,19 @@
 # Backlog
 
-Known defects and deferred work. Each entry says what is wrong, why it is not
-fixed yet, and what "done" looks like — so the decision to defer is a record
-rather than something rediscovered later.
+**This is not a mirror of the issue tracker.** GitHub tracks *work*; this file
+records *why something was deliberately not done yet*, and what would change
+that. Most open issues never belong here — they are scheduled, and a milestone
+already says so.
 
-GitHub Issues are the tracker; this file is the copy that survives without
-network access and that agents read alongside [AGENTS.md](../AGENTS.md).
+An entry earns its place when the decision to defer is itself the thing worth
+keeping: a defect somebody chose to live with, and the condition under which
+that choice stops holding. Each one says what is wrong, why it is not fixed,
+and what "done" looks like — so the reasoning survives without the conversation
+that produced it, and without network access.
+
+Anything scheduled into a milestone belongs on the tracker alone. Resolved
+entries are removed rather than archived here; the commit that closes an issue
+is the record, and an ADR carries the measurements where there are any.
 
 ## Open
 
@@ -39,35 +47,98 @@ The local stack legitimately delivers to `http://sink:8081`, so the check needs
 an allowlist rather than an off switch. Full acceptance criteria are in the
 issue.
 
-## Resolved
+### relay deliver readiness does not reflect partition assignment
 
-### Kafka smoke check degrades as the topic grows
+**Issue:** [#21](https://github.com/lilabrooks/my-local-platform/issues/21) ·
+**Found:** 2026-08-25 · **Deferred:** 2026-08-26, behind
+[#32](https://github.com/lilabrooks/my-local-platform/issues/32) ·
+**Address:** if the demo shows pods that are Ready and idle
 
-**Issue:** [#1](https://github.com/lilabrooks/my-local-platform/issues/1) ·
-**Found:** 2026-08-24 · **Fixed:** 2026-08-24, in M0 of the `relay` roadmap
+`Consumer.Run` marks itself ready the instant the loop starts — before joining
+the consumer group and before any partition assignment. A consumer holding zero
+partitions reports `Ready`, and a Kubernetes readiness probe passes it.
 
-`services/smoke/internal/checks/messaging.go` consumed with a fresh group id
-from `kafka.FirstOffset`, so the check replayed the whole topic before reaching
-the marker it had just published. Consume time grew linearly with topic size:
-with 60,001 messages on `mlp.events` it timed out at ~31s; on a clean topic it
-passed in ~10s.
+This is the bug CI caught in #10, where relay-deliver joined a group before its
+topic existed, was assigned nothing, and sat healthy and idle while every event
+went undelivered. It would have reported Ready throughout.
 
-Fixed by taking the partition and offset from the produce response -- available
-because the check writes with `RequireAll` -- and seeking straight to that
-record. One fetch, whatever the topic holds. The consumer group is gone
-entirely, since one known record on one known partition needs no coordination.
+Deferred deliberately, with the demo sequenced ahead of it. The reasoning: KEDA
+scaling to twelve pods that all report Ready while lag does not drain would
+make the demo show autoscaling that visibly does nothing — but that is a
+failure the demo would *surface*, loudly, rather than hide. Fixing it first
+would be fixing a predicted problem; running the demo tells us whether it is a
+real one.
 
-Two things worth keeping from the fix:
+Done means `/readyz` reflects assignment rather than "the goroutine started",
+`/healthz` stays independent because a consumer with no assignment is alive and
+restarting it does not help, and the assignment count is in the readiness body
+so the failure is diagnosable rather than merely red.
 
-- **The original diagnosis was incomplete.** Replay was not the main cost on a
-  clean topic. Two kafka-go defaults were: a 1s writer `BatchTimeout` waiting
-  for a batch of 100 that a one-message check cannot fill, and a 10s reader
-  `MaxWait` that `Close` blocks on. Phase timing put 10.03s of a 10.04s run in
-  those two, with the actual read at 13.7ms. `BatchSize: 1` and
-  `MaxWait: 250ms` removed both.
-- **The check no longer sets its own deadline.** It had a 30s inner timeout on
-  top of the runner's 45s `checkTimeout` -- two bounds that could disagree.
+### sink retains every delivery it has ever received
 
-Measured after: 211ms on an empty topic, and 206/199/208ms against 100,007
-messages. Commands and the table are in
-[ADR 0004](adr/0004-real-kafka-not-emulated.md#verification).
+**Issue:** [#23](https://github.com/lilabrooks/my-local-platform/issues/23) ·
+**Found:** 2026-08-25 · **Deferred:** 2026-08-26, behind
+[#32](https://github.com/lilabrooks/my-local-platform/issues/32) ·
+**Address:** if a demo run is cut short by the sink being OOM-killed
+
+`services/sink` appends every delivery to a slice trimmed only by an explicit
+`DELETE /received`, and `GET /received` serialises the whole history on every
+call while the relay smoke check polls it every 250ms. Under the sustained load
+M2 generates, behind `mem_limit: 64m`, that is both a leak and an O(n) endpoint
+in a hot loop.
+
+Deferred behind the demo on the same reasoning as #21, and it is the riskier of
+the two: this one ends a run outright rather than degrading the story. The
+trigger is therefore an observation, not a schedule.
+
+`sink_received_retained` was added in
+[#22](https://github.com/lilabrooks/my-local-platform/issues/22) and is exported
+separately from `sink_received_total` precisely so the growth is visible on a
+panel before it becomes an unexplained OOM. Watch it during the first long run.
+
+Done means a bounded buffer with a configurable cap, `GET /received` able to
+return only recent entries, the total reported separately from the retained
+count so it stays truthful after eviction, and a test that the buffer stops
+growing.
+
+### relay interrupted delivery discards its error and can commit silently
+
+**Issue:** [#24](https://github.com/lilabrooks/my-local-platform/issues/24) ·
+**Found:** 2026-08-25 · **Address:** next time
+`internal/delivery/consumer.go` is open
+
+`Consumer.handle` sets an `interrupted` flag when `Deliver` returns a non-nil
+error, then discards that error and reconstructs one with `context.Cause(ctx)`.
+
+The two correlate today only because `Deliver` returns nothing but `ctx.Err()`
+— an invariant maintained in a different function. If it ever returns any other
+non-nil error, `context.Cause(ctx)` is nil, `handle` returns nil, and **the
+record commits as though every subscriber succeeded**. That is silent data loss.
+
+Deferred because it is currently unreachable, not because it is unimportant.
+Commit-only-when-finished is the most important property this consumer has, and
+it should not depend on an invariant held somewhere else. Cheap to fix; the
+trigger is proximity rather than severity.
+
+Done means capturing and propagating the actual error from `Deliver`, plus a
+test where a deliverer returns a non-context error and the offset is not
+committed.
+
+### relay poison-record dead letters carry an empty tenant key
+
+**Issue:** [#25](https://github.com/lilabrooks/my-local-platform/issues/25) ·
+**Found:** 2026-08-25 · **Address:** when someone first reads the DLQ to
+diagnose something
+
+The undecodable-record path builds a dead letter with a zero `Record`, and
+`deadLetter` keys the message by `dl.Record.TenantID` — which is `""`. Every
+poison record keys identically and none is attributable to a tenant.
+
+No practical impact today, because the DLQ has one partition. It becomes
+confusing at exactly the moment someone needs it to be clear, which is why the
+trigger is an event rather than a date.
+
+Done means the source partition and offset carried as fields rather than only
+inside the reason string, poison records keyed by something meaningful or a note
+explaining why an empty key is right for them, and the raw bytes of the
+undecodable record preserved so it can actually be diagnosed.
