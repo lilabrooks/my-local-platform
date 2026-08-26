@@ -1,0 +1,59 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: relay-deliver
+  labels:
+    app.kubernetes.io/name: relay-deliver
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  scaleTargetRef:
+    name: relay-deliver
+
+  # One consumer always, so events are delivered without waiting for a scale-up.
+  minReplicaCount: 1
+
+  # Twelve is not a preference, it is the ceiling. mlp.relay.deliveries has 12
+  # partitions and a consumer group cannot usefully exceed them -- the extra
+  # pods would join, be assigned nothing, and sit idle. KEDA knows this and
+  # caps itself at the partition count anyway; saying it here makes the reason
+  # visible next to the number.
+  maxReplicaCount: 12
+
+  # pollingInterval and cooldownPeriod are deliberately absent. Setting them
+  # here first seemed obviously right, and KEDA said otherwise on apply:
+  #
+  #   Warning: PollingInterval is configured but is not relevant.
+  #   PollingInterval is only relevant when minReplicaCount = 0 ...
+  #   Warning: CooldownPeriod is configured but is not relevant.
+  #
+  # Above zero replicas KEDA does not drive the loop at all -- it publishes a
+  # metric and the HPA below does the scaling. Leaving those two in would have
+  # been inert configuration with a comment claiming it was load-bearing.
+  #
+  # Reaction time is therefore the HPA's sync period, ~15s by default, not
+  # anything set here.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # This one is real, and easy to miss. The HPA's own scale-down
+          # stabilisation window defaults to 300s, so pods would sit there for
+          # five minutes after lag drained and it would look like KEDA was
+          # ignoring the ScaledObject. Scale-down is half of what the demo
+          # shows, and nobody watches an idle cluster that long to see it.
+          stabilizationWindowSeconds: 30
+
+  triggers:
+    - type: apache-kafka
+      metadata:
+        # The CLUSTER listener. KEDA reads lag straight from the broker, so it
+        # needs an address that resolves from inside the cluster exactly as the
+        # consumer does. See docs/runbook-k8s.md.
+        bootstrapServers: host.minikube.internal:9094
+        consumerGroup: relay-deliver
+        topic: mlp.relay.deliveries
+        # Desired replicas is ceil(totalLag / lagThreshold), capped by
+        # maxReplicaCount. Ten keeps the demo legible: a backlog of fifty asks
+        # for five pods.
+        lagThreshold: "10"
+        offsetResetPolicy: earliest

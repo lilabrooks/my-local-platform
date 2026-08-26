@@ -135,6 +135,52 @@ kubectl run kafkatest --rm -i --restart=Never --image=apache/kafka:4.3.1 \
 M4 changes this wiring again: MSK is reached over its own bootstrap endpoint
 with IAM, and none of these three listeners apply.
 
+## Autoscaling on consumer lag
+
+KEDA scales `relay-deliver` on the lag of its consumer group. `make keda-install`
+puts KEDA in the cluster; the `ScaledObject` lives with the manifests.
+
+A measured run, 600 events across 16 tenants with the sink answering in 1s:
+
+```text
+  t=15s   lag=0     replicas=1     idle
+  t=30s   lag=581   replicas=5     backlog lands, KEDA reacts
+  t=45s   lag=498   replicas=10
+  t=60s   lag=346   replicas=12    ceiling, draining ~10/s
+  t=90s   lag=103   replicas=12
+  t=120s  lag=5     replicas=8     scaling down
+  t=150s  lag=0     replicas=1     back to idle
+```
+
+Three things have to be true or the run does not show what it looks like it
+shows.
+
+**The slow sink has to succeed slowly, not time out.** Set its latency below
+`RELAY_DELIVERY_TIMEOUT`. A first attempt used 2000ms against a 2s timeout, so
+every delivery timed out, burned all five retries plus 15s of delays -- about
+25s a record -- and dead-lettered. Throughput collapsed to ~0.6/s, KEDA
+oscillated, and it read as KEDA misbehaving. 205 events went to the
+dead-letter queue. Nothing was wrong with the autoscaling.
+
+**Events have to span many tenants.** The partition key is the tenant id, so one
+tenant's events all land on ONE partition and exactly one consumer can ever work
+on them. Twelve pods against one busy partition adds eleven idle pods and drains
+nothing. `local/bootstrap/relay-db.sh` seeds sixteen `demo-NN` tenants for this.
+
+**The compose apps have to be down**, per the section below, or half the work
+happens where nobody is looking.
+
+Note that `kubectl scale --replicas=0` does not stop a KEDA-managed Deployment:
+the HPA restores `minReplicaCount` within seconds, and the pod rejoins the
+consumer group. Pause it instead:
+
+```bash
+kubectl -n mlp annotate scaledobject relay-deliver \
+  autoscaling.keda.sh/paused-replicas=0 --overwrite
+```
+
+Remove the annotation to hand scaling back.
+
 ## Do not run the compose apps and the cluster apps together
 
 They are alternatives, not complements.

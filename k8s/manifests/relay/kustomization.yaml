@@ -10,6 +10,7 @@ resources:
   - deployment-deliver.yaml
   - service-ingest.yaml
   - service-deliver.yaml
+  - scaledobject.yaml
 
 # 'commonLabels' is deprecated in kustomize; 'labels' with includeSelectors
 # false adds the label without rewriting the Deployment's selector, which is

@@ -7,10 +7,11 @@ metadata:
     app.kubernetes.io/component: deliver
     app.kubernetes.io/part-of: my-local-platform
 spec:
-  # One replica to start. KEDA takes over this number in #31 -- 12 is the
-  # ceiling that matters, because the topic has 12 partitions and a consumer
-  # group cannot usefully exceed them.
-  replicas: 1
+  # No replicas field on purpose. KEDA owns this number (scaledobject.yaml), and
+  # a value here would be a second authority: ArgoCD would restore it from git
+  # every sync while KEDA re-scaled from lag, the two overwriting each other
+  # every few seconds. The Application ignores /spec/replicas for this
+  # Deployment so the git state stays silent about it.
   selector:
     matchLabels:
       app.kubernetes.io/name: relay-deliver
