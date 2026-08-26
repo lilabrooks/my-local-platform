@@ -21,12 +21,19 @@ spec:
     server: https://kubernetes.default.svc
     namespace: mlp
 
+  # KEDA scales relay-deliver, so its replica count is not drift. Without this,
+  # selfHeal would restore the git value on every sync while KEDA re-scaled
+  # from lag -- the two overwriting each other every few seconds, and a demo
+  # that flaps instead of scaling.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: relay-deliver
+      jsonPointers:
+        - /spec/replicas
+
   syncPolicy:
     automated:
-      # selfHeal reverts manual kubectl edits back to git. That includes the
-      # replica count -- so once KEDA owns it (#31), the Deployment's replicas
-      # field has to leave these manifests or ArgoCD and KEDA will fight over
-      # it, each undoing the other every few seconds.
       prune: true
       selfHeal: true
     syncOptions:

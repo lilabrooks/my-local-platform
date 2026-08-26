@@ -58,6 +58,24 @@ INSERT INTO relay_subscriptions (tenant_id, url, signing_secret) VALUES
     ('acme',   'http://sink:8081/hooks/flaky', :'secret'),
     ('globex', 'http://sink:8081/hooks/ok',    :'secret')
 ON CONFLICT (tenant_id, url) DO NOTHING;
+
+-- Tenants for the autoscaling demo, one healthy subscriber each.
+--
+-- Sixteen of them because the partition key is the tenant id, so a single
+-- tenant's events all land on ONE partition and exactly one consumer can ever
+-- work on them. Scaling to twelve pods against one busy partition would add
+-- eleven idle pods and drain nothing -- the demo would show KEDA reacting and
+-- nothing getting faster.
+--
+-- Sixteen tenants over twelve partitions leaves few partitions empty once the
+-- hash spreads them, which is what gives added pods something to pick up.
+--
+-- No flaky endpoint here on purpose: dead-lettering is demonstrated with acme,
+-- and mixing it into the scaling run would make the lag curve harder to read.
+INSERT INTO relay_subscriptions (tenant_id, url, signing_secret)
+SELECT 'demo-' || to_char(n, 'FM00'), 'http://sink:8081/hooks/ok', :'secret'
+FROM generate_series(1, 16) AS n
+ON CONFLICT (tenant_id, url) DO NOTHING;
 SQL
 
 say "relay database ready"

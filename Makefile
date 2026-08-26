@@ -178,6 +178,17 @@ sink-image: ## Build the sink image and load it into the cluster
 .PHONY: images
 images: echo-image relay-image sink-image ## Build and load every workload image (slow: minutes per image)
 
+# Pinned like every other component here. --server-side because KEDA's CRDs
+# exceed the annotation size limit a client-side apply has to work within, the
+# same way the ArgoCD manifests do.
+KEDA_VERSION ?= 2.20.2
+
+.PHONY: keda-install
+keda-install: ## Install KEDA into the cluster (pinned; needed for lag autoscaling)
+	kubectl apply --server-side -f \
+	  https://github.com/kedacore/keda/releases/download/v$(KEDA_VERSION)/keda-$(KEDA_VERSION).yaml
+	kubectl -n keda rollout status deploy/keda-operator --timeout=180s
+
 .PHONY: argocd-install
 argocd-install: ## Install ArgoCD and register the app-of-apps
 	REPO_URL=$(REPO_URL) ./k8s/argocd/install.sh
