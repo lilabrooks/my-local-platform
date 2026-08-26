@@ -13,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
 
@@ -253,5 +256,56 @@ func TestDeliverHandlesConnectionRefused(t *testing.T) {
 	}
 	if out.LastStatus != 0 {
 		t.Errorf("LastStatus = %d, want 0 when no response arrived", out.LastStatus)
+	}
+}
+
+func TestDeliverCountsAttemptsByStatusClass(t *testing.T) {
+	// Not parallel: it reads package-level counters in internal/metrics, and a
+	// concurrent delivery test would land in the same series.
+	attempts := func(class string) float64 {
+		return testutil.ToFloat64(metrics.DeliveryAttempts.WithLabelValues(class))
+	}
+	before5xx, before2xx, beforeErr := attempts("5xx"), attempts("2xx"), attempts("error")
+
+	// Two failures then a success: three attempts, two classes.
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	out, err := newTestDeliverer(t, "1ms,1ms,1ms").Deliver(context.Background(),
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+	if err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if !out.Delivered {
+		t.Fatalf("Delivered = false after a 200 on the third attempt: %s", out.Reason)
+	}
+
+	if got := attempts("5xx") - before5xx; got != 2 {
+		t.Errorf("5xx attempts moved by %v, want 2", got)
+	}
+	if got := attempts("2xx") - before2xx; got != 1 {
+		t.Errorf("2xx attempts moved by %v, want 1", got)
+	}
+
+	// A refused connection is counted too, under "error" rather than 5xx.
+	// Attempts that produce no response at all would otherwise be invisible:
+	// the counter would move only when a server answered, so a subscriber
+	// whose host had gone away would look like no traffic rather than trouble.
+	//
+	// One delay is a budget of two attempts (MaxAttempts is len(delays)+1), and
+	// both are refused, so the class gains two.
+	if _, err := newTestDeliverer(t, "1ms").Deliver(context.Background(),
+		subscriptions.Subscription{ID: 2, URL: "http://127.0.0.1:1/nothing", Secret: "s"}, testRecord()); err != nil {
+		t.Fatalf("Deliver against a refused connection: %v", err)
+	}
+	if got := attempts("error") - beforeErr; got != 2 {
+		t.Errorf("error-class attempts moved by %v, want 2", got)
 	}
 }

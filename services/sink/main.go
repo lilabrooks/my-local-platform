@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,11 +58,25 @@ type delivery struct {
 	Status     int             `json:"status"`
 }
 
+// outcome is the label set on sink_deliveries_total. Both fields are bounded --
+// two handler paths, a handful of statuses -- so the map cannot grow with
+// traffic the way a label carrying an event id would.
+type outcome struct {
+	path   string
+	status int
+}
+
 type sink struct {
 	secret []byte
 
 	mu       sync.Mutex
 	received []delivery
+	outcomes map[outcome]int64
+
+	// Separate from len(received) because DELETE /received resets that, and a
+	// counter that goes backwards is not a counter. The smoke check clears the
+	// history between runs, so the two diverge in normal use.
+	receivedTotal atomic.Int64
 
 	// Runtime knobs, so `make relay-demo` can slow the sink mid-run rather
 	// than restarting it with different environment variables.
@@ -95,6 +110,7 @@ func main() {
 	mux.HandleFunc("GET /received", s.getReceived)
 	mux.HandleFunc("DELETE /received", s.deleteReceived)
 	mux.HandleFunc("POST /control", s.postControl)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -181,7 +197,15 @@ func (s *sink) handle(failRate float64) http.HandlerFunc {
 			Data:       payload.Data,
 			Status:     status,
 		})
+		// Lazily allocated under the same lock that guards it, so a sink
+		// built as a bare struct literal -- which the tests do -- cannot
+		// panic on a nil map write.
+		if s.outcomes == nil {
+			s.outcomes = map[outcome]int64{}
+		}
+		s.outcomes[outcome{path: r.URL.Path, status: status}]++
 		s.mu.Unlock()
+		s.receivedTotal.Add(1)
 
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(http.StatusText(status)))
@@ -273,6 +297,85 @@ func (s *sink) postControl(w http.ResponseWriter, r *http.Request) {
 		"latency_ms": s.latencyMS.Load(),
 		"fail_rate":  s.failRateValue(),
 	})
+}
+
+// metrics emits Prometheus text format by hand, the way services/echo does.
+//
+// relay took on prometheus/client_golang because it needs a latency histogram
+// and per-partition gauges. The sink needs four counters and three gauges, and
+// keeping it standard-library-only is a property worth more than the few lines
+// this costs: the image stays on scratch and the build stays fast.
+//
+// Sorted output is not required by the exposition format, but a stable byte
+// order makes two scrapes diffable and lets a test assert on the whole body.
+func (s *sink) metrics(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	counts := make(map[outcome]int64, len(s.outcomes))
+	outcomes := make([]outcome, 0, len(s.outcomes))
+	for k, v := range s.outcomes {
+		outcomes = append(outcomes, k)
+		counts[k] = v
+	}
+	retained := len(s.received)
+	s.mu.Unlock()
+
+	sort.Slice(outcomes, func(i, j int) bool {
+		if outcomes[i].path != outcomes[j].path {
+			return outcomes[i].path < outcomes[j].path
+		}
+		return outcomes[i].status < outcomes[j].status
+	})
+
+	var b strings.Builder
+	writeHeader(&b, "sink_build_info", "gauge",
+		"Always 1. Labelled with the version of a running sink process.")
+	fmt.Fprintf(&b, "sink_build_info{version=%q} 1\n", version)
+
+	writeHeader(&b, "sink_deliveries_total", "counter",
+		"Verified deliveries received, by handler path and the status returned.")
+	for _, o := range outcomes {
+		fmt.Fprintf(&b, "sink_deliveries_total{path=%q,status=\"%d\"} %d\n", o.path, o.status, counts[o])
+	}
+
+	writeHeader(&b, "sink_received_total", "counter",
+		"Verified deliveries received since start, across every path.")
+	fmt.Fprintf(&b, "sink_received_total %d\n", s.receivedTotal.Load())
+
+	// Retained is deliberately not the same number as received, and the gap is
+	// the subject of issue #23: this slice is only ever trimmed by
+	// DELETE /received, so under the sustained load M2 generates it grows until
+	// the container's 64m limit stops it. Exporting it makes that growth
+	// visible rather than an unexplained OOM part-way through a demo.
+	writeHeader(&b, "sink_received_retained", "gauge",
+		"Deliveries currently held in memory and served by GET /received.")
+	fmt.Fprintf(&b, "sink_received_retained %d\n", retained)
+
+	writeHeader(&b, "sink_rejected_total", "counter",
+		"Deliveries refused because their signature or timestamp did not check out.")
+	fmt.Fprintf(&b, "sink_rejected_total %d\n", s.rejects.Load())
+
+	// The two knobs, exported so a panel can show cause beside effect: the
+	// step where latency goes to 2000 is the step where lag starts to climb,
+	// and reading that off one graph is most of what the demo is trying to say.
+	writeHeader(&b, "sink_latency_ms", "gauge",
+		"Configured artificial delay before answering a delivery.")
+	fmt.Fprintf(&b, "sink_latency_ms %d\n", s.latencyMS.Load())
+
+	writeHeader(&b, "sink_fail_rate", "gauge",
+		"Configured probability that a delivery is answered 500.")
+	fmt.Fprintf(&b, "sink_fail_rate %s\n", strconv.FormatFloat(s.failRateValue(), 'g', -1, 64))
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	// One write. The discarded error is the client having hung up mid-response,
+	// which there is nothing useful to do about -- discarding it explicitly
+	// says that, where ignoring it silently does not.
+	_, _ = io.WriteString(w, b.String())
+}
+
+// writeHeader emits the HELP and TYPE lines the exposition format wants before
+// the first sample of a family.
+func writeHeader(b *strings.Builder, name, kind, help string) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, kind)
 }
 
 func (s *sink) count() int {

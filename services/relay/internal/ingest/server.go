@@ -14,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 )
 
 // MaxBodyBytes bounds a request before it is parsed. Slightly above
@@ -54,6 +55,7 @@ func (s *Server) MarkReady(ready bool) { s.ready.Store(ready) }
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/events", s.postEvent)
+	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -90,9 +92,11 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
+			metrics.IngestEvents.WithLabelValues("too_large").Inc()
 			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds %d bytes", MaxBodyBytes)
 			return
 		}
+		metrics.IngestEvents.WithLabelValues("malformed").Inc()
 		writeError(w, http.StatusBadRequest, "malformed JSON: %v", err)
 		return
 	}
@@ -101,6 +105,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Losing the random source is not the caller's fault.
 		s.log.Error("generate event id", "error", err)
+		metrics.IngestEvents.WithLabelValues("internal").Inc()
 		writeError(w, http.StatusInternalServerError, "could not generate an event id")
 		return
 	}
@@ -114,6 +119,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 	}
 	if err := rec.Validate(); err != nil {
+		metrics.IngestEvents.WithLabelValues("invalid").Inc()
 		writeError(w, http.StatusBadRequest, "%v", err)
 		return
 	}
@@ -121,6 +127,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	value, err := json.Marshal(rec)
 	if err != nil {
 		s.log.Error("encode record", "error", err, "event_id", id)
+		metrics.IngestEvents.WithLabelValues("internal").Inc()
 		writeError(w, http.StatusInternalServerError, "could not encode the event")
 		return
 	}
@@ -137,11 +144,13 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		// event that was not durably written, so an unreachable broker is a
 		// 503 and the caller retries. Nothing is buffered in memory.
 		s.log.Error("produce", "error", err, "event_id", id, "tenant", rec.TenantID)
+		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
 		writeError(w, http.StatusServiceUnavailable, "could not durably accept the event, retry")
 		return
 	}
 
 	s.accepted.Add(1)
+	metrics.IngestEvents.WithLabelValues("accepted").Inc()
 	s.log.Info("accepted", "event_id", id, "tenant", rec.TenantID, "type", rec.Type, "topic", s.topic)
 	writeJSON(w, http.StatusAccepted, postEventResponse{ID: id})
 }

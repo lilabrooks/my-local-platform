@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
 
@@ -102,6 +104,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return fmt.Errorf("fetch: %w", err)
 		}
 
+		start := time.Now()
 		if err := c.handle(ctx, msg); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// Shutting down mid-record. Do not commit: the record is
@@ -122,6 +125,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return fmt.Errorf("commit partition %d offset %d: %w", msg.Partition, msg.Offset, err)
 		}
 		c.handled.Add(1)
+		// Counted after the commit, so the metric means "finished with", the
+		// same thing the committed offset means. Counting at fetch time would
+		// include records the consumer was interrupted part-way through.
+		metrics.RecordsConsumed.WithLabelValues(strconv.Itoa(msg.Partition)).Inc()
+		metrics.RecordDuration.Observe(time.Since(start).Seconds())
 	}
 }
 
@@ -133,6 +141,7 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 		// Park it and move on, or it blocks the partition forever.
 		c.log.Error("undecodable record, dead-lettering",
 			"error", err, "partition", msg.Partition, "offset", msg.Offset)
+		metrics.DeadLetters.WithLabelValues("undecodable").Inc()
 		return c.deadLetter(ctx, DeadLetter{
 			Reason:   fmt.Sprintf("undecodable record at partition %d offset %d: %v", msg.Partition, msg.Offset, err),
 			FailedAt: time.Now().UTC(),
@@ -180,6 +189,7 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 	for _, out := range outcomes {
 		if out.Delivered {
 			c.delivered.Add(1)
+			metrics.Deliveries.WithLabelValues("delivered").Inc()
 			c.log.Info("delivered", "event_id", rec.ID, "tenant", rec.TenantID,
 				"url", out.Subscription.URL, "attempts", out.Attempts, "status", out.LastStatus)
 			continue
@@ -201,6 +211,8 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 			return fmt.Errorf("dead-letter %s: %w", rec.ID, err)
 		}
 		c.deadLettered.Add(1)
+		metrics.Deliveries.WithLabelValues("dead_lettered").Inc()
+		metrics.DeadLetters.WithLabelValues("exhausted").Inc()
 	}
 	return nil
 }

@@ -11,3 +11,37 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+
+  # relay and the sink expose /metrics directly rather than through the
+  # collector: the demo panel needs consumer lag, and routing a gauge through
+  # OTLP to be re-exported adds a hop that can only lose it.
+  #
+  # DNS service discovery rather than a static target, because a compose
+  # service name resolves to every replica of it. `docker compose up
+  # --scale relay-deliver=3` is then scraped as three instances, which is what
+  # makes count(relay_build_info{role="deliver"}) a real consumer count here
+  # the same way it is in Kubernetes.
+  #
+  # These live in the `apps` profile, so with only `make up-obs` running the
+  # names do not resolve and the jobs simply have no targets. That is expected,
+  # not a misconfiguration.
+  - job_name: relay-ingest
+    dns_sd_configs:
+      - names: ["relay-ingest"]
+        type: A
+        port: 8080
+        refresh_interval: 10s
+
+  - job_name: relay-deliver
+    dns_sd_configs:
+      - names: ["relay-deliver"]
+        type: A
+        port: 8080
+        refresh_interval: 10s
+
+  - job_name: sink
+    dns_sd_configs:
+      - names: ["sink"]
+        type: A
+        port: 8081
+        refresh_interval: 10s
