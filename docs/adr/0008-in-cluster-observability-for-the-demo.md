@@ -143,9 +143,13 @@ the relay roles and the sink, and the dashboard `ConfigMap`.
   mode annotates the ScaledObject `paused-replicas=0`, waits for the drain,
   resets, then unpauses. `make relay-replay-verify` keeps running compose mode
   in CI.
-- **`make relay-demo` is the watchable path**: no hands, eyes on Grafana, no
-  self-assertion. The asserting path is a separate target shaped like the
-  existing `relay-replay-verify`.
+- **`make relay-demo` is the watchable path**: no hands, eyes on Grafana. It
+  asserts its own *preconditions* -- see the preflight in Consequences -- but
+  not its outcomes; what the six steps demonstrate is read off the panel by a
+  human. The self-checking path is a separate target shaped like the existing
+  `relay-replay-verify`. The distinction is worth keeping: a demo that judged
+  its own success would need to encode what "lag drained" means, and the
+  argument it exists to make is visual.
 - **`make monitoring-install` calls Helm directly, and Helm joins the
   requirements.** The alternative was rendering the chart to a pinned manifest
   in the repository, which would have kept the toolchain unchanged and made the
@@ -182,10 +186,43 @@ demo panel empty. This is precisely the "config that silently fails" ADR 0005
 set out to avoid, arriving by a different route, and it couples a manifest in
 this repository to the Helm release name chosen in the Makefile.
 
-Guard it the way this repository guards its other silent failures: a
-`k8s/validate` invariant asserting every `ServiceMonitor` carries the release
-label the install target uses. Two things that must agree across a Makefile and
-a YAML file are exactly what that test directory is for.
+**The label stays, and the guard is a runtime assertion rather than a static
+test.** An earlier draft of this ADR proposed a `k8s/validate` invariant
+comparing the release name in the Makefile against the label in the YAML. That
+was the wrong layer. Such a test proves only that two files this repository
+controls agree with each other: install with a different `--release` and it
+passes while the panel is still empty. It also covers one cause of "no targets"
+out of at least five -- the others being a wrong port name, a mistaken Service
+selector, a `ServiceMonitor` ArgoCD has not synced yet, and a future change to
+the chart's own default.
+
+The check that covers all of them is to assert, before the demo produces a
+single event, the exact query the panel plots:
+
+```text
+count(relay_build_info{role="deliver"}) >= 1
+```
+
+If that returns data the panel works, whatever the cause would have been. It
+costs no new plumbing: #22 verified that Grafana's `/api/ds/query` answers for
+this datasource uid, so the preflight reuses the port-forward the demo already
+opens instead of adding a second one to Prometheus.
+
+With the failure made loud, the coupling is an inconvenience rather than a
+hazard, and the label can be chosen on fidelity instead of safety. It stays,
+because requiring it is what a shared cluster does and driver 1 is that the
+shape carries into M4. Setting
+`prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues: false`
+removes the coupling outright -- verified: it renders `serviceMonitorSelector:
+{}`, which with the already-empty namespace selector matches every
+`ServiceMonitor` in the cluster -- but it is a setting to reconsider the moment
+that cluster has another tenant, so taking it here would undercut the reason the
+chart was chosen.
+
+The override would also be narrower than it appears. It clears only
+`serviceMonitorSelector`; `podMonitorSelector`, `probeSelector`, `ruleSelector`
+and `scrapeConfigSelector` all keep `release: "monitoring"`. The same trap
+returns with the first `PrometheusRule`, which is M3's alerting work.
 
 **Two observability stacks exist.** Compose keeps its own for non-Kubernetes
 work; the cluster gets its own. They share exactly one artifact, `relay.json`,
@@ -209,9 +246,13 @@ cluster uses.
 
 ## Failure semantics
 
-**Monitoring absent.** `make relay-demo` fails loudly at step 1 -- checking for
-the Grafana Deployment and the `ServiceMonitor` CRD before producing any event
--- rather than running four steps into a demo whose central panel is empty.
+**Monitoring absent, or present but not scraping.** `make relay-demo` fails
+loudly before producing a single event, and the check is the panel's own query
+rather than the existence of the pieces behind it:
+`count(relay_build_info{role="deliver"}) >= 1`. Checking that the Grafana
+Deployment and the `ServiceMonitor` CRD exist -- what an earlier draft proposed
+-- passes in every case where they exist and nothing is scraped, which is the
+case that actually happens.
 
 **A scrape target down mid-demo.** The lag line is unaffected: lag is published
 by `relay-ingest` reading the broker, and ingest is single-replica. A missing
@@ -258,10 +299,12 @@ Still to run:
   claim driver 2 rests on.
 - `count(relay_build_info{role="deliver"})` tracking
   `kubectl get deploy relay-deliver` through a full scale-up and scale-down.
-- The `k8s/validate` invariants failing when `relay.json` is edited without
-  regenerating the ConfigMap, and when a `ServiceMonitor` loses its release
-  label.
-- `make relay-demo` failing at step 1 against a cluster with no monitoring.
+- The `k8s/validate` invariant failing when `relay.json` is edited without
+  regenerating the ConfigMap.
+- `make relay-demo` refusing to start against a cluster where monitoring is
+  absent, and separately against one where it is installed but the
+  `ServiceMonitor` is not being selected -- the second is the case the preflight
+  exists for, and the one an existence check would pass.
 - Replay in cluster mode redelivering the window and leaving the ScaledObject
   unpaused, including when the script is interrupted mid-run.
 - `make mem` and node pressure with the whole chart running, to set the minikube
@@ -269,9 +312,10 @@ Still to run:
 
 ## Open questions
 
-- **The Helm release name is a coupling.** It appears in the Makefile and in
-  every `ServiceMonitor`'s labels. `monitoring` is assumed throughout this
-  record; the validate invariant is what keeps the two honest.
+None outstanding. Two were raised during the interview and both are settled
+above: how `make monitoring-install` invokes the chart, and whether the Helm
+release name coupling should be removed or guarded. `monitoring` is the release
+name assumed throughout this record.
 
 ## Rollback
 
@@ -291,5 +335,10 @@ the decision, not the code.
 - **A second dashboard appears.** One file guarded by one test is proportionate;
   three files are not, and generating the ConfigMap becomes worth its
   complexity.
+- **A `PrometheusRule`, `PodMonitor` or `Probe` is added** -- M3's alerting work
+  is the likely trigger. Each has its own selector still requiring
+  `release: "monitoring"`, so the silent-drop failure returns for that kind, and
+  the preflight above does not cover it. Whatever guards it should assert the
+  rule is loaded rather than that the label is present.
 - **Memory stops being available.** Installing the chart whole was chosen
   because it was. Alertmanager and node-exporter are the first things to cut.
