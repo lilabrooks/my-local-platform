@@ -159,6 +159,25 @@ echo-image: ## Build the echo image and load it into the cluster
 	cd services/echo && docker build --build-arg VERSION=$$(git rev-parse --short HEAD) -t echo:dev .
 	minikube image load echo:dev -p $(MINIKUBE_PROFILE)
 
+.PHONY: relay-image
+relay-image: ## Build the relay image and load it into the cluster
+	cd services/relay && docker build --build-arg VERSION=$$(git rev-parse --short HEAD) -t relay:dev .
+	minikube image load relay:dev -p $(MINIKUBE_PROFILE)
+
+.PHONY: sink-image
+sink-image: ## Build the sink image and load it into the cluster
+	cd services/sink && docker build --build-arg VERSION=$$(git rev-parse --short HEAD) -t sink:dev .
+	minikube image load sink:dev -p $(MINIKUBE_PROFILE)
+
+# `minikube image load` is what lets the manifests use imagePullPolicy:
+# IfNotPresent against a tag that exists in no registry. Without it a pod sits
+# in ImagePullBackOff trying to reach Docker Hub for `relay:dev`.
+#
+# It is also slow -- minutes per image, most of it spent transferring the layers
+# into the cluster rather than building. That is expected, not a hang.
+.PHONY: images
+images: echo-image relay-image sink-image ## Build and load every workload image (slow: minutes per image)
+
 .PHONY: argocd-install
 argocd-install: ## Install ArgoCD and register the app-of-apps
 	REPO_URL=$(REPO_URL) ./k8s/argocd/install.sh
