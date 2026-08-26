@@ -136,10 +136,19 @@ YAML those tests read.
 [docs/backlog.md](docs/backlog.md) lists deferred work with the reason it was
 deferred and what "done" means. Read it before assuming a failure is new.
 
-GitHub Issues are the tracker; backlog.md is the copy that survives without
-network access and that agents read. Two records of the same thing drift unless
-something holds them together — issue #1 sat open for a while after backlog.md
-called it resolved — so:
+**It is not a copy of the tracker, and trying to keep it in sync is the wrong
+job.** GitHub tracks work; backlog.md records why something was deliberately
+not done yet and what would change that. Most open issues never belong in it —
+they are scheduled, and a milestone already says so. An entry earns its place
+when the decision to defer is itself worth keeping, which is a much smaller set
+than "everything open".
+
+That framing is deliberate. An earlier version of this section called the file
+"the copy that survives without network access", and the two records drifted
+exactly as you would expect: issue #1 sat open for a while after backlog.md had
+already called it resolved. The fix is not more diligence, it is a file with a
+narrower job. Resolved entries are now deleted rather than archived — the
+closing commit is the record, and an ADR carries the measurements.
 
 **End the commit or PR that resolves an item with `Closes #N`.** GitHub closes
 the issue on merge, and that is the only part of this arrangement that does not
@@ -150,7 +159,8 @@ a milestone is a pointer to it, never a second copy.
 
 The Kafka smoke check defect that used to be described here was fixed in M0. Its
 measurements are in
-[ADR 0004](docs/adr/0004-real-kafka-not-emulated.md#verification).
+[ADR 0004](docs/adr/0004-real-kafka-not-emulated.md#verification), which is
+where a resolved entry's evidence belongs rather than in the backlog.
 
 ## Secrets
 
