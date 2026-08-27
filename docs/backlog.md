@@ -74,33 +74,6 @@ Done means `/readyz` reflects assignment rather than "the goroutine started",
 restarting it does not help, and the assignment count is in the readiness body
 so the failure is diagnosable rather than merely red.
 
-### sink retains every delivery it has ever received
-
-**Issue:** [#23](https://github.com/lilabrooks/my-local-platform/issues/23) ·
-**Found:** 2026-08-25 · **Deferred:** 2026-08-26, behind
-[#32](https://github.com/lilabrooks/my-local-platform/issues/32) ·
-**Address:** if a demo run is cut short by the sink being OOM-killed
-
-`services/sink` appends every delivery to a slice trimmed only by an explicit
-`DELETE /received`, and `GET /received` serialises the whole history on every
-call while the relay smoke check polls it every 250ms. Under the sustained load
-M2 generates, behind `mem_limit: 64m`, that is both a leak and an O(n) endpoint
-in a hot loop.
-
-Deferred behind the demo on the same reasoning as #21, and it is the riskier of
-the two: this one ends a run outright rather than degrading the story. The
-trigger is therefore an observation, not a schedule.
-
-`sink_received_retained` was added in
-[#22](https://github.com/lilabrooks/my-local-platform/issues/22) and is exported
-separately from `sink_received_total` precisely so the growth is visible on a
-panel before it becomes an unexplained OOM. Watch it during the first long run.
-
-Done means a bounded buffer with a configurable cap, `GET /received` able to
-return only recent entries, the total reported separately from the retained
-count so it stays truthful after eviction, and a test that the buffer stops
-growing.
-
 ### relay interrupted delivery discards its error and can commit silently
 
 **Issue:** [#24](https://github.com/lilabrooks/my-local-platform/issues/24) ·

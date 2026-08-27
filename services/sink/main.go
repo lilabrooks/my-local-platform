@@ -46,6 +46,18 @@ var version = "dev"
 // correctly, because a valid signature on an old request is a replay.
 const toleranceWindow = 5 * time.Minute
 
+// defaultRetain is how many deliveries the sink keeps.
+//
+// Sized against the thing that fills it: `make relay-demo` produces 600 events
+// per run, so this survives sixteen back-to-back demos before the oldest is
+// evicted, and holds ~1.8MB of the container's 128Mi. Large enough that nobody
+// tuning a demo has to think about it, small enough that it can never be the
+// reason a pod dies.
+//
+// SINK_RETAIN overrides it. Negative means unbounded, which only the tests ask
+// for, and only to prove the bounded path is what stops the growth.
+const defaultRetain = 10000
+
 // maxBody bounds what a subscriber will read. relay caps events well below it.
 const maxBody = 1 << 20
 
@@ -69,13 +81,33 @@ type outcome struct {
 type sink struct {
 	secret []byte
 
-	mu       sync.Mutex
+	// received is a ring buffer, not a growing slice. It used to be the latter,
+	// trimmed only by an explicit DELETE, so a long-lived sink retained every
+	// delivery it had ever seen and GET /received serialised all of them on
+	// every call -- while the relay smoke check polls it every 250ms.
+	//
+	// Measured before fixing, to keep the claim proportionate: one delivery
+	// retains 184 bytes, so the 128Mi container limit is roughly 729k
+	// deliveries, or about 1,200 demo runs. It was a real leak and a real O(n)
+	// endpoint, and it was never going to end a demo. See issue #23.
+	mu sync.Mutex
+	// len(received) IS the retained count -- it grows to retain and then stops,
+	// because record() overwrites in place once full. An earlier draft tracked
+	// the count in a separate field; a mutation test showed the two could
+	// disagree, reporting a bound that was being honoured by the counter and
+	// not by the memory.
 	received []delivery
+	ringNext int // where the next delivery goes once wrapped
+	retain   int // negative is unbounded, which only the tests ask for
 	outcomes map[outcome]int64
 
-	// Separate from len(received) because DELETE /received resets that, and a
-	// counter that goes backwards is not a counter. The smoke check clears the
-	// history between runs, so the two diverge in normal use.
+	// Separate from the retained count because DELETE /received resets that,
+	// and because eviction does too -- a counter that goes backwards is not a
+	// counter. `make relay-replay-verify` clears the history between phases
+	// (scripts/verify-replay.sh), so the two genuinely diverge in normal use.
+	//
+	// An earlier version of this comment said the SMOKE CHECK clears it. That
+	// was wrong: services/smoke only ever GETs /received.
 	receivedTotal atomic.Int64
 
 	// Runtime knobs, so `make relay-demo` can slow the sink mid-run rather
@@ -97,7 +129,8 @@ func main() {
 		log.Fatal("RELAY_SIGNING_SECRET is required; local/bootstrap/relay-db.sh prints the seeded value")
 	}
 
-	s := &sink{secret: []byte(secret)}
+	s := &sink{secret: []byte(secret), retain: parseRetain(os.Getenv("SINK_RETAIN"))}
+	log.Printf("retaining up to %d deliveries (SINK_RETAIN)", s.retain)
 	s.setLatency(parseDurationOr(os.Getenv("SINK_LATENCY"), 0))
 	s.setFailRate(parseFloatOr(os.Getenv("SINK_FAIL_RATE"), 0))
 
@@ -188,24 +221,14 @@ func (s *sink) handle(failRate float64) http.HandlerFunc {
 		}
 		_ = json.Unmarshal(body, &payload)
 
-		s.mu.Lock()
-		s.received = append(s.received, delivery{
+		s.record(delivery{
 			ReceivedAt: time.Now().UTC(),
 			Path:       r.URL.Path,
 			WebhookID:  r.Header.Get("webhook-id"),
 			Type:       payload.Type,
 			Data:       payload.Data,
 			Status:     status,
-		})
-		// Lazily allocated under the same lock that guards it, so a sink
-		// built as a bare struct literal -- which the tests do -- cannot
-		// panic on a nil map write.
-		if s.outcomes == nil {
-			s.outcomes = map[outcome]int64{}
-		}
-		s.outcomes[outcome{path: r.URL.Path, status: status}]++
-		s.mu.Unlock()
-		s.receivedTotal.Add(1)
+		}, status)
 
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(http.StatusText(status)))
@@ -252,17 +275,36 @@ func (s *sink) verify(h http.Header, body []byte, now time.Time) error {
 	return errors.New("no valid v1 signature in webhook-signature")
 }
 
-func (s *sink) getReceived(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	out := append([]delivery(nil), s.received...)
-	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"count": len(out), "deliveries": out})
+// getReceived serves the retained deliveries, most recent last.
+//
+// ?limit=N returns only the newest N, so a poller does not pay for the whole
+// buffer on every call. The relay smoke check polls this every 250ms looking
+// for one webhook id; without a limit it was re-serialising everything the
+// sink had ever accepted each time.
+//
+// `retained` and `total` are reported separately: eviction makes them differ,
+// and a caller that conflated them would think deliveries had been lost.
+func (s *sink) getReceived(w http.ResponseWriter, r *http.Request) {
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			http.Error(w, "limit must be a non-negative integer", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+	out := s.snapshot(limit)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":      len(out),
+		"retained":   s.count(),
+		"total":      s.receivedTotal.Load(),
+		"deliveries": out,
+	})
 }
 
 func (s *sink) deleteReceived(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	s.received = nil
-	s.mu.Unlock()
+	s.reset()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -317,6 +359,7 @@ func (s *sink) metrics(w http.ResponseWriter, _ *http.Request) {
 		counts[k] = v
 	}
 	retained := len(s.received)
+	retainLimit := s.retain
 	s.mu.Unlock()
 
 	sort.Slice(outcomes, func(i, j int) bool {
@@ -350,6 +393,13 @@ func (s *sink) metrics(w http.ResponseWriter, _ *http.Request) {
 		"Deliveries currently held in memory and served by GET /received.")
 	fmt.Fprintf(&b, "sink_received_retained %d\n", retained)
 
+	// The bound beside the level, so a panel shows how close eviction is
+	// rather than a number with no scale. #23 was hard to judge for exactly
+	// that reason: "grows without bound", with nothing to compare against.
+	writeHeader(&b, "sink_retain_limit", "gauge",
+		"Deliveries retained before the oldest is evicted; negative is unbounded.")
+	fmt.Fprintf(&b, "sink_retain_limit %d\n", retainLimit)
+
 	writeHeader(&b, "sink_rejected_total", "counter",
 		"Deliveries refused because their signature or timestamp did not check out.")
 	fmt.Fprintf(&b, "sink_rejected_total %d\n", s.rejects.Load())
@@ -376,6 +426,63 @@ func (s *sink) metrics(w http.ResponseWriter, _ *http.Request) {
 // the first sample of a family.
 func writeHeader(b *strings.Builder, name, kind, help string) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, kind)
+}
+
+// record stores one delivery, evicting the oldest when the buffer is full.
+func (s *sink) record(d delivery, status int) {
+	s.mu.Lock()
+	// Lazily allocated under the same lock that guards them, so a sink built
+	// as a bare struct literal -- which the tests do -- cannot panic on a nil
+	// map write or retain nothing by accident.
+	if s.outcomes == nil {
+		s.outcomes = map[outcome]int64{}
+	}
+	if s.retain == 0 {
+		s.retain = defaultRetain
+	}
+
+	if s.retain < 0 || len(s.received) < s.retain {
+		s.received = append(s.received, d)
+	} else {
+		s.received[s.ringNext] = d
+	}
+	if s.retain > 0 {
+		s.ringNext = (s.ringNext + 1) % s.retain
+	}
+
+	s.outcomes[outcome{path: d.Path, status: status}]++
+	s.mu.Unlock()
+	s.receivedTotal.Add(1)
+}
+
+// snapshot returns up to limit deliveries, oldest first, newest last.
+//
+// Oldest-first because that is the order they arrived and the order the old
+// growing slice returned; a poller asking for "the recent ones" wants the tail
+// of that, not a reversed list it has to re-sort.
+func (s *sink) snapshot(limit int) []delivery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]delivery, 0, len(s.received))
+	if s.retain < 0 || len(s.received) < s.retain {
+		out = append(out, s.received...)
+	} else {
+		// Wrapped: the oldest entry sits at ringNext.
+		out = append(out, s.received[s.ringNext:]...)
+		out = append(out, s.received[:s.ringNext]...)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
+func (s *sink) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.received = nil
+	s.ringNext = 0
 }
 
 func (s *sink) count() int {
@@ -423,6 +530,24 @@ func parseDurationOr(s string, def time.Duration) time.Duration {
 		log.Fatalf("SINK_LATENCY %q: %v", s, err)
 	}
 	return d
+}
+
+// parseRetain reads SINK_RETAIN. Zero is not a legal request -- it would mean
+// "retain nothing", which reads as a typo rather than an intention and would
+// silently break the smoke check that polls /received for a specific id.
+func parseRetain(v string) int {
+	if v == "" {
+		return defaultRetain
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Fatalf("SINK_RETAIN %q is not an integer", v)
+	}
+	if n == 0 {
+		log.Fatal("SINK_RETAIN=0 would retain nothing; use a positive count, " +
+			"or a negative one for unbounded")
+	}
+	return n
 }
 
 func parseFloatOr(s string, def float64) float64 {

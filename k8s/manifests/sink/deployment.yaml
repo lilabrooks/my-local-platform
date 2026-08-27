@@ -54,8 +54,9 @@ spec:
               cpu: 10m
               memory: 16Mi
             limits:
-              # The sink retains every delivery it has seen (#23), so this cap
-              # is what stops a long demo from taking the node with it.
+              # SINK_RETAIN bounds what the sink holds (#23); this is the
+              # backstop if that is ever set too high. 10000 deliveries is
+              # ~1.8MB, so the headroom here is deliberate rather than tight.
               memory: 128Mi
           livenessProbe:
             httpGet:

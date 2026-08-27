@@ -5,6 +5,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -299,5 +301,133 @@ func TestMetricsRejectsUnverifiedDeliveries(t *testing.T) {
 	}
 	if !strings.Contains(out, "sink_received_total 0") {
 		t.Errorf("a rejected delivery was counted as received\ngot:\n%s", out)
+	}
+}
+
+// TestRetentionStopsGrowing is the point of issue #23. A sink that ran for a
+// long time used to hold every delivery it had ever accepted.
+func TestRetentionStopsGrowing(t *testing.T) {
+	s := newSink()
+	s.retain = 10
+
+	for i := range 200 {
+		s.record(delivery{WebhookID: fmt.Sprintf("evt_%03d", i), Path: "/hooks/ok"}, 200)
+	}
+
+	if got := s.count(); got != 10 {
+		t.Errorf("retained %d deliveries, want the bound of 10", got)
+	}
+	if got := len(s.received); got != 10 {
+		t.Errorf("backing slice grew to %d, want 10 -- the ring is not reusing entries", got)
+	}
+	// The counter must NOT be bounded: eviction is not un-receiving.
+	if got := s.receivedTotal.Load(); got != 200 {
+		t.Errorf("sink_received_total = %d, want 200 -- eviction made the counter lie", got)
+	}
+}
+
+// TestRetentionKeepsTheNewest checks which end is dropped. Keeping the oldest
+// would be worse than not bounding at all: the smoke check polls for the
+// delivery it just triggered, which is always the newest.
+func TestRetentionKeepsTheNewest(t *testing.T) {
+	s := newSink()
+	s.retain = 3
+
+	for i := range 10 {
+		s.record(delivery{WebhookID: fmt.Sprintf("evt_%d", i)}, 200)
+	}
+
+	got := s.snapshot(0)
+	want := []string{"evt_7", "evt_8", "evt_9"}
+	if len(got) != len(want) {
+		t.Fatalf("snapshot has %d entries, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].WebhookID != want[i] {
+			t.Errorf("snapshot[%d] = %s, want %s (oldest first, newest last)",
+				i, got[i].WebhookID, want[i])
+		}
+	}
+}
+
+// TestSnapshotLimitReturnsTheTail covers the other half of #23: GET /received
+// serialised the entire history on every call, and the relay smoke check polls
+// it every 250ms.
+func TestSnapshotLimitReturnsTheTail(t *testing.T) {
+	s := newSink()
+	s.retain = 100
+	for i := range 50 {
+		s.record(delivery{WebhookID: fmt.Sprintf("evt_%d", i)}, 200)
+	}
+
+	got := s.snapshot(5)
+	if len(got) != 5 {
+		t.Fatalf("limit=5 returned %d entries", len(got))
+	}
+	if got[4].WebhookID != "evt_49" || got[0].WebhookID != "evt_45" {
+		t.Errorf("limit returned %s..%s, want evt_45..evt_49 -- the tail, not the head",
+			got[0].WebhookID, got[4].WebhookID)
+	}
+	// A limit larger than what is held is not an error, and must not pad.
+	if got := s.snapshot(500); len(got) != 50 {
+		t.Errorf("limit above the retained count returned %d, want 50", len(got))
+	}
+}
+
+func TestGetReceivedReportsRetainedAndTotalSeparately(t *testing.T) {
+	s := newSink()
+	s.retain = 5
+	for i := range 20 {
+		s.record(delivery{WebhookID: fmt.Sprintf("evt_%d", i)}, 200)
+	}
+
+	rec := httptest.NewRecorder()
+	s.getReceived(rec, httptest.NewRequest(http.MethodGet, "/received?limit=2", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /received?limit=2 = %d", rec.Code)
+	}
+	var body struct {
+		Count      int   `json:"count"`
+		Retained   int   `json:"retained"`
+		Total      int64 `json:"total"`
+		Deliveries []struct {
+			WebhookID string `json:"webhook_id"`
+		} `json:"deliveries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Three different numbers, and conflating any two would mislead: 2 asked
+	// for, 5 held, 20 ever seen.
+	if body.Count != 2 || body.Retained != 5 || body.Total != 20 {
+		t.Errorf("count=%d retained=%d total=%d, want 2/5/20",
+			body.Count, body.Retained, body.Total)
+	}
+	if len(body.Deliveries) != 2 || body.Deliveries[1].WebhookID != "evt_19" {
+		t.Errorf("deliveries did not end at the newest entry: %+v", body.Deliveries)
+	}
+}
+
+func TestGetReceivedRejectsABadLimit(t *testing.T) {
+	s := newSink()
+	for _, bad := range []string{"-1", "abc", "1.5"} {
+		rec := httptest.NewRecorder()
+		s.getReceived(rec, httptest.NewRequest(http.MethodGet, "/received?limit="+bad, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("limit=%s returned %d, want 400", bad, rec.Code)
+		}
+	}
+}
+
+// TestUnboundedRetentionIsStillPossible proves the bound is what stops the
+// growth, rather than something else in the rewrite doing it by accident.
+func TestUnboundedRetentionIsStillPossible(t *testing.T) {
+	s := newSink()
+	s.retain = -1
+	for i := range 500 {
+		s.record(delivery{WebhookID: fmt.Sprintf("evt_%d", i)}, 200)
+	}
+	if got := s.count(); got != 500 {
+		t.Errorf("unbounded sink retained %d of 500 -- the ring bounded it anyway", got)
 	}
 }
