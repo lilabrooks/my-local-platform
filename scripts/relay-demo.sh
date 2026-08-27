@@ -31,8 +31,14 @@ fail()  { printf '%sFAIL%s %s\n' "$red" "$off" "$*" >&2; exit 1; }
 
 cleanup() {
   kubectl -n "$NAMESPACE" delete pod "$TOOLBOX" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  [ -n "${graf_pid:-}" ] && kill "$graf_pid" 2>/dev/null || true
-  [ -n "${prom_pid:-}" ] && kill "$prom_pid" 2>/dev/null || true
+  # `[ -n "$x" ] && kill ... || true` reads as if-then-else and is not one
+  # (SC2015). Spelled out, because the port-forwards must be killed even when
+  # an earlier line of this trap failed.
+  #
+  # Note the comment does not begin "# shellcheck" -- that prefix is parsed as a
+  # DIRECTIVE, and an unparseable one is an error, not a comment.
+  if [ -n "${graf_pid:-}" ]; then kill "$graf_pid" 2>/dev/null || true; fi
+  if [ -n "${prom_pid:-}" ]; then kill "$prom_pid" 2>/dev/null || true; fi
   # Leaving the sink slow would make the NEXT run look broken from its first
   # step, which is a confusing way to inherit state.
   tb curl -s -o /dev/null -X POST http://sink:8081/control -d '{"latency_ms":0,"fail_rate":0}' 2>/dev/null || true
