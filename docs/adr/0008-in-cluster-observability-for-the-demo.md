@@ -379,19 +379,22 @@ way; the kernel killed processes inside the container and they surfaced as
 `Error exit=1` rather than `OOMKilled`. ArgoCD declares no memory requests at
 all, so the scheduler's 782 MiB is optimistic on top of being irrelevant.
 
+**`make relay-demo` runs all six steps, in 190 seconds**, and refuses rather
+than half-runs: no cluster, missing Deployments, no ScaledObject, the compose
+consumer still running, or Prometheus not scraping all fail at step 0.
+
+**Replay in cluster mode redelivers the window and leaves the ScaledObject
+unpaused**, including when interrupted. Tested by sending SIGTERM three seconds
+into a run: the `paused-replicas` annotation was gone afterwards, so the
+consumer was not stranded at zero replicas with the topic silently not
+draining. That was named as this record's one failure mode with no compose
+equivalent, so it is checked rather than assumed.
+
 Still to run:
 
 - The `k8s/validate` invariant failing when `relay.json` is edited without
-  regenerating the ConfigMap. Checked locally by breaking it; not yet exercised
-  against a cluster, where it does not apply.
-- `make relay-demo` refusing to start when monitoring is absent, and separately
-  when it is installed but the `ServiceMonitor` is not being selected. The
-  preflight behind it, `scripts/monitoring-ready.sh`, has been run and passes;
-  the demo target that calls it does not exist yet ([#32]).
-- Replay in cluster mode redelivering the window and leaving the ScaledObject
-  unpaused, including when the script is interrupted mid-run. Belongs to [#32].
-
-[#32]: https://github.com/lilabrooks/my-local-platform/issues/32
+  regenerating the ConfigMap. Checked locally by breaking it; it does not apply
+  against a cluster.
 
 ### What closes this gap
 

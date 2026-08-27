@@ -106,6 +106,10 @@ smoke: ## Run the end-to-end smoke check against the local stack
 relay-replay: ## Redeliver relay events from the last SINCE (default 1h; or SINCE=earliest)
 	./scripts/relay-replay.sh
 
+.PHONY: relay-demo
+relay-demo: ## The M2 demo: six steps against the cluster, narrated (~4 min)
+	./scripts/relay-demo.sh
+
 .PHONY: relay-replay-verify
 relay-replay-verify: ## Prove replay works: deliver, wipe, replay, assert the same ids return
 	./scripts/verify-replay.sh
