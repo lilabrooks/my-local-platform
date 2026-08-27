@@ -211,10 +211,16 @@ jobs:
       - name: yamllint
         run: pipx run yamllint -f github .
 
+      # Pinned to the version scripts/lint.sh uses. Unpinned, this ran whatever
+      # shellcheck the runner image happened to ship, and the two disagreed:
+      # `make lint` passed 10/10 locally on 0.11.0 while CI failed on SC2015,
+      # which older releases report and 0.11.0 does not. A gate that can differ
+      # from the one contributors run is a gate that fails after review.
       - name: shellcheck
         run: |
           find . -name '*.sh' -not -path '*/.terraform/*' -print0 \
-            | xargs -0 shellcheck
+            | xargs -0 docker run --rm -v "$PWD":/mnt -w /mnt \
+                koalaman/shellcheck:v0.11.0
 
       - name: markdownlint
         run: npx --yes markdownlint-cli2

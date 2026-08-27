@@ -10,6 +10,14 @@
 #   ./scripts/relay-replay.sh              # redeliver the last hour
 #   SINCE=6h ./scripts/relay-replay.sh     # "resend everything from the last six hours"
 #   SINCE=earliest ./scripts/relay-replay.sh
+#   MODE=cluster ./scripts/relay-replay.sh # against minikube instead of compose
+#
+# Two modes, because the consumer is stopped by a different lever in each and
+# there is no lever that works for both. MODE is detected from whichever
+# consumer is actually running; set it explicitly to override. Detection
+# refuses to guess when it finds both or neither, since running the compose and
+# cluster consumers together splits the partitions between them -- the trap
+# docs/runbook-k8s.md warns about.
 #
 # Kafka refuses to move a group's offsets while it has members, so the consumer
 # is stopped, reset, and started again. That is not incidental -- an offset
@@ -23,8 +31,74 @@ BROKER_CONTAINER="${BROKER_CONTAINER:-mlp-kafka}"
 BOOTSTRAP="${KAFKA_INTERNAL_BOOTSTRAP:-localhost:19092}"
 COMPOSE_FILE="${COMPOSE_FILE:-local/docker-compose.yml}"
 CONSUMER_SERVICE="${CONSUMER_SERVICE:-relay-deliver}"
+NAMESPACE="${RELAY_NAMESPACE:-mlp}"
+MODE="${MODE:-auto}"
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+
+compose_consumer_running() {
+  [ -n "$(docker compose -f "$COMPOSE_FILE" ps -q "$CONSUMER_SERVICE" 2>/dev/null)" ]
+}
+
+cluster_consumer_present() {
+  command -v kubectl >/dev/null 2>&1 &&
+    kubectl -n "$NAMESPACE" get scaledobject "$CONSUMER_SERVICE" >/dev/null 2>&1
+}
+
+if [ "$MODE" = auto ]; then
+  if compose_consumer_running && cluster_consumer_present; then
+    echo "both the compose and cluster consumers are present. They join the SAME" >&2
+    echo "group and split the partitions, so a replay would be delivered half to" >&2
+    echo "each. Stop one, or set MODE=compose / MODE=cluster deliberately." >&2
+    exit 1
+  elif compose_consumer_running; then
+    MODE=compose
+  elif cluster_consumer_present; then
+    MODE=cluster
+  else
+    echo "found no relay-deliver in compose or in namespace $NAMESPACE." >&2
+    echo "Bring one up: 'make up-apps', or 'make k8s-up && make k8s-apply-local'." >&2
+    exit 1
+  fi
+fi
+say "mode: $MODE"
+
+# The KEDA HPA restores minReplicaCount within seconds of a manual scale to
+# zero, so `kubectl scale` is not a lever here -- the consumer rejoins the group
+# and the reset fails. Pausing the ScaledObject is, and it is what
+# docs/runbook-k8s.md documents.
+PAUSE_ANNOTATION=autoscaling.keda.sh/paused-replicas
+
+stop_consumer() {
+  case "$MODE" in
+    compose)
+      docker compose -f "$COMPOSE_FILE" stop "$CONSUMER_SERVICE" >/dev/null
+      ;;
+    cluster)
+      # Paused, not scaled: removing the annotation later hands scaling back to
+      # KEDA rather than leaving a Deployment someone has to remember to fix.
+      kubectl -n "$NAMESPACE" annotate scaledobject "$CONSUMER_SERVICE" \
+        "$PAUSE_ANNOTATION=0" --overwrite >/dev/null
+      ;;
+  esac
+  # Both modes. An interrupted run leaves the consumer stopped otherwise, and
+  # the topic silently stops draining -- a stack left broken by a script that
+  # looked like it merely stopped.
+  trap restore_consumer EXIT INT TERM
+}
+
+# Restarts the consumer, and is also the EXIT trap set by stop_consumer.
+restore_consumer() {
+  case "$MODE" in
+    compose)
+      docker compose -f "$COMPOSE_FILE" start "$CONSUMER_SERVICE" >/dev/null
+      ;;
+    cluster)
+      kubectl -n "$NAMESPACE" annotate scaledobject "$CONSUMER_SERVICE" \
+        "$PAUSE_ANNOTATION-" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
 
 kafka() { docker exec "$BROKER_CONTAINER" /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server "$BOOTSTRAP" "$@"; }
 
@@ -54,7 +128,7 @@ utc_since() {
 }
 
 say "stopping $CONSUMER_SERVICE so the group can be reset"
-docker compose -f "$COMPOSE_FILE" stop "$CONSUMER_SERVICE" >/dev/null
+stop_consumer
 
 # A clean shutdown leaves the group immediately; wait rather than assuming.
 say "waiting for group $GROUP to go inactive"
@@ -88,7 +162,14 @@ kafka --group "$GROUP" --reset-offsets "${reset[@]}" --topic "$TOPIC" --execute 
   | awk -v t="$TOPIC" '$2 == t {printf "    partition %-3s -> offset %s\n", $3, $4}'
 
 say "starting $CONSUMER_SERVICE"
-docker compose -f "$COMPOSE_FILE" start "$CONSUMER_SERVICE" >/dev/null
+restore_consumer
+trap - EXIT INT TERM
 
 say "replaying. every event after that point is being delivered again"
-echo "    watch it land:  curl -s localhost:8084/received | python3 -m json.tool"
+if [ "$MODE" = cluster ]; then
+  echo "    watch it land:  kubectl -n $NAMESPACE port-forward svc/sink 8086:8081"
+  echo "                    then: curl -s localhost:8086/received | python3 -m json.tool"
+  echo "    or on the panel: make monitoring-ui"
+else
+  echo "    watch it land:  curl -s localhost:8084/received | python3 -m json.tool"
+fi
