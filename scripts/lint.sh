@@ -38,13 +38,29 @@ echo "linting $(pwd)"
 echo
 
 # --- YAML -------------------------------------------------------------------
-if has yamllint; then
+# Pinned, and a locally installed tool is used ONLY when it reports the pinned
+# version. Preferring whatever happens to be on PATH is how this script and CI
+# came to run different shellchecks: `make lint` passed 10/10 while CI failed on
+# the same commit, because the two versions disagreed about SC2015 (cb8dec3).
+#
+# YAMLLINT_VERSION is what the image below actually contains -- checked, not
+# assumed -- so the native path and the container path cannot diverge. 1.38.0 is
+# published but no container ships it, and keeping a Docker-only machine able to
+# run this matters more than the patch difference.
+YAMLLINT_IMAGE=pipelinecomponents/yamllint:0.35.10
+YAMLLINT_VERSION=1.37.1
+MARKDOWNLINT_VERSION=0.23.2
+
+# pinned <version> <version-output> -- true when the installed tool matches.
+pinned() { printf '%s' "$2" | grep -qF "$1"; }
+
+if has yamllint && pinned "$YAMLLINT_VERSION" "$(yamllint --version 2>&1)"; then
   out=$(yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/data -w /data pipelinecomponents/yamllint:0.35.10 \
+  out=$(docker run --rm -v "$PWD":/data -w /data "$YAMLLINT_IMAGE" \
         yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 else
-  skip "yamllint" "install with: brew install yamllint"
+  skip "yamllint" "install with: pipx install yamllint==$YAMLLINT_VERSION"
 fi
 
 # --- Shell ------------------------------------------------------------------
@@ -63,13 +79,16 @@ else
 fi
 
 # --- Markdown ---------------------------------------------------------------
-if has markdownlint-cli2; then
+if has markdownlint-cli2 && \
+   pinned "$MARKDOWNLINT_VERSION" "$(markdownlint-cli2 --version 2>&1 | head -1)"; then
   out=$(markdownlint-cli2 2>&1); report "markdownlint" $? "$out"
 elif has npx; then
-  out=$(npx --yes markdownlint-cli2 2>&1 | grep -vE '^npm notice'); code=$?
+  # @VERSION, not bare: `npx --yes markdownlint-cli2` fetches whatever is
+  # newest, so this gate could change under a repository that did not.
+  out=$(npx --yes "markdownlint-cli2@$MARKDOWNLINT_VERSION" 2>&1 | grep -vE '^npm notice'); code=$?
   report "markdownlint" "$code" "$out"
 else
-  skip "markdownlint" "needs npx or markdownlint-cli2"
+  skip "markdownlint" "needs npx or markdownlint-cli2 $MARKDOWNLINT_VERSION"
 fi
 
 # --- GitHub Actions ---------------------------------------------------------

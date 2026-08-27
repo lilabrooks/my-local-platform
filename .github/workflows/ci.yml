@@ -272,8 +272,12 @@ jobs:
           # clone of one commit.
           fetch-depth: 0
 
+      # Pinned to the same versions scripts/lint.sh uses, so `make lint` and this
+      # job cannot disagree. `pipx run yamllint` and `npx --yes markdownlint-cli2`
+      # fetch whatever is newest, which is how this job and lint.sh came to run
+      # different shellchecks -- 10/10 locally, red here, same commit (cb8dec3).
       - name: yamllint
-        run: pipx run yamllint -f github .
+        run: pipx run yamllint==1.37.1 -f github .
 
       # Pinned to the version scripts/lint.sh uses. Unpinned, this ran whatever
       # shellcheck the runner image happened to ship, and the two disagreed:
@@ -287,7 +291,7 @@ jobs:
                 koalaman/shellcheck:v0.11.0
 
       - name: markdownlint
-        run: npx --yes markdownlint-cli2
+        run: npx --yes markdownlint-cli2@0.23.2
 
       - name: actionlint
         uses: docker://rhysd/actionlint:1.7.12
