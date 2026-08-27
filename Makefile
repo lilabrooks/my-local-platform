@@ -240,9 +240,18 @@ monitoring-dashboard: ## Regenerate the in-cluster dashboard ConfigMap from rela
 # 3001, because the compose Grafana holds 3000. Running both and guessing which
 # one you are looking at is how a demo shows the wrong stack -- the sink already
 # sits on 8084 for the same reason.
+.PHONY: monitoring-password
+monitoring-password: ## Print the in-cluster Grafana admin password
+	@kubectl -n $(MONITORING_NS) get secret $(MONITORING_RELEASE)-grafana \
+	  -o jsonpath='{.data.admin-password}' | base64 -d; echo
+
 .PHONY: monitoring-ui
 monitoring-ui: ## Port-forward the in-cluster Grafana to http://localhost:3001
-	@echo "http://localhost:3001/d/relay-delivery   (admin / prom-operator)"
+	@echo "http://localhost:3001/d/relay-delivery   (admin / \`make monitoring-password\`)"
+	@echo
+	@echo "  NOT prom-operator. Chart 88.5.4 generates a random admin password"
+	@echo "  rather than using that old documented default."
+	@echo
 	kubectl -n $(MONITORING_NS) port-forward svc/$(MONITORING_RELEASE)-grafana 3001:80
 
 .PHONY: argocd-install
