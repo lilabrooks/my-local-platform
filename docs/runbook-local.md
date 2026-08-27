@@ -26,8 +26,31 @@ the JVM services grow substantially:
 | `obs` | ~490 MB | collector, prometheus, tempo, grafana |
 | **all** | **~1.6 GB** | everything above |
 
-A local minikube adds **~1.8 GB** on top, making it the single largest
-consumer. `make k8s-down` when you are not doing GitOps work.
+A local minikube adds the most of anything here, and how much depends on what
+is in it. `MINIKUBE_MEMORY` is **6g** since 2026-08-27; measured on the `mlp`
+profile with ArgoCD, KEDA, kube-prometheus-stack and the relay workloads:
+
+| Cluster contents | Node container | Of a 6 GiB cap |
+|---|---|---|
+| Empty, 7 pods | 865 MiB | 14% |
+| \+ KEDA | 1.35 GiB | 22% |
+| \+ ArgoCD | 1.71 GiB | 29% |
+| \+ kube-prometheus-stack | 3.08 GiB | 51% |
+| Peak under load, 12 consumer pods | **3.49 GiB** | **58%** |
+
+**3g does not work, and fails in a way that does not look like memory.** At 3g
+the same components never reached load: `helm install` timed out on a
+post-install hook, and the control plane thrashed -- 22 restarts in kube-system
+including etcd and the apiserver. The node never reports `MemoryPressure`,
+because minikube's kubelet reads the Docker VM's memory as node allocatable
+rather than the container's cgroup limit. Processes are killed by the kernel
+inside the container and surface as `Error exit=1`, not `OOMKilled`, so a
+memory problem reads as unrelated application crashes.
+
+Memory cannot be changed on a running cluster with the docker driver:
+`make k8s-delete`, then `make k8s-up`.
+
+`make k8s-down` when you are not doing GitOps work.
 
 `make mem` prints current usage. Bring up only what you need:
 

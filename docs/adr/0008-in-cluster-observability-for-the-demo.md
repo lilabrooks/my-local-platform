@@ -54,8 +54,9 @@ Ranked. The first one decided it.
 4. **One dashboard definition, not two.** #22 shipped `relay.json` for compose.
    A second copy is a panel that works in one place and silently does not in the
    other.
-5. **Memory**, on a node started with `--memory=3g`. Adjustable, but it has a
-   cost the runbook already tracks.
+5. **Memory**, on a node then started with `--memory=3g`. Treated as adjustable
+   rather than fixed, which turned out to matter: measuring showed 3g cannot
+   run this at all, and `MINIKUBE_MEMORY` is now 6g. See Verification.
 
 ## Options considered
 
@@ -187,6 +188,22 @@ demo panel empty. This is precisely the "config that silently fails" ADR 0005
 set out to avoid, arriving by a different route, and it couples a manifest in
 this repository to the Helm release name chosen in the Makefile.
 
+**Every ingest replica publishes the same lag, so panels must aggregate with
+`max`, never `sum`.** This was found by running it, on 2026-08-27.
+
+The reasoning for putting the poller in ingest included the claim that ingest is
+single-replica. It is not: `k8s/manifests/relay/deployment-ingest.yaml` runs two,
+both poll the broker for the same consumer group, and both publish the same
+numbers. The compose stack runs one, which is why nothing showed there.
+
+What survives is the property that actually mattered -- the series do not move
+when the consumer group rebalances. What breaks is naive aggregation:
+`sum(relay_consumer_group_lag_total)` multiplies lag by the ingest replica
+count, and `relay_consumer_group_lag` unaggregated draws each partition once per
+replica. Both were wrong in `relay.json` until a run reported a peak of 1103 for
+600 events produced; with `max` the same run reads 596. Fixed, with the reason
+recorded on the panels themselves rather than only here.
+
 **The label stays, and the guard is a runtime assertion rather than a static
 test.** An earlier draft of this ADR proposed a `k8s/validate` invariant
 comparing the release name in the Makefile against the label in the YAML. That
@@ -256,8 +273,13 @@ Deployment and the `ServiceMonitor` CRD exist -- what an earlier draft proposed
 case that actually happens.
 
 **A scrape target down mid-demo.** The lag line is unaffected: lag is published
-by `relay-ingest` reading the broker, and ingest is single-replica. A missing
-deliver target shows as the consumer count dropping, which is honest.
+by `relay-ingest` reading the broker, and every ingest replica reports the same
+value, so losing one changes nothing. A missing deliver target shows as the
+consumer count dropping, which is honest.
+
+That property is load-bearing and was nearly lost. An earlier draft said "ingest
+is single-replica" -- it is not, the Deployment runs two -- and the panels
+summed across them, doubling lag. See the correction under Consequences.
 
 **The lag poll itself failing.** `relay_lag_refreshed_timestamp_seconds` goes
 stale and the dashboard's freshness panel passes its threshold. This already
@@ -272,9 +294,10 @@ before reporting step 6 as passed.
 
 ## Verification
 
-**Nothing below has been run.** Two mechanism claims were checked against the
-rendered chart on 2026-08-26 (`helm template kube-prometheus-stack --version
-88.5.4`); everything else is a claim to be tested by building it.
+**Run on 2026-08-27**, on the `mlp` minikube profile at `--memory=6g`, with
+Kafka and Postgres in compose and the compose apps stopped. The two chart
+claims were checked earlier against `helm template kube-prometheus-stack
+--version 88.5.4`.
 
 Checked:
 
@@ -293,23 +316,82 @@ Checked:
   was not tested, so the requirement is stated as the version actually used
   rather than as a floor nobody has checked.
 
+Measured:
+
+**Per-pod discovery works, which is what driver 2 rests on.** Prometheus lists
+each relay pod as its own target at its own pod IP, not one Service address:
+
+```text
+relay-ingest     http://10.244.0.24:8080/metrics    up
+relay-ingest     http://10.244.0.23:8080/metrics    up
+relay-deliver    http://10.244.0.22:8080/metrics    up
+```
+
+**`count(relay_build_info{role="deliver"})` tracks the Deployment** through a
+full cycle. 600 events across 16 tenants, sink slowed to 1s:
+
+```text
+  t       lag    replicas   node memory
+  t=0s      0     1         3.41 GiB
+  t=12s   596     1         3.46 GiB    burst lands
+  t=24s   582     3         3.44 GiB    KEDA reacts
+  t=35s   557     7         3.52 GiB
+  t=47s   507    11         3.56 GiB
+  t=58s   380    12         3.58 GiB    ceiling
+  t=92s   127    12         3.64 GiB    peak memory
+  t=115s   19    12         3.57 GiB
+  t=127s    7    10         3.47 GiB    draining, scaling down
+  t=149s    0     3         3.43 GiB
+  t=172s    0     1         3.43 GiB    back to idle
+```
+
+Every event was delivered; no dead letters. A peak lag of 596 against 600
+produced is the arithmetic working -- the burst outruns one consumer, and the
+group drains it once KEDA has added members.
+
+**These replace an earlier set that were wrong.** The first run summed lag
+across ingest replicas and reported a peak of 1103, roughly double. Memory and
+replica counts were unaffected; only the lag column changed.
+
+**The memory figure: 6g, and 3g does not work.** Peak was 3.64 GiB of the 6 GiB
+cap -- 61%, with 2.3 GiB of headroom -- and one restart in the whole cluster,
+in KEDA, during install.
+
+At `--memory=3g` the same components never reached load. The supporting cast
+alone sat at 88-92% with `relay-deliver` at zero replicas, `helm install` failed
+on a post-install hook timing out against the API server, and the control plane
+thrashed: 22 restarts in kube-system including etcd, the apiserver, the
+scheduler and the controller-manager, plus 17 in ArgoCD and 12 in KEDA.
+
+**The node cannot warn about this**, which is why the failure reads as
+unrelated application crashes. minikube's kubelet reports the Docker VM's memory
+as node allocatable, not the container's cgroup limit, so three numbers disagree
+and nothing reconciles them:
+
+| Source | Reported |
+|---|---|
+| Sum of pod memory requests, what the scheduler counts | 782 MiB |
+| Node `allocatable` | 7.75 GiB |
+| The Docker cgroup limit actually enforced | 3.00 GiB |
+
+`MemoryPressure` stayed `False` throughout. Nothing was evicted in an orderly
+way; the kernel killed processes inside the container and they surfaced as
+`Error exit=1` rather than `OOMKilled`. ArgoCD declares no memory requests at
+all, so the scheduler's 782 MiB is optimistic on top of being irrelevant.
+
 Still to run:
 
-- All scrape targets `up` in the in-cluster Prometheus, with `relay-deliver`
-  appearing as N separate targets at N pod IPs while KEDA scales. This is the
-  claim driver 2 rests on.
-- `count(relay_build_info{role="deliver"})` tracking
-  `kubectl get deploy relay-deliver` through a full scale-up and scale-down.
 - The `k8s/validate` invariant failing when `relay.json` is edited without
-  regenerating the ConfigMap.
-- `make relay-demo` refusing to start against a cluster where monitoring is
-  absent, and separately against one where it is installed but the
-  `ServiceMonitor` is not being selected -- the second is the case the preflight
-  exists for, and the one an existence check would pass.
+  regenerating the ConfigMap. Checked locally by breaking it; not yet exercised
+  against a cluster, where it does not apply.
+- `make relay-demo` refusing to start when monitoring is absent, and separately
+  when it is installed but the `ServiceMonitor` is not being selected. The
+  preflight behind it, `scripts/monitoring-ready.sh`, has been run and passes;
+  the demo target that calls it does not exist yet ([#32]).
 - Replay in cluster mode redelivering the window and leaving the ScaledObject
-  unpaused, including when the script is interrupted mid-run.
-- `make mem` and node pressure with the whole chart running, to set the minikube
-  memory figure.
+  unpaused, including when the script is interrupted mid-run. Belongs to [#32].
+
+[#32]: https://github.com/lilabrooks/my-local-platform/issues/32
 
 ### What closes this gap
 

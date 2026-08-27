@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mlp
+
+# Deliberately NOT in k8s/manifests/relay/, even though both files describe
+# relay. A ServiceMonitor is a prometheus-operator CRD, so `kubectl apply -k
+# k8s/manifests/relay` would fail with "no matches for kind ServiceMonitor" on
+# any cluster where monitoring is not installed -- breaking `make
+# k8s-apply-local` for anyone who only wants relay. Separating them keeps that
+# failure confined to this directory and to its own ArgoCD Application.
+resources:
+  - servicemonitor.yaml
+  - dashboard-relay.yaml
+
+labels:
+  - includeSelectors: false
+    includeTemplates: true
+    pairs:
+      app.kubernetes.io/managed-by: argocd

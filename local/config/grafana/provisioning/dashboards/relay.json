@@ -21,7 +21,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "Consumer lag and consumer count",
-      "description": "The demo, on one graph. Slowing the sink raises its latency; lag climbs behind it; KEDA adds consumers; lag drains; the consumers go away again. Lag is read from the broker by relay-ingest, which is where KEDA reads it too, so the scaler and this panel cannot disagree.",
+      "description": "The demo, on one graph. Slowing the sink raises its latency; lag climbs behind it; KEDA adds consumers; lag drains; the consumers go away again. Lag is read from the broker by relay-ingest, which is where KEDA reads it too, so the scaler and this panel cannot disagree.\n\nmax() rather than sum(): every relay-ingest replica polls the broker for the same consumer group and reports the same number, so summing multiplies lag by the ingest replica count. max() is the truth whatever that count is.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -158,7 +158,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(relay_consumer_group_lag_total{group=\"relay-deliver\"})",
+          "expr": "max(relay_consumer_group_lag_total{group=\"relay-deliver\"})",
           "legendFormat": "lag (records)",
           "refId": "A",
           "range": true
@@ -189,7 +189,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Lag by partition",
-      "description": "Twelve partitions is the ceiling on useful consumers, so this is where a scale-up that cannot help shows itself: lag concentrated on one partition drains at one consumer's pace however many pods exist. Events keyed by tenant is what puts it there.",
+      "description": "Twelve partitions is the ceiling on useful consumers, so this is where a scale-up that cannot help shows itself: lag concentrated on one partition drains at one consumer's pace however many pods exist. Events keyed by tenant is what puts it there.\n\nAggregated with max by (partition) for the same reason as the panel above -- without it each partition is drawn once per ingest replica.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -234,7 +234,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "relay_consumer_group_lag{group=\"relay-deliver\"}",
+          "expr": "max by (partition) (relay_consumer_group_lag{group=\"relay-deliver\"})",
           "legendFormat": "partition {{partition}}",
           "refId": "A",
           "range": true
