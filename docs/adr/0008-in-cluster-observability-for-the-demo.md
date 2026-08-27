@@ -188,6 +188,22 @@ demo panel empty. This is precisely the "config that silently fails" ADR 0005
 set out to avoid, arriving by a different route, and it couples a manifest in
 this repository to the Helm release name chosen in the Makefile.
 
+**Every ingest replica publishes the same lag, so panels must aggregate with
+`max`, never `sum`.** This was found by running it, on 2026-08-27.
+
+The reasoning for putting the poller in ingest included the claim that ingest is
+single-replica. It is not: `k8s/manifests/relay/deployment-ingest.yaml` runs two,
+both poll the broker for the same consumer group, and both publish the same
+numbers. The compose stack runs one, which is why nothing showed there.
+
+What survives is the property that actually mattered -- the series do not move
+when the consumer group rebalances. What breaks is naive aggregation:
+`sum(relay_consumer_group_lag_total)` multiplies lag by the ingest replica
+count, and `relay_consumer_group_lag` unaggregated draws each partition once per
+replica. Both were wrong in `relay.json` until a run reported a peak of 1103 for
+600 events produced; with `max` the same run reads 596. Fixed, with the reason
+recorded on the panels themselves rather than only here.
+
 **The label stays, and the guard is a runtime assertion rather than a static
 test.** An earlier draft of this ADR proposed a `k8s/validate` invariant
 comparing the release name in the Makefile against the label in the YAML. That
@@ -257,8 +273,13 @@ Deployment and the `ServiceMonitor` CRD exist -- what an earlier draft proposed
 case that actually happens.
 
 **A scrape target down mid-demo.** The lag line is unaffected: lag is published
-by `relay-ingest` reading the broker, and ingest is single-replica. A missing
-deliver target shows as the consumer count dropping, which is honest.
+by `relay-ingest` reading the broker, and every ingest replica reports the same
+value, so losing one changes nothing. A missing deliver target shows as the
+consumer count dropping, which is honest.
+
+That property is load-bearing and was nearly lost. An earlier draft said "ingest
+is single-replica" -- it is not, the Deployment runs two -- and the panels
+summed across them, doubling lag. See the correction under Consequences.
 
 **The lag poll itself failing.** `relay_lag_refreshed_timestamp_seconds` goes
 stale and the dashboard's freshness panel passes its threshold. This already
@@ -311,20 +332,29 @@ full cycle. 600 events across 16 tenants, sink slowed to 1s:
 
 ```text
   t       lag    replicas   node memory
-  t=0s    598     1         3.24 GiB
-  t=12s  1103     5         3.37 GiB    KEDA reacts
-  t=24s   893    10         3.42 GiB
-  t=46s   613    12         3.49 GiB    ceiling, peak memory
-  t=92s    75    12         3.44 GiB
-  t=104s   17     9         3.33 GiB    draining, scaling down
-  t=115s    0     7         3.30 GiB
-  t=149s    0     1         3.30 GiB    back to idle
+  t=0s      0     1         3.41 GiB
+  t=12s   596     1         3.46 GiB    burst lands
+  t=24s   582     3         3.44 GiB    KEDA reacts
+  t=35s   557     7         3.52 GiB
+  t=47s   507    11         3.56 GiB
+  t=58s   380    12         3.58 GiB    ceiling
+  t=92s   127    12         3.64 GiB    peak memory
+  t=115s   19    12         3.57 GiB
+  t=127s    7    10         3.47 GiB    draining, scaling down
+  t=149s    0     3         3.43 GiB
+  t=172s    0     1         3.43 GiB    back to idle
 ```
 
-Every event was delivered; no dead letters.
+Every event was delivered; no dead letters. A peak lag of 596 against 600
+produced is the arithmetic working -- the burst outruns one consumer, and the
+group drains it once KEDA has added members.
 
-**The memory figure: 6g, and 3g does not work.** Peak was 3.49 GiB of the 6 GiB
-cap -- 58%, with 2.5 GiB of headroom -- and one restart in the whole cluster,
+**These replace an earlier set that were wrong.** The first run summed lag
+across ingest replicas and reported a peak of 1103, roughly double. Memory and
+replica counts were unaffected; only the lag column changed.
+
+**The memory figure: 6g, and 3g does not work.** Peak was 3.64 GiB of the 6 GiB
+cap -- 61%, with 2.3 GiB of headroom -- and one restart in the whole cluster,
 in KEDA, during install.
 
 At `--memory=3g` the same components never reached load. The supporting cast

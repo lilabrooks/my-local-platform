@@ -224,7 +224,11 @@ MONITORING_NS      ?= monitoring
 monitoring-install: ## Install kube-prometheus-stack into the cluster (pinned; the demo's panel)
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 	helm repo update prometheus-community
-	helm upgrade --install $(MONITORING_RELEASE) prometheus-community/kube-prometheus-stack 	  --version $(KPS_VERSION) 	  --namespace $(MONITORING_NS) --create-namespace 	  --wait --timeout 10m
+	helm upgrade --install $(MONITORING_RELEASE) prometheus-community/kube-prometheus-stack \
+	  --version $(KPS_VERSION) \
+	  --namespace $(MONITORING_NS) --create-namespace \
+	  --values k8s/monitoring-values.yaml \
+	  --wait --timeout 10m
 	@echo
 	@echo "  next:  make monitoring-ready   (asserts the demo's panel will have data)"
 	@echo "         make monitoring-ui      (Grafana on :3001, not 3000)"
@@ -247,10 +251,12 @@ monitoring-password: ## Print the in-cluster Grafana admin password
 
 .PHONY: monitoring-ui
 monitoring-ui: ## Port-forward the in-cluster Grafana to http://localhost:3001
-	@echo "http://localhost:3001/d/relay-delivery   (admin / \`make monitoring-password\`)"
+	@echo "http://localhost:3001/d/relay-delivery   (no login -- anonymous admin)"
 	@echo
-	@echo "  NOT prom-operator. Chart 88.5.4 generates a random admin password"
-	@echo "  rather than using that old documented default."
+	@echo "  Anonymous access comes from k8s/monitoring-values.yaml, matching the"
+	@echo "  compose Grafana. The login form still works for admin-only pages:"
+	@echo "  user admin, password from: make monitoring-password"
+	@echo "  (NOT prom-operator -- this chart version generates a random one.)"
 	@echo
 	kubectl -n $(MONITORING_NS) port-forward svc/$(MONITORING_RELEASE)-grafana 3001:80
 

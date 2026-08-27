@@ -124,11 +124,19 @@ func runIngest(log *slog.Logger) error {
 	// A deliver pod knows only its own partitions, and KEDA moves that group
 	// between one and twelve members during the demo -- so per-pod lag series
 	// come and go, and their sum is least trustworthy exactly when someone is
-	// watching it. ingest is single-replica and already holds a broker
-	// connection, so it can read the group's committed offsets straight from
-	// the broker and publish one stable series per partition. That is also
+	// watching it. ingest already holds a broker connection, so it can read the
+	// group's committed offsets straight from the broker and publish a series
+	// per partition that does not move when the group rebalances. That is also
 	// where KEDA reads lag, which is why the panel and the scaler agree by
 	// construction rather than by coincidence.
+	//
+	// EVERY INGEST REPLICA RUNS THIS, and the Deployment runs two. They poll
+	// the same group and publish the same numbers, which is harmless -- the
+	// value is a property of the group, not of the pod -- but it means anything
+	// consuming these series must aggregate with `max`, never `sum`. Summing
+	// multiplies lag by the replica count. The dashboard got this wrong until a
+	// cluster run showed a peak of 1103 for 600 events produced; see
+	// docs/adr/0008-in-cluster-observability-for-the-demo.md.
 	go metrics.NewLagPoller(
 		brokers(),
 		envOr("RELAY_CONSUMER_GROUP", "relay-deliver"),
