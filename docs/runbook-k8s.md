@@ -181,6 +181,47 @@ kubectl -n mlp annotate scaledobject relay-deliver \
 
 Remove the annotation to hand scaling back.
 
+## Two Grafanas, and knowing which one you are looking at
+
+There are two complete observability stacks, and they show different data. This
+is the single easiest thing to get wrong here, because both render the same
+dashboard and look identical.
+
+| | Compose | In-cluster |
+|---|---|---|
+| Grafana | <http://localhost:3000> | <http://localhost:3001> (`make monitoring-ui`) |
+| Started by | `make up-obs` | `make monitoring-install` |
+| Scrapes | the compose relay and sink | the pods in `mlp` |
+| Login | anonymous admin | anonymous admin |
+| Dashboard | `/d/relay-delivery` | `/d/relay-delivery` |
+
+**Same uid, same title, same panels, different source.** Looking at 3000 while
+the cluster does the work shows a flat line and nothing wrong with it -- the
+compose relay is stopped, so there is genuinely nothing to plot. The port is the
+only thing that tells you which you have.
+
+3001 rather than 3000 for exactly that reason. Two Grafanas fighting over one
+port would be worse: whichever bound first would answer, and the URL would stop
+meaning anything. The sink already sits on 8084 because `make argocd-ui` took
+8081.
+
+The dashboard JSON is shared. `local/config/grafana/provisioning/dashboards/relay.json`
+is canonical; the compose Grafana reads the file, and
+`scripts/gen-dashboard-configmap.sh` embeds it in the ConfigMap the cluster
+Grafana's sidecar collects. `make monitoring-dashboard` regenerates it, and
+`k8s/validate` fails if the two drift.
+
+**Before believing an empty panel, run `make monitoring-ready`.** It asserts the
+query the demo actually plots -- `count(relay_build_info{role="deliver"}) >= 1`
+-- rather than that the pieces exist, because a `ServiceMonitor` missing its
+`release: monitoring` label is dropped by Prometheus with no error at all.
+
+One thing worth knowing about the lag series: **aggregate with `max`, never
+`sum`.** `relay-ingest` runs two replicas, both poll the broker for the same
+consumer group, and both publish the same numbers. Summing multiplies lag by the
+replica count. The shipped panels do this correctly; a query typed by hand in
+Explore will not.
+
 ## Do not run the compose apps and the cluster apps together
 
 They are alternatives, not complements.
