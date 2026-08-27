@@ -30,6 +30,22 @@ import (
 
 const manifestRoot = "../manifests"
 
+// nonWorkloadDirs are manifest directories that legitimately hold no Deployment,
+// so the workload invariants below have nothing to run against.
+//
+// An exception list rather than dropping the check: the check exists because a
+// directory with a kustomization and no Deployment is normally a mistake, and a
+// suite that shrugged at every such directory would have let the same mistake
+// through. A NEW directory is not in this map, so it still fails.
+//
+//	monitoring -- a ServiceMonitor and a dashboard ConfigMap. The Deployments
+//	it describes belong to kube-prometheus-stack, which is installed by
+//	`make monitoring-install` rather than synced from here. See
+//	docs/adr/0008-in-cluster-observability-for-the-demo.md.
+var nonWorkloadDirs = map[string]bool{
+	"monitoring": true,
+}
+
 // manifestDirs returns every directory holding a kustomization.yaml.
 func manifestDirs(t *testing.T) []string {
 	t.Helper()
@@ -130,7 +146,9 @@ func eachDeployment(t *testing.T, fn func(t *testing.T, dir string, deploy map[s
 		docs := render(t, dir)
 		deploys := kindsOf(docs, "Deployment")
 		if len(deploys) == 0 {
-			t.Errorf("%s has a kustomization but no Deployment", dir)
+			if !nonWorkloadDirs[filepath.Base(dir)] {
+				t.Errorf("%s has a kustomization but no Deployment", dir)
+			}
 			continue
 		}
 		for _, d := range deploys {

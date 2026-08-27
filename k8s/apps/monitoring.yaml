@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: mlp
+
+  source:
+    # A REAL url, not the __REPO_URL__ placeholder used in k8s/argocd/.
+    # ArgoCD reads this file straight from git, where nothing substitutes
+    # anything -- a placeholder here syncs literally and the app fails with
+    # "application repo __REPO_URL__ is not permitted in project 'mlp'".
+    repoURL: git@github.com:lilabrooks/my-local-platform.git
+    targetRevision: main
+    path: k8s/manifests/monitoring
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlp
+
+  # This Application depends on a CRD that ArgoCD does not install: the
+  # prometheus-operator's ServiceMonitor, which arrives with
+  # `make monitoring-install`. Until then it reports its own health as
+  # degraded, which is correct and confined here -- relay and the sink stay
+  # green. See docs/adr/0008-in-cluster-observability-for-the-demo.md for why
+  # the chart is installed by a pinned target rather than synced.
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m

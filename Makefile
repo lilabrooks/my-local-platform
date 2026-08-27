@@ -190,6 +190,46 @@ keda-install: ## Install KEDA into the cluster (pinned; needed for lag autoscali
 	  https://github.com/kedacore/keda/releases/download/v$(KEDA_VERSION)/keda-$(KEDA_VERSION).yaml
 	kubectl -n keda rollout status deploy/keda-operator --timeout=180s
 
+# kube-prometheus-stack, pinned like every other cluster component. Installed
+# by this target rather than synced by ArgoCD: routing the chart through ArgoCD
+# would need k8s/argocd/project.yaml widened -- a second sourceRepos entry, a
+# monitoring destination, and clusterResourceWhitelist opened to CRDs and
+# ClusterRoles -- which loosens a boundary that file exists to enforce. KEDA
+# sets the precedent. See docs/adr/0008-in-cluster-observability-for-the-demo.md.
+#
+# MONITORING_RELEASE is not cosmetic. The chart renders its Prometheus with
+# serviceMonitorSelector matchLabels release=<release>, and a ServiceMonitor
+# without a matching label is selected by nothing and reports no error. The
+# value here must equal the label in k8s/manifests/monitoring/servicemonitor.yaml.
+KPS_VERSION        ?= 88.5.4
+MONITORING_RELEASE ?= monitoring
+MONITORING_NS      ?= monitoring
+
+.PHONY: monitoring-install
+monitoring-install: ## Install kube-prometheus-stack into the cluster (pinned; the demo's panel)
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update prometheus-community
+	helm upgrade --install $(MONITORING_RELEASE) prometheus-community/kube-prometheus-stack 	  --version $(KPS_VERSION) 	  --namespace $(MONITORING_NS) --create-namespace 	  --wait --timeout 10m
+	@echo
+	@echo "  next:  make monitoring-ready   (asserts the demo's panel will have data)"
+	@echo "         make monitoring-ui      (Grafana on :3001, not 3000)"
+
+.PHONY: monitoring-ready
+monitoring-ready: ## Assert Prometheus is actually scraping relay-deliver
+	MONITORING_RELEASE=$(MONITORING_RELEASE) MONITORING_NAMESPACE=$(MONITORING_NS) 	  ./scripts/monitoring-ready.sh
+
+.PHONY: monitoring-dashboard
+monitoring-dashboard: ## Regenerate the in-cluster dashboard ConfigMap from relay.json
+	./scripts/gen-dashboard-configmap.sh
+
+# 3001, because the compose Grafana holds 3000. Running both and guessing which
+# one you are looking at is how a demo shows the wrong stack -- the sink already
+# sits on 8084 for the same reason.
+.PHONY: monitoring-ui
+monitoring-ui: ## Port-forward the in-cluster Grafana to http://localhost:3001
+	@echo "http://localhost:3001/d/relay-delivery   (admin / prom-operator)"
+	kubectl -n $(MONITORING_NS) port-forward svc/$(MONITORING_RELEASE)-grafana 3001:80
+
 .PHONY: argocd-install
 argocd-install: ## Install ArgoCD and register the app-of-apps
 	REPO_URL=$(REPO_URL) ./k8s/argocd/install.sh
@@ -214,6 +254,16 @@ k8s-apply-local: ## Apply manifests directly, bypassing git and ArgoCD
 	kubectl apply -k k8s/manifests/echo
 	kubectl apply -k k8s/manifests/relay
 	kubectl apply -k k8s/manifests/sink
+	@# Skipped rather than failed when the operator CRDs are absent: this
+	@# directory holds a ServiceMonitor, and `kubectl apply` on a cluster
+	@# without kube-prometheus-stack fails with "no matches for kind
+	@# ServiceMonitor" -- which would break applying relay for anyone who
+	@# has not run `make monitoring-install`.
+	@if kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then \
+	  kubectl apply -k k8s/manifests/monitoring; \
+	else \
+	  echo "  skipping k8s/manifests/monitoring -- no ServiceMonitor CRD (run 'make monitoring-install')"; \
+	fi
 	@echo
 	@echo "  relay and the sink read the compose Kafka and Postgres over"
 	@echo "  host.minikube.internal, so 'make up' and 'make seed' first."

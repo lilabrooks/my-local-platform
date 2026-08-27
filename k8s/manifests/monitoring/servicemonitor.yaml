@@ -1,0 +1,41 @@
+# Tells the Prometheus that kube-prometheus-stack installs what to scrape.
+#
+# THE `release` LABEL IS NOT DECORATION. The chart renders its Prometheus with
+#
+#   serviceMonitorSelector:
+#     matchLabels:
+#       release: "monitoring"
+#   serviceMonitorNamespaceSelector: {}
+#
+# Any namespace is eligible, but a ServiceMonitor without that label is
+# selected by nothing and reports no error -- the panels simply stay empty.
+# The value must match the Helm release name in `make monitoring-install`.
+# See docs/adr/0008-in-cluster-observability-for-the-demo.md.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mlp-services
+  labels:
+    release: monitoring
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  # Selected by part-of rather than by a list of names, for the same reason
+  # k8s/validate discovers manifest directories instead of naming them: a
+  # service added later is covered without anyone remembering to come back
+  # here. The cost is that a service carrying this label without a /metrics
+  # endpoint becomes a failing target -- visible, which is the right failure.
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: my-local-platform
+  namespaceSelector:
+    matchNames:
+      - mlp
+  endpoints:
+    # By port NAME, not number. relay's Services expose `http` on 80 and the
+    # sink's on 8081; one endpoint covers both because the name is the same.
+    - port: http
+      path: /metrics
+      # Half the scrape interval Prometheus uses by default, because the demo
+      # runs for three minutes and a 30s interval draws six points.
+      interval: 15s
+      scrapeTimeout: 10s
