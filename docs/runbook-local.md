@@ -103,6 +103,16 @@ least trustworthy exactly while someone is watching it. `relay-ingest` reads the
 group's committed offsets straight from the broker instead, which is also where
 KEDA reads them — so the dashboard and the scaler agree by construction.
 
+The sink keeps the last **10000** deliveries and evicts the oldest beyond that
+(`SINK_RETAIN`; negative is unbounded). `sink_received_retained` is the level and
+`sink_retain_limit` the bound, so a panel shows how close eviction is rather than
+a number with no scale. `sink_received_total` counts everything ever accepted and
+never goes backwards -- eviction is not un-receiving, and conflating the two
+would read as lost deliveries.
+
+`GET /received?limit=N` returns only the newest N, which is what a poller wants;
+without it the whole buffer is serialised on every call.
+
 `relay_lag_refreshed_timestamp_seconds` is how you tell a drained topic from a
 lag nobody could measure. The gauges hold their last value when a poll fails,
 so the dashboard carries an **Age of the lag measurement** panel; anything past

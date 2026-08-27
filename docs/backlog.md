@@ -52,7 +52,7 @@ issue.
 **Issue:** [#21](https://github.com/lilabrooks/my-local-platform/issues/21) ·
 **Found:** 2026-08-25 · **Deferred:** 2026-08-26, behind
 [#32](https://github.com/lilabrooks/my-local-platform/issues/32) ·
-**Address:** if the demo shows pods that are Ready and idle
+**Address:** if a partition is left with no owner, which is now measurable
 
 `Consumer.Run` marks itself ready the instant the loop starts — before joining
 the consumer group and before any partition assignment. A consumer holding zero
@@ -69,37 +69,32 @@ failure the demo would *surface*, loudly, rather than hide. Fixing it first
 would be fixing a predicted problem; running the demo tells us whether it is a
 real one.
 
-Done means `/readyz` reflects assignment rather than "the goroutine started",
-`/healthz` stays independent because a consumer with no assignment is alive and
-restarting it does not help, and the assignment count is in the readiness body
-so the failure is diagnosable rather than merely red.
+**Smaller than it was, and reshaped on 2026-08-27.** Two things changed it.
 
-### sink retains every delivery it has ever received
+`WatchPartitionChanges: true` with a 2s interval is already set in
+`cmd/relay/main.go`, added for exactly the #10 scenario, so a consumer that
+joins before its topic exists now self-corrects within two seconds. What is left
+is an imprecise signal, not a stuck consumer.
 
-**Issue:** [#23](https://github.com/lilabrooks/my-local-platform/issues/23) ·
-**Found:** 2026-08-25 · **Deferred:** 2026-08-26, behind
-[#32](https://github.com/lilabrooks/my-local-platform/issues/32) ·
-**Address:** if a demo run is cut short by the sink being OOM-killed
+And the original shape was not implementable: `kafka-go`'s `Reader` does not
+expose its assignment. Pursuing it reached "which member am I?", which is a
+symptom of putting a group-level property in a per-pod place — the thing
+[ADR 0008](adr/0008-in-cluster-observability-for-the-demo.md) already settled
+for lag, by having ingest publish it rather than the consumers.
 
-`services/sink` appends every delivery to a slice trimmed only by an explicit
-`DELETE /received`, and `GET /received` serialises the whole history on every
-call while the relay smoke check polls it every 250ms. Under the sustained load
-M2 generates, behind `mem_limit: 64m`, that is both a leak and an O(n) endpoint
-in a hot loop.
+Done now means two separate things, split by who can answer:
 
-Deferred behind the demo on the same reasoning as #21, and it is the riskier of
-the two: this one ends a run outright rather than degrading the story. The
-trigger is therefore an observation, not a schedule.
+- **Per-pod, locally:** `/readyz` reflects having joined a generation and begun
+  fetching, rather than "the goroutine started". `/healthz` stays independent.
+  A consumer holding zero partitions is deliberately **still ready** — it takes
+  no inbound traffic, so unready buys nothing, and flapping through a rebalance
+  can stall a rolling update.
+- **Group-wide, from ingest's existing broker client:**
+  `relay_topic_partitions_unassigned`. That is the #10 condition, and no per-pod
+  probe can express it, because a partition owned by nobody is invisible to
+  every pod individually.
 
-`sink_received_retained` was added in
-[#22](https://github.com/lilabrooks/my-local-platform/issues/22) and is exported
-separately from `sink_received_total` precisely so the growth is visible on a
-panel before it becomes an unexplained OOM. Watch it during the first long run.
-
-Done means a bounded buffer with a configurable cap, `GET /received` able to
-return only recent entries, the total reported separately from the retained
-count so it stays truthful after eviction, and a test that the buffer stops
-growing.
+Full reasoning on the issue.
 
 ### relay interrupted delivery discards its error and can commit silently
 
