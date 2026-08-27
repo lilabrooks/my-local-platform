@@ -45,7 +45,16 @@ if ! kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
   fail "the prometheus-operator CRDs are absent. Run 'make monitoring-install'."
 fi
 
-prom_svc="$RELEASE-kube-prometheus-st-prometheus"
+# Guessed wrong the first time this was run: the chart's fullname template does
+# not truncate the way its docs' examples suggest. Discovered rather than
+# hardcoded, so a release name of any length still resolves -- and so this
+# reports "not installed" only when it genuinely is not.
+prom_svc="$(kubectl -n "$NAMESPACE" get svc \
+  -l app=kube-prometheus-stack-prometheus \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+if [ -z "$prom_svc" ]; then
+  prom_svc="$RELEASE-kube-prometheus-prometheus"
+fi
 if ! kubectl -n "$NAMESPACE" get svc "$prom_svc" >/dev/null 2>&1; then
   fail "no Service $prom_svc in namespace $NAMESPACE. Run 'make monitoring-install'."
 fi

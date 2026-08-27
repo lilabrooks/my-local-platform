@@ -54,8 +54,9 @@ Ranked. The first one decided it.
 4. **One dashboard definition, not two.** #22 shipped `relay.json` for compose.
    A second copy is a panel that works in one place and silently does not in the
    other.
-5. **Memory**, on a node started with `--memory=3g`. Adjustable, but it has a
-   cost the runbook already tracks.
+5. **Memory**, on a node then started with `--memory=3g`. Treated as adjustable
+   rather than fixed, which turned out to matter: measuring showed 3g cannot
+   run this at all, and `MINIKUBE_MEMORY` is now 6g. See Verification.
 
 ## Options considered
 
@@ -272,9 +273,10 @@ before reporting step 6 as passed.
 
 ## Verification
 
-**Nothing below has been run.** Two mechanism claims were checked against the
-rendered chart on 2026-08-26 (`helm template kube-prometheus-stack --version
-88.5.4`); everything else is a claim to be tested by building it.
+**Run on 2026-08-27**, on the `mlp` minikube profile at `--memory=6g`, with
+Kafka and Postgres in compose and the compose apps stopped. The two chart
+claims were checked earlier against `helm template kube-prometheus-stack
+--version 88.5.4`.
 
 Checked:
 
@@ -293,23 +295,73 @@ Checked:
   was not tested, so the requirement is stated as the version actually used
   rather than as a floor nobody has checked.
 
+Measured:
+
+**Per-pod discovery works, which is what driver 2 rests on.** Prometheus lists
+each relay pod as its own target at its own pod IP, not one Service address:
+
+```text
+relay-ingest     http://10.244.0.24:8080/metrics    up
+relay-ingest     http://10.244.0.23:8080/metrics    up
+relay-deliver    http://10.244.0.22:8080/metrics    up
+```
+
+**`count(relay_build_info{role="deliver"})` tracks the Deployment** through a
+full cycle. 600 events across 16 tenants, sink slowed to 1s:
+
+```text
+  t       lag    replicas   node memory
+  t=0s    598     1         3.24 GiB
+  t=12s  1103     5         3.37 GiB    KEDA reacts
+  t=24s   893    10         3.42 GiB
+  t=46s   613    12         3.49 GiB    ceiling, peak memory
+  t=92s    75    12         3.44 GiB
+  t=104s   17     9         3.33 GiB    draining, scaling down
+  t=115s    0     7         3.30 GiB
+  t=149s    0     1         3.30 GiB    back to idle
+```
+
+Every event was delivered; no dead letters.
+
+**The memory figure: 6g, and 3g does not work.** Peak was 3.49 GiB of the 6 GiB
+cap -- 58%, with 2.5 GiB of headroom -- and one restart in the whole cluster,
+in KEDA, during install.
+
+At `--memory=3g` the same components never reached load. The supporting cast
+alone sat at 88-92% with `relay-deliver` at zero replicas, `helm install` failed
+on a post-install hook timing out against the API server, and the control plane
+thrashed: 22 restarts in kube-system including etcd, the apiserver, the
+scheduler and the controller-manager, plus 17 in ArgoCD and 12 in KEDA.
+
+**The node cannot warn about this**, which is why the failure reads as
+unrelated application crashes. minikube's kubelet reports the Docker VM's memory
+as node allocatable, not the container's cgroup limit, so three numbers disagree
+and nothing reconciles them:
+
+| Source | Reported |
+|---|---|
+| Sum of pod memory requests, what the scheduler counts | 782 MiB |
+| Node `allocatable` | 7.75 GiB |
+| The Docker cgroup limit actually enforced | 3.00 GiB |
+
+`MemoryPressure` stayed `False` throughout. Nothing was evicted in an orderly
+way; the kernel killed processes inside the container and they surfaced as
+`Error exit=1` rather than `OOMKilled`. ArgoCD declares no memory requests at
+all, so the scheduler's 782 MiB is optimistic on top of being irrelevant.
+
 Still to run:
 
-- All scrape targets `up` in the in-cluster Prometheus, with `relay-deliver`
-  appearing as N separate targets at N pod IPs while KEDA scales. This is the
-  claim driver 2 rests on.
-- `count(relay_build_info{role="deliver"})` tracking
-  `kubectl get deploy relay-deliver` through a full scale-up and scale-down.
 - The `k8s/validate` invariant failing when `relay.json` is edited without
-  regenerating the ConfigMap.
-- `make relay-demo` refusing to start against a cluster where monitoring is
-  absent, and separately against one where it is installed but the
-  `ServiceMonitor` is not being selected -- the second is the case the preflight
-  exists for, and the one an existence check would pass.
+  regenerating the ConfigMap. Checked locally by breaking it; not yet exercised
+  against a cluster, where it does not apply.
+- `make relay-demo` refusing to start when monitoring is absent, and separately
+  when it is installed but the `ServiceMonitor` is not being selected. The
+  preflight behind it, `scripts/monitoring-ready.sh`, has been run and passes;
+  the demo target that calls it does not exist yet ([#32]).
 - Replay in cluster mode redelivering the window and leaving the ScaledObject
-  unpaused, including when the script is interrupted mid-run.
-- `make mem` and node pressure with the whole chart running, to set the minikube
-  memory figure.
+  unpaused, including when the script is interrupted mid-run. Belongs to [#32].
+
+[#32]: https://github.com/lilabrooks/my-local-platform/issues/32
 
 ### What closes this gap
 

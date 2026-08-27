@@ -139,12 +139,27 @@ vet: ## go vet
 # ---------------------------------------------------------------------------
 
 MINIKUBE_PROFILE ?= mlp
+
+# Raised from 3g after measuring. At 3g the supporting cast alone -- ArgoCD,
+# KEDA, kube-system and kube-prometheus-stack -- held the node container at
+# 88-92% of its cap with ZERO relay-deliver replicas, and the control plane
+# thrashed: 22 restarts in kube-system, etcd and the apiserver among them.
+#
+# The node cannot warn about this. minikube's kubelet reports the Docker VM's
+# memory as node allocatable (7.75Gi), not the container's cgroup limit, so
+# MemoryPressure stays False and the kernel kills processes inside the
+# container instead. They surface as `Error exit=1`, not OOMKilled, which reads
+# as unrelated application crashes.
+#
+# Memory cannot be changed on an existing cluster with the docker driver:
+# `make k8s-delete` first, then `make k8s-up`.
+MINIKUBE_MEMORY  ?= 6g
 REPO_URL         ?= https://github.com/lilabrooks/my-local-platform
 
 .PHONY: k8s-up
 k8s-up: ## Start the local Kubernetes cluster (minikube profile 'mlp')
 	minikube start -p $(MINIKUBE_PROFILE) --driver=docker --nodes=1 \
-	  --cpus=4 --memory=3g --kubernetes-version=v1.35.1
+	  --cpus=4 --memory=$(MINIKUBE_MEMORY) --kubernetes-version=v1.35.1
 	kubectl config use-context $(MINIKUBE_PROFILE)
 
 .PHONY: k8s-down
