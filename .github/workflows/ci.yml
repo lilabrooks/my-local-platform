@@ -101,6 +101,34 @@ jobs:
       # the infrastructure and its data before the services that consume them
       # is the honest ordering -- and it keeps this job from depending on that
       # recovery working.
+      # The most registry-exposed job here: five third-party images plus the
+      # golang base the relay and sink builds fetch. Pulled up front with the
+      # same retry the image job uses, so a Docker Hub 5xx costs a sleep rather
+      # than a red build and a human pressing re-run.
+      #
+      # --ignore-buildable skips the services compose builds from source; their
+      # base images are read out of the Dockerfiles instead, so the version is
+      # never written down twice.
+      - name: Pull images, with retries
+        run: |
+          set -u
+          images=$(awk '/^FROM/ && $2 != "scratch" {print $2}' services/*/Dockerfile | sort -u)
+          retry() {
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              echo "::warning::$1 failed (attempt $attempt/3)"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          for image in $images; do
+            retry docker pull "$image" || { echo "could not pull $image" >&2; exit 1; }
+          done
+          retry docker compose -f local/docker-compose.yml \
+            --profile core --profile messaging --profile apps \
+            pull --ignore-buildable ||
+            { echo "could not pull the compose images" >&2; exit 1; }
+
       - name: Start core and messaging
         run: |
           docker compose -f local/docker-compose.yml \
@@ -148,10 +176,46 @@ jobs:
     name: build the ${{ matrix.service }} image
     runs-on: ubuntu-latest
     strategy:
+      # Three independent images that cannot break each other. Without this, one
+      # registry hiccup on any of them CANCELS the other two, so a single
+      # transient fault is reported as three broken builds and hides whether the
+      # other two would have passed. That happened on 2026-08-27.
+      fail-fast: false
       matrix:
         service: [echo, relay, sink]
     steps:
       - uses: actions/checkout@v7
+
+      # Docker Hub returned 500 from auth.docker.io here on 2026-08-27 and
+      # failed the job; the same commit built clean on re-run, so the cost of a
+      # registry blip is a human noticing and pressing a button.
+      #
+      # Retrying the PULL rather than `docker build` is deliberate. A blind
+      # retry around the build would also retry genuine compile failures, three
+      # times, turning a fast red into a slow one. These Dockerfiles fetch
+      # exactly one image -- the build stage's base; the final stage is
+      # `scratch`, which needs no pull -- so once it is local the build touches
+      # no registry at all and can fail once, fast, on its own merits.
+      #
+      # The tag is read out of the Dockerfile rather than written here, because
+      # a version pinned in two places drifts, and the failure mode would be
+      # silent: this step would warm the wrong image and the build would pull
+      # the right one with no retry, exactly when it matters.
+      - name: pull base images, with retries
+        run: |
+          bases=$(awk '/^FROM/ && $2 != "scratch" {print $2}' \
+            "services/${{ matrix.service }}/Dockerfile" | sort -u)
+          [ -n "$bases" ] || { echo "no base image found in the Dockerfile" >&2; exit 1; }
+          for base in $bases; do
+            pulled=
+            for attempt in 1 2 3; do
+              if docker pull "$base"; then pulled=1; break; fi
+              echo "::warning::pulling $base failed (attempt $attempt/3)"
+              sleep $((attempt * 10))
+            done
+            [ -n "$pulled" ] || { echo "could not pull $base after 3 attempts" >&2; exit 1; }
+          done
+
       - run: docker build -t ${{ matrix.service }}:ci services/${{ matrix.service }}
 
   # The go matrix above cannot be computed from the repository -- GitHub needs
