@@ -311,6 +311,30 @@ Still to run:
 - `make mem` and node pressure with the whole chart running, to set the minikube
   memory figure.
 
+### What closes this gap
+
+**This record was accepted ahead of its own evidence, deliberately and with a
+named way out.** That is the failure
+[#33](https://github.com/lilabrooks/my-local-platform/issues/33) exists to
+prevent, quoted from its own text: ADR 0006 "was accepted carrying a
+Verification section full of planned checks", its deciding argument sat
+unexercised through the whole of M1 until an audit found it
+([#20](https://github.com/lilabrooks/my-local-platform/issues/20)), "and nothing
+forced the gap closed".
+
+Repeating that here would be worse than doing it the first time, because the
+pattern is now documented. So the way out is named rather than assumed:
+**[#40](https://github.com/lilabrooks/my-local-platform/issues/40) carries an
+acceptance criterion to replace the list above with measured results and the
+commands that produced them.** It cannot be closed while this section still says
+nothing has been run.
+
+The distinction from ADR 0006 is only that: not that this record is better
+evidenced -- it is not -- but that something outside it fails if the evidence
+never arrives. Until then, treat every claim in the Decision and Consequences
+sections as reasoning rather than as result. The two checked items above are the
+exceptions and are marked as such.
+
 ## Open questions
 
 None outstanding. Two were raised during the interview and both are settled
