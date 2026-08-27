@@ -27,8 +27,36 @@ report() {
   fi
 }
 
+# A skip is fine on a developer's machine -- they are missing a tool -- and is
+# NOT fine in CI, where it means a gate silently did not run. LINT_STRICT turns
+# every skip into a failure, except the names in LINT_SKIP_OK, so an intended
+# exception is declared in the workflow rather than hidden in the output.
 skip() {
-  printf '  %s  %s -- %s\n' "$(amber SKIP)" "$1" "$2"; SKIP=$((SKIP + 1))
+  local name="$1" why="$2"
+  case ",${LINT_SKIP_OK:-}," in *",$name,"*) allowed=1 ;; *) allowed= ;; esac
+  if [ -n "${LINT_STRICT:-}" ] && [ -z "$allowed" ]; then
+    printf '  %s  %s -- %s\n' "$(red FAIL)" "$name" \
+      "$why (LINT_STRICT: a linter that did not run is not a linter that passed)"
+    FAIL=$((FAIL + 1)); FAILED+=("$name")
+    return
+  fi
+  printf '  %s  %s -- %s\n' "$(amber SKIP)" "$name" "$why"; SKIP=$((SKIP + 1))
+}
+
+# retry_net <attempts> <command...> -- for steps that reach the network.
+#
+# Three CI failures in a row were network, not code: a Docker Hub 500 pulling a
+# base image, and tflint's plugin download from the GitHub API. Neither says
+# anything about this repository, and both cost a human a re-run.
+retry_net() {
+  local attempts="$1"; shift
+  local i out
+  for i in $(seq 1 "$attempts"); do
+    if out=$("$@" 2>&1); then printf '%s' "$out"; return 0; fi
+    [ "$i" -lt "$attempts" ] && sleep $((i * 5))
+  done
+  printf '%s' "$out"
+  return 1
 }
 
 has()        { command -v "$1" >/dev/null 2>&1; }
@@ -38,13 +66,29 @@ echo "linting $(pwd)"
 echo
 
 # --- YAML -------------------------------------------------------------------
-if has yamllint; then
+# Pinned, and a locally installed tool is used ONLY when it reports the pinned
+# version. Preferring whatever happens to be on PATH is how this script and CI
+# came to run different shellchecks: `make lint` passed 10/10 while CI failed on
+# the same commit, because the two versions disagreed about SC2015 (cb8dec3).
+#
+# YAMLLINT_VERSION is what the image below actually contains -- checked, not
+# assumed -- so the native path and the container path cannot diverge. 1.38.0 is
+# published but no container ships it, and keeping a Docker-only machine able to
+# run this matters more than the patch difference.
+YAMLLINT_IMAGE=pipelinecomponents/yamllint:0.35.10
+YAMLLINT_VERSION=1.37.1
+MARKDOWNLINT_VERSION=0.23.2
+
+# pinned <version> <version-output> -- true when the installed tool matches.
+pinned() { printf '%s' "$2" | grep -qF "$1"; }
+
+if has yamllint && pinned "$YAMLLINT_VERSION" "$(yamllint --version 2>&1)"; then
   out=$(yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/data -w /data pipelinecomponents/yamllint:0.35.10 \
+  out=$(docker run --rm -v "$PWD":/data -w /data "$YAMLLINT_IMAGE" \
         yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 else
-  skip "yamllint" "install with: brew install yamllint"
+  skip "yamllint" "install with: pipx install yamllint==$YAMLLINT_VERSION"
 fi
 
 # --- Shell ------------------------------------------------------------------
@@ -63,13 +107,25 @@ else
 fi
 
 # --- Markdown ---------------------------------------------------------------
-if has markdownlint-cli2; then
+if has markdownlint-cli2 && \
+   pinned "$MARKDOWNLINT_VERSION" "$(markdownlint-cli2 --version 2>&1 | head -1)"; then
   out=$(markdownlint-cli2 2>&1); report "markdownlint" $? "$out"
 elif has npx; then
-  out=$(npx --yes markdownlint-cli2 2>&1 | grep -vE '^npm notice'); code=$?
+  # @VERSION, not bare: `npx --yes markdownlint-cli2` fetches whatever is
+  # newest, so this gate could change under a repository that did not.
+  out=$(npx --yes "markdownlint-cli2@$MARKDOWNLINT_VERSION" 2>&1 | grep -vE '^npm notice'); code=$?
+  report "markdownlint" "$code" "$out"
+elif has_docker; then
+  # The container matters more than it looks: it is what makes Docker alone
+  # sufficient to run EVERY linter here except golangci-lint. Without it this
+  # was the one check that needed a Node toolchain, and under LINT_STRICT a
+  # runner without npx would fail the build over a missing tool rather than a
+  # finding.
+  out=$(retry_net 3 docker run --rm -v "$PWD":/workdir \
+        "davidanson/markdownlint-cli2:v$MARKDOWNLINT_VERSION"); code=$?
   report "markdownlint" "$code" "$out"
 else
-  skip "markdownlint" "needs npx or markdownlint-cli2"
+  skip "markdownlint" "needs docker, npx, or markdownlint-cli2 $MARKDOWNLINT_VERSION"
 fi
 
 # --- GitHub Actions ---------------------------------------------------------
@@ -93,14 +149,26 @@ else
 fi
 
 # --- Terraform --------------------------------------------------------------
+# Pinned, with a container fallback -- the divergence here ran the other way.
+# CI checked formatting with a pinned hashicorp/terraform image while this
+# script used whatever `terraform` was on PATH, or skipped entirely when there
+# was none. Two versions of `fmt` disagree about formatting, which is the whole
+# check.
+TERRAFORM_VERSION=1.15.8
 tf_fail=0 tf_out=""
-if has terraform; then
+if has terraform && pinned "$TERRAFORM_VERSION" "$(terraform version 2>&1 | head -1)"; then
   out=$(terraform fmt -check -recursive infra/terraform 2>&1) || {
     tf_fail=1; tf_out="not formatted:\n$out"
   }
   report "terraform fmt" "$tf_fail" "$tf_out"
+elif has_docker; then
+  out=$(retry_net 3 docker run --rm -v "$PWD":/data -w /data \
+        "hashicorp/terraform:$TERRAFORM_VERSION" fmt -check -recursive infra/terraform) || {
+    tf_fail=1; tf_out="not formatted:\n$out"
+  }
+  report "terraform fmt" "$tf_fail" "$tf_out"
 else
-  skip "terraform fmt" "terraform not installed"
+  skip "terraform fmt" "needs docker or terraform $TERRAFORM_VERSION"
 fi
 
 if has_docker; then
@@ -112,13 +180,17 @@ if has_docker; then
   lint_fail=0 lint_out=""
   for stack in infra/terraform/bootstrap infra/terraform/envs/dev; do
     # --init is NOT silenced. Hiding it once turned a GitHub 504 into an empty
-    # failure with no cause, which cost more time than the flake itself.
-    out=$(docker run --rm \
+    # failure with no cause, which cost more time than the flake itself -- and
+    # then CI's own copy of this step silenced it again and did exactly that.
+    #
+    # Retried, because the plugin comes from the GitHub API: rate-limited,
+    # occasionally 5xx, and nothing to do with the Terraform being linted.
+    out=$(retry_net 3 docker run --rm \
       -v "$PWD":/data -v "$TFLINT_CACHE":/root/.tflint.d \
       -w "/data/$stack" \
       -e TFLINT_CONFIG_FILE=/data/.tflint.hcl \
       --entrypoint sh ghcr.io/terraform-linters/tflint:v0.64.0 \
-      -c 'tflint --init && tflint --format compact' 2>&1) || {
+      -c 'tflint --init && tflint --format compact') || {
         lint_fail=1
         lint_out="${lint_out}${stack}:
 ${out}
@@ -128,8 +200,13 @@ ${out}
 
   # A plugin download failure is the network, not the code. Say so, because the
   # fix is "retry", not "edit terraform".
+  # Allowed to skip even under LINT_STRICT, unlike a missing tool: this is a
+  # DIAGNOSED network fault after three attempts, and a gate that goes red on
+  # GitHub API rate limits is the flakiness this is meant to remove. The skip is
+  # loud in the summary, so it cannot pass unnoticed.
   if [ "$lint_fail" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'Failed to fetch GitHub releases'; then
-    skip "tflint" "plugin download failed (GitHub API); retry when it recovers"
+    LINT_SKIP_OK="${LINT_SKIP_OK:-},tflint" \
+      skip "tflint" "plugin download failed 3x (GitHub API); retry when it recovers"
   else
     report "tflint" "$lint_fail" "$lint_out"
   fi

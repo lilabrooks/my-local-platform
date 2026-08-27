@@ -101,6 +101,34 @@ jobs:
       # the infrastructure and its data before the services that consume them
       # is the honest ordering -- and it keeps this job from depending on that
       # recovery working.
+      # The most registry-exposed job here: five third-party images plus the
+      # golang base the relay and sink builds fetch. Pulled up front with the
+      # same retry the image job uses, so a Docker Hub 5xx costs a sleep rather
+      # than a red build and a human pressing re-run.
+      #
+      # --ignore-buildable skips the services compose builds from source; their
+      # base images are read out of the Dockerfiles instead, so the version is
+      # never written down twice.
+      - name: Pull images, with retries
+        run: |
+          set -u
+          images=$(awk '/^FROM/ && $2 != "scratch" {print $2}' services/*/Dockerfile | sort -u)
+          retry() {
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              echo "::warning::$1 failed (attempt $attempt/3)"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          for image in $images; do
+            retry docker pull "$image" || { echo "could not pull $image" >&2; exit 1; }
+          done
+          retry docker compose -f local/docker-compose.yml \
+            --profile core --profile messaging --profile apps \
+            pull --ignore-buildable ||
+            { echo "could not pull the compose images" >&2; exit 1; }
+
       - name: Start core and messaging
         run: |
           docker compose -f local/docker-compose.yml \
@@ -148,10 +176,46 @@ jobs:
     name: build the ${{ matrix.service }} image
     runs-on: ubuntu-latest
     strategy:
+      # Three independent images that cannot break each other. Without this, one
+      # registry hiccup on any of them CANCELS the other two, so a single
+      # transient fault is reported as three broken builds and hides whether the
+      # other two would have passed. That happened on 2026-08-27.
+      fail-fast: false
       matrix:
         service: [echo, relay, sink]
     steps:
       - uses: actions/checkout@v7
+
+      # Docker Hub returned 500 from auth.docker.io here on 2026-08-27 and
+      # failed the job; the same commit built clean on re-run, so the cost of a
+      # registry blip is a human noticing and pressing a button.
+      #
+      # Retrying the PULL rather than `docker build` is deliberate. A blind
+      # retry around the build would also retry genuine compile failures, three
+      # times, turning a fast red into a slow one. These Dockerfiles fetch
+      # exactly one image -- the build stage's base; the final stage is
+      # `scratch`, which needs no pull -- so once it is local the build touches
+      # no registry at all and can fail once, fast, on its own merits.
+      #
+      # The tag is read out of the Dockerfile rather than written here, because
+      # a version pinned in two places drifts, and the failure mode would be
+      # silent: this step would warm the wrong image and the build would pull
+      # the right one with no retry, exactly when it matters.
+      - name: pull base images, with retries
+        run: |
+          bases=$(awk '/^FROM/ && $2 != "scratch" {print $2}' \
+            "services/${{ matrix.service }}/Dockerfile" | sort -u)
+          [ -n "$bases" ] || { echo "no base image found in the Dockerfile" >&2; exit 1; }
+          for base in $bases; do
+            pulled=
+            for attempt in 1 2 3; do
+              if docker pull "$base"; then pulled=1; break; fi
+              echo "::warning::pulling $base failed (attempt $attempt/3)"
+              sleep $((attempt * 10))
+            done
+            [ -n "$pulled" ] || { echo "could not pull $base after 3 attempts" >&2; exit 1; }
+          done
+
       - run: docker build -t ${{ matrix.service }}:ci services/${{ matrix.service }}
 
   # The go matrix above cannot be computed from the repository -- GitHub needs
@@ -208,65 +272,33 @@ jobs:
           # clone of one commit.
           fetch-depth: 0
 
-      - name: yamllint
-        run: pipx run yamllint -f github .
-
-      # Pinned to the version scripts/lint.sh uses. Unpinned, this ran whatever
-      # shellcheck the runner image happened to ship, and the two disagreed:
-      # `make lint` passed 10/10 locally on 0.11.0 while CI failed on SC2015,
-      # which older releases report and 0.11.0 does not. A gate that can differ
-      # from the one contributors run is a gate that fails after review.
-      - name: shellcheck
-        run: |
-          find . -name '*.sh' -not -path '*/.terraform/*' -print0 \
-            | xargs -0 docker run --rm -v "$PWD":/mnt -w /mnt \
-                koalaman/shellcheck:v0.11.0
-
-      - name: markdownlint
-        run: npx --yes markdownlint-cli2
-
-      - name: actionlint
-        uses: docker://rhysd/actionlint:1.7.12
-        with:
-          args: -color
-
-      - name: hadolint
-        uses: hadolint/hadolint-action@v3.4.0
-        with:
-          dockerfile: services/echo/Dockerfile
-
-      - name: terraform fmt
-        run: |
-          docker run --rm -v "$PWD":/data -w /data \
-            hashicorp/terraform:1.15.8 fmt -check -recursive infra/terraform
-
-      - name: tflint
-        run: |
-          for stack in infra/terraform/bootstrap infra/terraform/envs/dev; do
-            echo "== $stack"
-            docker run --rm -v "$PWD":/data -w "/data/$stack" \
-              -e TFLINT_CONFIG_FILE=/data/.tflint.hcl \
-              --entrypoint sh ghcr.io/terraform-linters/tflint:v0.64.0 \
-              -c 'tflint --init >/dev/null 2>&1 && tflint --format compact'
-          done
-
-      # tflint says the Terraform is valid; trivy says whether it is safe.
-      # .terraform/ is skipped -- it holds vendored upstream modules.
-      - name: trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          # Pinned to the version the findings were triaged against. The
-          # action defaults to an older trivy, and a scanner version drifting
-          # between local and CI is how "passes locally" happens.
-          version: v0.74.0
-          scan-type: fs
-          scan-ref: .
-          scanners: misconfig,secret
-          severity: MEDIUM,HIGH,CRITICAL
-          skip-dirs: '**/.terraform'
-          exit-code: '1'
-
-      - name: gitleaks
-        run: |
-          docker run --rm -v "$PWD":/repo -w /repo \
-            zricethezav/gitleaks:v8.30.1 detect --source=. --no-banner --redact
+      # ONE implementation, not two.
+      #
+      # This job used to re-implement each of the ten linters that
+      # scripts/lint.sh already runs, and every divergence between them cost a
+      # red build that said nothing about the code:
+      #
+      #   - shellcheck was pinned in lint.sh and unpinned here, so the two ran
+      #     different versions and disagreed about SC2015. `make lint` reported
+      #     10/10 on the same commit this job failed.
+      #   - yamllint had three paths and two versions; markdownlint had no
+      #     pinned path at all.
+      #   - tflint: lint.sh caches the plugin, leaves `--init` unsilenced with a
+      #     comment explaining that hiding it once turned a GitHub 504 into an
+      #     empty failure, and skips rather than fails when the download is the
+      #     fault. This job's copy silenced `--init`, cached nothing, and
+      #     handled nothing -- and produced exactly that empty failure.
+      #
+      # Every one of those was a lesson lint.sh had already learned and this
+      # file had not, because they are two implementations of one thing. Running
+      # the script is what stops a fourth.
+      #
+      # LINT_STRICT makes a skipped linter a failure: on a laptop a skip means a
+      # missing tool, but here it would mean a gate silently did not run.
+      # LINT_SKIP_OK declares the one intended exception -- golangci-lint runs in
+      # the `go` job above, per module, through its own pinned action.
+      - name: make lint
+        env:
+          LINT_STRICT: "1"
+          LINT_SKIP_OK: golangci-lint
+        run: make lint
