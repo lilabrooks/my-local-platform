@@ -1,7 +1,9 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24
-Status: Proposed -- no code written
+Date: 2026-08-24 · Last audited: 2026-08-27
+Status: **M0, M1 and M2 are built and their milestones closed.** M3 and M4
+remain proposed, and are alternatives rather than a sequence -- see the decision
+point below. The header used to read "Proposed -- no code written".
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -59,7 +61,8 @@ not a new policy.
 
 `mlp.events` is the platform smoke topic, and an application writing into the
 topic a health check consumes from mixes concerns that should stay separate. It
-also keeps `mlp.events` small, which matters given [backlog #1](backlog.md).
+also keeps `mlp.events` small, which mattered for
+[#1](https://github.com/lilabrooks/my-local-platform/issues/1).
 
 Twelve partitions rather than three because **partition count is the hard
 ceiling on consumer parallelism** -- KEDA will not scale a consumer group past
@@ -76,8 +79,8 @@ on the log.
 
 **Free. Half a day. No application code.**
 
-1. **Fix the smoke Kafka check** ([backlog #1](backlog.md),
-   [issue #1](https://github.com/lilabrooks/my-local-platform/issues/1)).
+1. **Fix the smoke Kafka check**
+   ([#1](https://github.com/lilabrooks/my-local-platform/issues/1)).
    `services/smoke/internal/checks/messaging.go:44-45` reads from
    `kafka.FirstOffset` with a fresh group id, so it replays the whole topic
    before reaching its own marker. Position the reader at the end *before*
@@ -124,7 +127,11 @@ on the log.
 100,007 messages, against 211ms on an empty topic -- flat, where the target was
 merely "under 15s". `make lint` 10/10 and `make test` green. Evidence and
 commands in [ADR 0004](adr/0004-real-kafka-not-emulated.md#verification);
-[backlog #1](backlog.md) moved to Resolved.
+[#1](https://github.com/lilabrooks/my-local-platform/issues/1) closed.
+
+(That line used to point at a Resolved section in `backlog.md`. There is no
+longer one: resolved entries are deleted rather than archived, because the file
+records deferral rationale and the closing commit is the record of a fix.)
 
 ---
 
@@ -178,7 +185,13 @@ in; it arrives at a subscriber; a refusing subscriber sends it to the DLQ.
 Attempt history and its query API, tracing, idempotency dedupe, dashboards,
 Kubernetes, KEDA, AWS.
 
-**Exit:** `make up && make seed && make smoke` prints `PASS relay`. A documented
+**Exit: met on 2026-08-25.** `make smoke` prints `PASS relay`, and CI runs it on
+every push. Replay -- the deciding argument in ADR 0006 -- was found unexercised
+by an audit ([#20](https://github.com/lilabrooks/my-local-platform/issues/20))
+and is now covered by `make relay-replay-verify`.
+
+The original criterion follows. `make up && make seed && make smoke` prints
+`PASS relay`. A documented
 run shows an event reaching the DLQ when the sink is set to fail. Unit tests
 cover signature generation, the backoff schedule and the give-up decision.
 
@@ -219,7 +232,19 @@ Resolve it deliberately: a third advertised listener on the host's LAN address,
 `host.minikube.internal`, or Kafka in-cluster for this milestone. Pick one and
 write down why, because M4 changes this wiring again.
 
-**Exit:** `make relay-demo` runs end to end. Slowing the sink drives
+**Exit: met on 2026-08-27.** `make relay-demo` runs all six steps in 190
+seconds: lag 596 with one consumer, KEDA to twelve, drained to zero, back to one.
+Measurements and commands are in
+[ADR 0007](adr/0007-keda-lag-autoscaling.md) and
+[ADR 0008](adr/0008-in-cluster-observability-for-the-demo.md); the milestone is
+closed.
+
+Two things the milestone did not anticipate, both recorded: the demo needed
+Prometheus and Grafana **in the cluster**, which amends ADR 0005
+([#40](https://github.com/lilabrooks/my-local-platform/issues/40)); and
+`--memory=3g` cannot run it, which is why `MINIKUBE_MEMORY` is 6g.
+
+The original criterion follows. `make relay-demo` runs end to end. Slowing the sink drives
 `relay-deliver` from 1 pod to several, lag drains, pods scale back down. Write
 **ADR 0007** on lag-based autoscaling now, with measurements rather than
 predictions.

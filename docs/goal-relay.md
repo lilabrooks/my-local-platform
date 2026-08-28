@@ -1,7 +1,10 @@
 # Goal: `relay`
 
-Date: 2026-08-24
-Status: Proposed
+Date: 2026-08-24 · Last audited: 2026-08-27
+Status: **Built.** The target behaviour below was delivered by M1 and M2, and
+the demo it describes runs as `make relay-demo`. Kept as written rather than
+rewritten in the past tense: it is the thing the work was measured against, and
+a goal edited to match its outcome cannot be used to judge one.
 
 ## What it is
 

@@ -101,8 +101,9 @@ Eight choices shape this repository, each recorded with the evidence behind it:
 
 The Kafka one covers `relay`, the first application — see
 **[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
-Its MVP is built: `make up-apps` starts it, and `make smoke` exercises the
-whole pipeline end to end.
+It is built through M2: `make up-apps` starts it, `make smoke` exercises the
+whole pipeline end to end, and `make relay-demo` runs the autoscaling demo
+against the cluster.
 
 ## The smoke service
 
@@ -158,9 +159,15 @@ Ten checks: Go, YAML, shell, Markdown, GitHub Actions workflows, the
 Dockerfile, Terraform formatting and lint rules, infrastructure security, and a
 secret scan across git history.
 
-Each linter uses a local binary when one is installed and a pinned container
-otherwise, so it works on a clean machine with only Docker. A linter that can
-run neither way reports `SKIP` rather than passing silently.
+Every linter is pinned, and a locally installed binary is used **only when it
+reports the pinned version** — otherwise a pinned container runs instead, so
+Docker alone is enough. Preferring whatever was on `PATH` is how `make lint` and
+CI came to run different shellchecks and disagree on the same commit.
+
+CI runs this script rather than its own copy of the ten checks, for the same
+reason. A linter that can run neither way reports `SKIP` locally; under
+`LINT_STRICT`, which CI sets, a skip is a failure — there, a gate that did not
+run must not read as one that passed.
 
 | Check | Tool | Catches |
 |---|---|---|
@@ -227,7 +234,15 @@ manifests apply cleanly and serve traffic.
 
 The GitOps loop is verified end to end: a commit pushed to GitHub changed the
 running replica count ~12 seconds later, with no `kubectl`. CI is green across
-all eight jobs on GitHub Actions.
+all thirteen jobs on GitHub Actions.
+
+**`relay` is built through M2 and its demo runs.** `make relay-demo` drives six
+steps in 190 seconds against minikube: an event delivered, the subscriber slowed,
+KEDA scaling the consumer group from one pod to twelve on lag, the backlog
+drained, a failing subscriber dead-lettered while a healthy one is unaffected,
+and the whole window replayed from the log. The measurements behind that are in
+[ADR 0007](docs/adr/0007-keda-lag-autoscaling.md), including why an HPA on CPU
+cannot work here.
 
 One gap remains, stated plainly: **the expensive Terraform tier has never been
 applied.** The cheap tier has — applied to a real account, verified with the
