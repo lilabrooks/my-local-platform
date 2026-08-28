@@ -84,6 +84,29 @@ section naming the command that produced the result. A claim that cannot be
 checked from the repository is one a reviewer has to re-derive. If you change
 a decision, update its ADR and say what you actually ran.
 
+**A document that states intent carries a status line, and the commit that
+fulfils it updates that line.** `docs/goal-relay.md` and
+`docs/roadmap-relay.md` are written before the work and describe what is
+supposed to happen. That is what makes them worth having, and it is also what
+makes them wrong the moment the work lands.
+
+An audit on 2026-08-27 found six of these at once: a roadmap header still
+reading "Proposed — no code written" with three milestones built, two exit
+criteria unmarked while a third said "met", a goal document still marked
+Proposed, and a README claiming eight CI jobs against thirteen and describing
+linter behaviour that had been replaced two days earlier. Each was correct when
+written. None survived the work it described.
+
+Two rules, because they pull in opposite directions and both matter:
+
+- **Update the status, not the substance.** A goal rewritten in the past tense
+  to match its outcome cannot be used to judge that outcome. The value of a
+  prediction is that it was made first. Mark it built; leave what it predicted
+  alone.
+- **When you delete a section, grep for what pointed at it.** Removing the
+  backlog's Resolved section left three links in the roadmap aimed at nothing,
+  one of them announcing a move to a section that no longer existed.
+
 **Checks write and read back.** `services/smoke` never just opens a connection —
 it round-trips a payload and asserts it matches. A check that only connects
 proves a port is listening, which is a different claim.
