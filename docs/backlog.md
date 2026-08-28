@@ -11,6 +11,12 @@ that choice stops holding. Each one says what is wrong, why it is not fixed,
 and what "done" looks like — so the reasoning survives without the conversation
 that produced it, and without network access.
 
+**A trigger has to be something that can actually be observed, and where it
+cannot be, the entry says so.** A condition nobody can detect is not a deferral;
+it is a way of never returning to something, wearing the costume of a plan.
+Issue #21's entry below has a section on this, because two of its triggers
+failed that test before the third admitted it.
+
 Anything scheduled into a milestone belongs on the tracker alone. Resolved
 entries are removed rather than archived here; the commit that closes an issue
 is the record, and an ADR carries the measurements where there are any.
@@ -52,7 +58,8 @@ issue.
 **Issue:** [#21](https://github.com/lilabrooks/my-local-platform/issues/21) ·
 **Found:** 2026-08-25 · **Deferred:** 2026-08-26, behind
 [#32](https://github.com/lilabrooks/my-local-platform/issues/32) ·
-**Address:** if a partition is left with no owner, which is now measurable
+**Address:** on a decision to, because **nothing will detect this on its own
+until the fix itself is in** — see the trigger note below
 
 `Consumer.Run` marks itself ready the instant the loop starts — before joining
 the consumer group and before any partition assignment. A consumer holding zero
@@ -93,6 +100,35 @@ Done now means two separate things, split by who can answer:
   `relay_topic_partitions_unassigned`. That is the #10 condition, and no per-pod
   probe can express it, because a partition owned by nobody is invisible to
   every pod individually.
+
+### The trigger, and why this one is honest about having none
+
+This entry has now had three triggers, and the first two were worse than no
+trigger at all.
+
+*"If the demo shows pods that are Ready and idle"* was **unfalsifiable by
+watching**: an idle-Ready pod looks exactly like a busy one from outside, which
+is the whole defect. Nobody could ever have observed it.
+
+*"If a partition is left with no owner, which is now measurable"* replaced it and
+was **circular**: the thing that would make it measurable is
+`relay_topic_partitions_unassigned`, which is part of this issue's own fix. The
+trigger depended on the work it was meant to schedule.
+
+So this one says the true thing instead. **Nothing in the stack will surface
+this condition until the metric exists, and the metric is the fix.** It will be
+picked up because someone decides to, not because something goes red. Anyone
+relying on being told is relying on nothing.
+
+That is an acceptable state for a defect whose practical impact is currently
+mitigated -- `WatchPartitionChanges` self-corrects the #10 scenario within two
+seconds -- and it would not be acceptable for one that was not. The distinction
+is the reason to write it down rather than leave a plausible-sounding condition
+in place.
+
+If that is unsatisfying, the half worth doing early is the metric alone. It is
+small, it is the part that catches the #10 condition, and it converts this entry
+from "decide to look" into a real trigger.
 
 Full reasoning on the issue.
 
