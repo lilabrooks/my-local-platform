@@ -101,6 +101,22 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A request body is ONE JSON text, not a stream of them. Decode stops at
+	// the end of the first value and reports no error, so without this a body
+	// like `{"tenant_id":"acme",...}{"tenant_id":"evil"}` is accepted, the
+	// first object is published, and the second is silently discarded --
+	// relay's idea of the request and the caller's differ, with a 202 saying
+	// they agree. Two concatenated values are not one JSON text under RFC 8259.
+	//
+	// More() skips trailing whitespace, so a body ending in a newline is still
+	// accepted; TestTrailingWhitespaceIsAccepted holds that line.
+	if dec.More() {
+		metrics.IngestEvents.WithLabelValues("malformed").Inc()
+		writeError(w, http.StatusBadRequest,
+			"malformed JSON: unexpected content after the first JSON value")
+		return
+	}
+
 	id, err := event.NewID()
 	if err != nil {
 		// Losing the random source is not the caller's fault.

@@ -40,7 +40,7 @@ data:
             "id": 1,
             "type": "timeseries",
             "title": "Consumer lag and consumer count",
-            "description": "The demo, on one graph. Slowing the sink raises its latency; lag climbs behind it; KEDA adds consumers; lag drains; the consumers go away again. Lag is read from the broker by relay-ingest, which is where KEDA reads it too, so the scaler and this panel cannot disagree.\n\nmax() rather than sum(): every relay-ingest replica polls the broker for the same consumer group and reports the same number, so summing multiplies lag by the ingest replica count. max() is the truth whatever that count is.",
+            "description": "The demo, on one graph. Slowing the sink raises its latency; lag climbs behind it; KEDA adds consumers; lag drains; the consumers go away again. Lag is read from the broker by relay-ingest, which is where KEDA reads it too, so the scaler and this panel are looking at the same source. One caveat: if a partition cannot be read, relay does NOT publish a total for that poll -- it holds the last complete one and raises relay_lag_partitions_missing. Check that gauge and relay_lag_refreshed_timestamp_seconds before trusting a flat line.\n\nmax() rather than sum(): every relay-ingest replica polls the broker for the same consumer group and reports the same number, so summing multiplies lag by the ingest replica count. max() is the truth whatever that count is.",
             "datasource": {
               "type": "prometheus",
               "uid": "prometheus"

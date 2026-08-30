@@ -54,8 +54,17 @@ var (
 
 	LagRefreshedAt = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "relay_lag_refreshed_timestamp_seconds",
-		Help: "Unix time of the last successful lag refresh. Stale means the gauges above are stale.",
+		Help: "Unix time of the last COMPLETE lag refresh. Stale means the gauges above are stale.",
 	})
+
+	// A partial read is the case the two metrics above do not cover. The poll
+	// succeeded, so it is not an error; but some partition could not be read,
+	// so the total would be a sum over a subset -- a smaller number, stamped
+	// fresh, which reads on the panel as a backlog that drained.
+	LagPartitionsMissing = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "relay_lag_partitions_missing",
+		Help: "Partitions whose lag could not be read on the last poll. Non-zero means the total is not published.",
+	}, []string{"group", "topic"})
 )
 
 // offsetClient is the part of kafka.Client the poller needs, as an interface so
@@ -158,9 +167,11 @@ func (p *LagPoller) Refresh(ctx context.Context) error {
 	}
 
 	var total float64
+	var missing int
 	for _, partition := range partitions {
 		b, ok := bounds[partition]
 		if !ok {
+			missing++
 			continue
 		}
 		label := strconv.Itoa(partition)
@@ -168,6 +179,7 @@ func (p *LagPoller) Refresh(ctx context.Context) error {
 
 		offset, ok := committed[partition]
 		if !ok {
+			missing++
 			continue
 		}
 		CommittedOffset.WithLabelValues(p.group, p.topic, label).Set(float64(offset))
@@ -175,6 +187,27 @@ func (p *LagPoller) Refresh(ctx context.Context) error {
 		lag := lagFor(offset, b.first, b.last)
 		ConsumerLag.WithLabelValues(p.group, p.topic, label).Set(float64(lag))
 		total += float64(lag)
+	}
+
+	LagPartitionsMissing.WithLabelValues(p.group, p.topic).Set(float64(missing))
+
+	// The per-partition gauges above are published either way: one unreadable
+	// partition should not discard eleven good ones.
+	//
+	// The TOTAL is different, and publishing a partial one was the defect. A
+	// sum over a subset is a smaller number that looks exactly like a backlog
+	// draining, and stamping LagRefreshedAt alongside it asserted the smaller
+	// number was current. KEDA reads the group's offsets from the broker
+	// itself, so during a partial read the scaler and this panel disagree --
+	// which is precisely what the dashboard tells the viewer cannot happen.
+	//
+	// So an incomplete poll leaves the last complete total in place and does
+	// not touch the freshness stamp. The panel then shows a total that is
+	// visibly ageing, relay_lag_partitions_missing says why, and neither reads
+	// as lag going down.
+	if missing > 0 {
+		return fmt.Errorf("lag for %d of %d partitions on %q could not be read; "+
+			"total and refresh timestamp left unchanged", missing, len(partitions), p.topic)
 	}
 
 	ConsumerLagTotal.WithLabelValues(p.group, p.topic).Set(total)

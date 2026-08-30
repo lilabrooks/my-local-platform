@@ -105,6 +105,32 @@ func TestAcceptsAndProduces(t *testing.T) {
 	}
 }
 
+// The trailing-content check rejects a second JSON value, not trailing bytes
+// of any kind. A body ending in a newline is what curl -d @file and most HTTP
+// clients send, and rejecting it would turn a correctness fix into an outage.
+func TestTrailingWhitespaceIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"newline":     "{\"tenant_id\":\"acme\",\"type\":\"a\",\"data\":{}}\n",
+		"crlf":        "{\"tenant_id\":\"acme\",\"type\":\"a\",\"data\":{}}\r\n",
+		"spaces":      `{"tenant_id":"acme","type":"a","data":{}}   `,
+		"mixed space": "{\"tenant_id\":\"acme\",\"type\":\"a\",\"data\":{}} \t\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := &fakeProducer{}
+			rr := post(t, newTestServer(p), body)
+			if rr.Code != http.StatusAccepted {
+				t.Errorf("status = %d, want 202. body: %s", rr.Code, rr.Body)
+			}
+			if n := len(p.messages()); n != 1 {
+				t.Errorf("produced %d messages, want 1", n)
+			}
+		})
+	}
+}
+
 // The one outcome that must never happen: a success for an event that was not
 // written. An unreachable broker is a 503, and nothing is buffered.
 func TestBrokerFailureIsNotSuccess(t *testing.T) {
@@ -136,6 +162,17 @@ func TestRejectsBadRequests(t *testing.T) {
 		"no data":        {`{"tenant_id":"acme","type":"a"}`, http.StatusBadRequest},
 		"scalar data":    {`{"tenant_id":"acme","type":"a","data":7}`, http.StatusBadRequest},
 		"unknown field":  {`{"tenant_id":"acme","type":"a","data":{},"typo":1}`, http.StatusBadRequest},
+		// A body is one JSON text. Decode stops at the end of the first value
+		// without erroring, so these were accepted with a 202 while everything
+		// after the first object was discarded.
+		"trailing object": {
+			`{"tenant_id":"acme","type":"a","data":{}}{"tenant_id":"evil","type":"b","data":{}}`,
+			http.StatusBadRequest,
+		},
+		"trailing garbage": {
+			`{"tenant_id":"acme","type":"a","data":{}}not-json`,
+			http.StatusBadRequest,
+		},
 	}
 
 	for name, tc := range cases {

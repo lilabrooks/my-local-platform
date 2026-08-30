@@ -73,6 +73,7 @@ func TestHandlerServesTheRegisteredFamilies(t *testing.T) {
 		"relay_consumer_group_lag",
 		"relay_consumer_group_lag_total",
 		"relay_lag_refreshed_timestamp_seconds",
+		"relay_lag_partitions_missing",
 		// Registered explicitly rather than inherited from the default
 		// registry, so worth confirming they actually arrived.
 		"go_goroutines",

@@ -124,6 +124,7 @@ pass "$EVENTS events for $TENANT delivered in the order they were accepted"
 cat <<'EOF'
 
   Steady state only: one consumer, no membership change. Ordering across a
-  rebalance is the other half of issue #54 and needs a second consumer, which
-  compose cannot start while relay-deliver sets container_name.
+  rebalance is the other half of issue #54: run
+  scripts/verify-ordering-rebalance.sh, which starts a second consumer and
+  waits for the broker to report the group has actually changed generation.
 EOF

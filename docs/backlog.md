@@ -173,3 +173,51 @@ Done means the source partition and offset carried as fields rather than only
 inside the reason string, poison records keyed by something meaningful or a note
 explaining why an empty key is right for them, and the raw bytes of the
 undecodable record preserved so it can actually be diagnosed.
+
+### relay delivery is not cancelled when the consumer group rebalances
+
+**Issue:** [#54](https://github.com/lilabrooks/my-local-platform/issues/54) ·
+**Found:** 2026-08-30 · **Address:** on a change to `RELAY_DELIVERY_TIMEOUT` or
+`RELAY_RETRY_DELAYS` that lets one record's total work approach
+`DefaultRebalanceTimeout`
+
+`runDeliver` builds one context from `signal.NotifyContext`
+(`cmd/relay/main.go:174`) and passes it down through `Consumer.Run` and
+`handle` into `Deliver`. Nothing cancels it when the group changes generation —
+kafka-go does joins and generation changes on background goroutines that never
+touch a caller's context. So an old partition owner can still be mid-POST after
+the partition has moved.
+
+This entry is the *mechanism*, not the whole issue. #54 also carries two
+scheduled items — correcting `deliver.go:88`'s comment, which currently
+documents the offset-commit invariant as resting on a cancellation that does not
+happen, and recording the ordering result in ADR 0006. Those belong on the
+tracker. What belongs here is the decision not to make delivery
+rebalance-aware, and why that is defensible.
+
+**The predicted consequence did not reproduce.**
+`scripts/verify-ordering-rebalance.sh` was written to catch it: two runs, both
+with a real handover (12 partitions split 6/6) and a redelivered record, and no
+ordering violation in either. Stopped at two rather than tuning until a positive
+appeared, which would have been sampling to a conclusion. Duplicates are not
+violations — at-least-once is the stated contract and ADR 0006:225 accepts them.
+
+**Why the window is hard to hit, and why that is the trigger.** A single attempt
+is capped by `RELAY_DELIVERY_TIMEOUT` while joining a group takes seconds, so
+the old owner's in-flight attempt tends to finish before the new owner resumes —
+and a late arrival landing before the next record is not a reordering. The case
+that would bite is an old owner whose work on one record spans the whole
+rebalance, which needs a longer timeout or a longer retry schedule.
+
+That is a real trigger rather than a hopeful one, and it is the distinction
+[#21](https://github.com/lilabrooks/my-local-platform/issues/21)'s entry above
+had to learn twice: it is a deliberate config change, and
+`config.ValidateLiveness` already rejects schedules whose total passes the
+rebalance timeout. Someone raising either value is the event, and the existing
+guard is where it surfaces.
+
+**This bound is a hypothesis, not a measurement.** Two clean runs do not
+establish that ordering cannot break here, and nothing in the repository
+currently measures whether an old owner ever completes a delivery past the new
+owner's offset. Done means either instrumenting the handover to answer that, or
+cancelling delivery on generation change and removing the question.
