@@ -53,7 +53,7 @@ Run what the change touches. All of these are free and local:
 
 ```bash
 make lint          # 10 checks: go, yaml, shell, md, actions, docker, tf, security, secrets
-make test          # Go tests across all three modules
+make test          # Go tests across all five modules
 make k8s-validate  # manifest invariants
 make smoke         # end-to-end against the running local stack
 ```
