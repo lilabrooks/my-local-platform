@@ -123,6 +123,7 @@ func resetLagGauges() {
 	ConsumerLagTotal.Reset()
 	CommittedOffset.Reset()
 	HighWatermark.Reset()
+	LagPartitionsMissing.Reset()
 }
 
 func TestRefreshPublishesPerPartitionAndTotalLag(t *testing.T) {
@@ -211,24 +212,62 @@ func TestRefreshErrorsRatherThanReportingZeroLag(t *testing.T) {
 	}
 }
 
-func TestRefreshKeepsGoodPartitionsWhenOneFails(t *testing.T) {
+// A partial read must not publish a partial TOTAL. Summing only the partitions
+// that answered produces a smaller number, and stamping it fresh makes it
+// indistinguishable on the panel from a backlog that drained. KEDA reads the
+// group's offsets from the broker itself, so a partial read here is exactly
+// when the scaler and the panel would disagree -- which is what the dashboard
+// tells the viewer cannot happen.
+//
+// This test used to assert the opposite -- that the truncated total WAS
+// published, and 60 was the expected value. It passed, which is why the defect
+// survived: the behaviour was written down as correct rather than noticed.
+// Found by an external review pass on 2026-08-30.
+func TestPartialReadKeepsPartitionsButNotTheTotal(t *testing.T) {
 	resetLagGauges()
 
-	broker := &fakeBroker{
+	// Phase 1: a complete poll, so there is a known good total to preserve.
+	healthy := &fakeBroker{
+		partitions: []int{0, 1},
+		committed:  map[int]int64{0: 40, 1: 0},
+		bounds:     map[int]offsetBounds{0: {first: 0, last: 100}, 1: {first: 0, last: 200}},
+	}
+	if err := quietPoller(healthy).Refresh(context.Background()); err != nil {
+		t.Fatalf("healthy Refresh: %v", err)
+	}
+	if got := testutil.ToFloat64(ConsumerLagTotal.WithLabelValues(testGroup, testTopic)); got != 260 {
+		t.Fatalf("total after a complete poll = %v, want 260", got)
+	}
+	completeAt := testutil.ToFloat64(LagRefreshedAt)
+	if completeAt == 0 {
+		t.Fatal("a complete poll did not stamp the refresh timestamp")
+	}
+
+	// Phase 2: partition 1 has no leader. Its lag is unknowable this poll.
+	degraded := &fakeBroker{
 		partitions:   []int{0, 1},
 		committed:    map[int]int64{0: 40, 1: 0},
 		bounds:       map[int]offsetBounds{0: {first: 0, last: 100}, 1: {first: 0, last: 999}},
 		partitionErr: map[int]error{1: errors.New("leader not available")},
 	}
-
-	if err := quietPoller(broker).Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	err := quietPoller(degraded).Refresh(context.Background())
+	if err == nil {
+		t.Fatal("a partial read returned nil; an incomplete poll must be reported, not published as a smaller total")
 	}
+
+	// The readable partition is still published: one bad partition should not
+	// discard the good ones.
 	if got := testutil.ToFloat64(ConsumerLag.WithLabelValues(testGroup, testTopic, "0")); got != 60 {
 		t.Errorf("lag on the healthy partition = %v, want 60", got)
 	}
-	// The failing partition contributes nothing rather than a made-up number.
-	if got := testutil.ToFloat64(ConsumerLagTotal.WithLabelValues(testGroup, testTopic)); got != 60 {
-		t.Errorf("total lag = %v, want 60 from the one readable partition", got)
+	// The total is the previous COMPLETE one, not 60.
+	if got := testutil.ToFloat64(ConsumerLagTotal.WithLabelValues(testGroup, testTopic)); got != 260 {
+		t.Errorf("total lag = %v, want the last complete total 260 -- a partial sum must not overwrite it", got)
+	}
+	if got := testutil.ToFloat64(LagRefreshedAt); got != completeAt {
+		t.Errorf("refresh timestamp moved on a partial read (%v -> %v); the panel would read the partial total as current", completeAt, got)
+	}
+	if got := testutil.ToFloat64(LagPartitionsMissing.WithLabelValues(testGroup, testTopic)); got != 1 {
+		t.Errorf("partitions missing = %v, want 1", got)
 	}
 }
