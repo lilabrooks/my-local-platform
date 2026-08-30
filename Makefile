@@ -15,7 +15,12 @@ AWS_PROFILE_NAME ?= aws-public-change-feed
 
 .PHONY: up
 up: ## Start everything (~1.6GB sustained; see docs/runbook-local.md)
-	$(COMPOSE) --profile all up -d
+	# --build because relay and the sink are built from source and `all`
+	# includes them. Without it, compose starts the image it built last, so
+	# editing relay and running the documented `make up && make smoke` reports
+	# PASS for code that is not running. Docker's cache makes a no-change
+	# rebuild a few seconds; a green check against a stale binary costs more.
+	$(COMPOSE) --profile all up -d --build
 	$(MAKE) seed
 
 .PHONY: up-core

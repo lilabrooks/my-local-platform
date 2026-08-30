@@ -287,8 +287,16 @@ services:
   # ---------------------------------------------------------------------------
   # relay -- the webhook delivery service, and the sink it delivers to.
   #
-  # Own profile: these are built from source rather than pulled, so `make up`
-  # should not pay for them unless you are working on relay.
+  # Two profiles each: `apps` to bring them up without the rest of the stack,
+  # and `all` because `make up` has to start them -- smoke's relay check is
+  # enabled whenever RELAY_INGEST_URL is set, and it defaults to
+  # localhost:8082, so the documented `make up && make smoke` FAILS rather
+  # than skips if relay is not running.
+  #
+  # Being built from source, they also need --build on any target that starts
+  # them, or compose reuses the last image it built. Both `up` and `up-apps`
+  # pass it. This comment used to say `make up` did not start them at all,
+  # which was never true of `--profile all`.
   #
   #   docker compose --profile core --profile messaging --profile apps up -d
   #   make up-apps
