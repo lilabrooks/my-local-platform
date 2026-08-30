@@ -33,10 +33,25 @@ updates:
       terraform:
         patterns: ["*"]
 
+  # All five modules. This listed smoke, echo and validate only, so relay and
+  # sink got no update PRs -- and relay is the module that has dependencies
+  # worth updating: kafka-go, pgx and client_golang, plus sixteen indirect.
+  # It was the only one of the five outside this list with a non-empty
+  # require block, so the gap covered exactly the code it mattered for.
+  #
+  # sink and echo are standard-library-only and listing them changes nothing
+  # today. They are here so the next dependency added to either does not
+  # silently land outside the automation.
+  #
+  # Same undercount that hardcoded the CI build matrix to three modules (see
+  # ci.yml), and quieter: a missing build fails, a missing update never
+  # arrives.
   - package-ecosystem: gomod
     directories:
       - "/services/smoke"
       - "/services/echo"
+      - "/services/relay"
+      - "/services/sink"
       - "/k8s/validate"
     schedule:
       interval: weekly
