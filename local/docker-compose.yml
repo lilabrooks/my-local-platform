@@ -335,7 +335,12 @@ services:
     build:
       context: ../services/relay
     image: relay:dev
-    container_name: mlp-relay-deliver
+    # No container_name, unlike every other service here. A fixed name makes
+    # `docker compose up --scale relay-deliver=N` fail outright, and this is
+    # the one service that has to run as more than one instance: it is a Kafka
+    # consumer group, and group membership changing is the condition
+    # scripts/verify-ordering-rebalance.sh exists to create. Nothing referred
+    # to mlp-relay-deliver except this line.
     profiles: [apps, all]
     # relay treats a broker fetch failure as fatal and exits. That is a
     # reasonable stance for a consumer -- a restart rejoins the group cleanly --

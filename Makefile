@@ -119,6 +119,17 @@ relay-demo: ## The M2 demo: six steps against the cluster, narrated (~4 min)
 relay-replay-verify: ## Prove replay works: deliver, wipe, replay, assert the same ids return
 	./scripts/verify-replay.sh
 
+.PHONY: relay-verify-ordering
+relay-verify-ordering: ## Assert one tenant's events are delivered in the order accepted
+	./scripts/verify-ordering.sh
+
+# Not in CI, unlike relay-verify-ordering: it starts a second consumer, waits
+# on a real group rebalance, and takes about a minute. It is a tool for
+# investigating issue #54 rather than a gate.
+.PHONY: relay-verify-ordering-rebalance
+relay-verify-ordering-rebalance: ## Same assertion, with group membership changing mid-run
+	./scripts/verify-ordering-rebalance.sh
+
 .PHONY: test
 test: ## Run Go tests across all modules
 	cd services/smoke && go test ./...
