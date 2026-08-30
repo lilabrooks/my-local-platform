@@ -1,7 +1,7 @@
 # 7. KEDA on consumer lag, not an HPA on CPU
 
 Date: 2026-08-27
-Status: Proposed
+Status: Accepted
 
 ## Context
 

@@ -188,11 +188,10 @@ kafka-go does joins and generation changes on background goroutines that never
 touch a caller's context. So an old partition owner can still be mid-POST after
 the partition has moved.
 
-This entry is the *mechanism*, not the whole issue. #54 also carries two
-scheduled items — correcting `deliver.go:88`'s comment, which currently
-documents the offset-commit invariant as resting on a cancellation that does not
-happen, and recording the ordering result in ADR 0006. Those belong on the
-tracker. What belongs here is the decision not to make delivery
+This entry is the *mechanism*, not the whole issue. #54's two scheduled items
+are done — `deliver.go`'s comment no longer claims the context is cancelled on
+rebalance, and ADR 0006's Verification section now records both ordering
+results. What remains here is the decision not to make delivery
 rebalance-aware, and why that is defensible.
 
 **The predicted consequence did not reproduce.**

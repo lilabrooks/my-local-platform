@@ -378,8 +378,24 @@ Estimates assume focused sessions and are the least reliable thing here.
 
 ## Verification
 
-Nothing in this document has been verified by running it -- it is a plan, not a
-record. The cost figures were checked against AWS published pricing on
-2026-08-24. KEDA scaler behaviour was checked against KEDA's documentation for
-2.12 through 2.21. Line citations were checked against the files named.
-Everything else is a claim to be tested by building it.
+**As written on 2026-08-24, nothing here had been verified by running it** — it
+was a plan, not a record. The cost figures were checked against AWS published
+pricing on that date. KEDA scaler behaviour was checked against KEDA's
+documentation for 2.12 through 2.21. Line citations were checked against the
+files named. Everything else was a claim to be tested by building it.
+
+M0, M1 and M2 have since been built, so that paragraph stopped describing this
+document and was left standing under a header saying so until an external review
+on 2026-08-30. What the milestones actually tested now lives where the evidence
+belongs rather than being restated here:
+
+| Claim | Where it was run |
+|---|---|
+| Replay redelivers acknowledged events | [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#verification), and `make relay-replay-verify` on every push |
+| Per-tenant ordering | [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#verification), and `make relay-verify-ordering` on every push |
+| Lag-based autoscaling beats an HPA on CPU | [ADR 0007](adr/0007-keda-lag-autoscaling.md#verification), measured 2026-08-27 |
+| In-cluster Prometheus and Grafana for the demo | [ADR 0008](adr/0008-in-cluster-observability-for-the-demo.md#verification), measured 2026-08-27 |
+
+**M3 and M4 remain unverified in exactly the original sense**, including every
+cost figure for MSK and EKS. Re-check those against current pricing before M4;
+both schedules change.

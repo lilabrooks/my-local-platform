@@ -86,8 +86,19 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // not an operational fault.
 //
 // It only returns an error when the context is cancelled, which means the
-// consumer is shutting down or being rebalanced and the offset must not be
-// committed.
+// consumer is SHUTTING DOWN and the offset must not be committed.
+//
+// Not a rebalance. This comment used to claim both, and the rebalance half was
+// false: the context here descends from signal.NotifyContext in runDeliver and
+// nothing links it to consumer-group membership, because kafka-go performs
+// joins, heartbeats and generation changes on background goroutines that never
+// touch a caller's context. An old partition owner therefore keeps delivering
+// after the partition has moved.
+//
+// The commit-only-when-finished invariant does not depend on that cancellation,
+// so it still holds -- but it was documented as if it did, which is why the
+// claim is corrected here rather than quietly dropped. See issue #54 and the
+// backlog entry for what is being lived with and what would change it.
 func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription, rec event.Record) (Outcome, error) {
 	body, err := json.Marshal(rec.Payload())
 	if err != nil {

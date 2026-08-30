@@ -284,12 +284,46 @@ Two things the exercise taught that the ADR had not anticipated:
 Driver 3 holds. Replay cost one shell script and no application code, because
 the log already had the events -- which is the thing option B could not offer.
 
+### Ordering, run 2026-08-30
+
+**Per-tenant ordering holds in the steady state, and is now gated on every
+push.** `scripts/verify-ordering.sh` posts 40 events for one tenant one at a
+time, so the accepted order is known, and compares it against the order the sink
+recorded them in. It uses `globex` rather than `acme`: acme's second
+subscription points at `/hooks/flaky`, and since the offset commits only once
+every subscriber reaches a terminal state, each record would wait out the retry
+budget and the script would be measuring the retry schedule.
+
+The assertion was checked against a deliberately reversed expectation before the
+pass was believed — it fails, names the first divergence, and exits 1.
+
+**Across a rebalance, the answer is weaker: two runs, no violation, and no proof
+it cannot happen.** `scripts/verify-ordering-rebalance.sh` adds a second
+consumer mid-run and waits for the broker to report the group has changed
+generation. Both runs saw a real handover (12 partitions split 6/6) and one
+redelivered record each, so the interrupted path was exercised rather than
+skipped. Neither produced a delivered sequence that went backwards once
+consecutive duplicates were collapsed.
+
+Stopped at two runs deliberately. Continuing until a positive case appeared
+would be sampling to a conclusion rather than a result.
+
+Why the window is hard to hit is a **hypothesis this repository does not
+measure**: `RELAY_DELIVERY_TIMEOUT` caps one attempt while joining a group takes
+seconds, so an old owner's in-flight attempt tends to finish before the new
+owner resumes. If that holds, `config.ValidateLiveness` bounds more than the
+liveness it is named for. Settling it needs instrumentation at the handover.
+The mechanism behind the question — delivery is not cancelled on a generation
+change — is recorded in [the backlog](../backlog.md) with the condition that
+would make it matter, and in
+[#54](https://github.com/lilabrooks/my-local-platform/issues/54).
+
 ### Still planned
 
-- **Ordering**: produce a known sequence for one tenant, assert delivery order
-  at the sink.
 - **Duplicate on crash**: kill the consumer between delivery and commit, assert
-  the subscriber sees the same `webhook-id` twice.
+  the subscriber sees the same `webhook-id` twice. The rebalance runs above
+  produced one duplicate each, which is this behaviour appearing incidentally
+  rather than the asserted check.
 - **Head-of-line blocking**: degrade one subscriber and measure delivery delay
   for an unrelated tenant on the same partition. This should reproduce Segment's
   first architecture in miniature, and demonstrating it deliberately is more
