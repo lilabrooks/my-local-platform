@@ -390,11 +390,23 @@ consumer was not stranded at zero replicas with the topic silently not
 draining. That was named as this record's one failure mode with no compose
 equivalent, so it is checked rather than assumed.
 
-Still to run:
+**The `k8s/validate` invariant fires when `relay.json` is edited without
+regenerating the ConfigMap.** Previously only checked by deliberately breaking
+it. On 2026-08-30 it caught a real edit: correcting this dashboard's
+description of the lag panel produced
 
-- The `k8s/validate` invariant failing when `relay.json` is edited without
-  regenerating the ConfigMap. Checked locally by breaking it; it does not apply
-  against a cluster.
+```text
+--- FAIL: TestDashboardConfigMapMatchesTheSourceFile
+    the ConfigMap and ../../local/config/grafana/provisioning/dashboards/relay.json
+    have diverged. Run: make monitoring-dashboard
+    (source is 17686 bytes, ConfigMap payload is 17420)
+```
+
+`make monitoring-dashboard` regenerated it and the test passed. An invariant
+that has only ever been tested by breaking it on purpose is a weaker claim than
+one that has stopped a change nobody intended to make.
+
+Nothing in this section is still outstanding.
 
 ### What closes this gap
 
@@ -414,11 +426,24 @@ acceptance criterion to replace the list above with measured results and the
 commands that produced them.** It cannot be closed while this section still says
 nothing has been run.
 
-The distinction from ADR 0006 is only that: not that this record is better
-evidenced -- it is not -- but that something outside it fails if the evidence
-never arrives. Until then, treat every claim in the Decision and Consequences
+The distinction from ADR 0006 was only that: not that this record was better
+evidenced at the time -- it was not -- but that something outside it failed if
+the evidence never arrived.
+
+**The gap is closed.** The Verification section above was replaced with measured
+results on 2026-08-27, run on the `mlp` profile at `--memory=6g`, and
+[#40](https://github.com/lilabrooks/my-local-platform/issues/40) closed against
+that criterion. The mechanism worked as designed: an issue outside the record
+forced the evidence in, rather than the record being trusted because it read
+well.
+
+This paragraph used to end "treat every claim in the Decision and Consequences
 sections as reasoning rather than as result. The two checked items above are the
-exceptions and are marked as such.
+exceptions." Both statements outlived the evidence arriving -- there are now
+four checked items and a measured table -- and stood for three days until an
+external review on 2026-08-30. Kept here rather than deleted, because a record
+about the cost of stale evidence claims going unnoticed should say that its own
+did.
 
 ## Open questions
 

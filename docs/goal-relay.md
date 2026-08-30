@@ -260,5 +260,10 @@ test asserting it carries nothing else.
 ---
 
 Sequencing and milestones are in [the roadmap](roadmap-relay.md). The choice of
-Kafka is in [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). Nothing in
-either has been built yet.
+Kafka is in [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). M0, M1 and M2
+are built and their milestones closed; M3 and M4 remain proposed.
+
+This sentence used to read "Nothing in either has been built yet." It was true
+on 2026-08-24 and survived three milestones sitting directly under a header
+saying **Built** — the same drift the 2026-08-27 audit found six of, caught here
+by an external review rather than by anyone re-reading the file.
