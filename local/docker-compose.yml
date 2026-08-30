@@ -208,7 +208,7 @@ services:
         condition: service_healthy
 
   rabbitmq:
-    image: rabbitmq:4.1-management
+    image: rabbitmq:4.3-management
     container_name: mlp-rabbitmq
     profiles: [messaging, all]
     ports:
