@@ -76,8 +76,21 @@ is worse than the finding.
 
 ## Conventions that are load-bearing
 
-**Every image and module version is pinned.** Floating `:latest` is how a local
-stack rots. Verify a tag exists before pinning it.
+**Every image, module and GitHub Action is pinned.** Floating `:latest` is how a
+local stack rots. Verify a tag exists before pinning it.
+
+Actions are pinned to a **full commit SHA**, with the human-readable version in
+a trailing comment:
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+```
+
+A tag is not a pin. `actions/checkout@v7` is a branch-like ref the publisher can
+move, so CI behaviour can change with no commit in this repository — which is
+the same argument this convention already makes for images. Dependabot's
+`github-actions` group updates the SHA and the comment together, so pinning does
+not mean going stale.
 
 **ADRs record evidence, not intent.** Each `docs/adr/*.md` has a Verification
 section naming the command that produced the result. A claim that cannot be
