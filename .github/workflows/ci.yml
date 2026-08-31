@@ -185,6 +185,14 @@ jobs:
       - name: Verify per-tenant delivery ordering
         run: ./scripts/verify-ordering.sh
 
+      # ADR 0006's failure-semantics table states this as settled -- a consumer
+      # dying after delivering but before committing produces a duplicate, not a
+      # loss -- and listed it under "Still planned" from the day it was written.
+      # It is also the half of the at-least-once contract you cannot check by
+      # watching relay work. Runs last: it SIGKILLs the consumer.
+      - name: Verify a crash redelivers rather than losing the event
+        run: ./scripts/verify-duplicate-on-crash.sh
+
       - name: Dump container logs on failure
         if: failure()
         run: docker compose -f local/docker-compose.yml --profile all logs --tail=100
