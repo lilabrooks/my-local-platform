@@ -76,6 +76,19 @@ failure the demo would *surface*, loudly, rather than hide. Fixing it first
 would be fixing a predicted problem; running the demo tells us whether it is a
 real one.
 
+**The demo has since run, and did not surface it.**
+[ADR 0008's Verification](adr/0008-in-cluster-observability-for-the-demo.md#verification)
+records the full cycle on 2026-08-27: 600 events across 16 tenants, scaling 1 →
+12 replicas, lag 596 → 0, every event delivered and no dead letters. Twelve pods
+reporting Ready while lag did not drain is precisely what did not happen.
+
+That answers the question the deferral posed and does **not** resolve the
+defect. `Consumer.Run` still marks itself ready before joining a generation, and
+`relay_topic_partitions_unassigned` still does not exist. One demo draining
+shows the predicted symptom did not appear in that run; it cannot show that an
+idle-Ready pod is impossible, because — as the trigger note below explains at
+length — nothing in the stack can distinguish one from outside.
+
 **Smaller than it was, and reshaped on 2026-08-27.** Two things changed it.
 
 `WatchPartitionChanges: true` with a 2s interval is already set in
@@ -100,6 +113,16 @@ Done now means two separate things, split by who can answer:
   `relay_topic_partitions_unassigned`. That is the #10 condition, and no per-pod
   probe can express it, because a partition owned by nobody is invisible to
   every pod individually.
+
+  **This metric does not exist yet, and is not the one that shipped.**
+  `relay_lag_partitions_missing` was added to the same `LagPoller` on
+  2026-08-30, and the names are close enough to mislead. It counts partitions
+  whose lag could not be *read* on the last poll — a broker-side failure, which
+  is why an incomplete poll no longer publishes a total. `..._unassigned` would
+  count partitions the group has *no member for*, which is a healthy read of a
+  broken assignment. A partition can be unassigned and perfectly readable, so
+  the existing gauge does not cover this and reusing it would hide the very
+  condition #10 produced.
 
 ### The trigger, and why this one is honest about having none
 
@@ -176,7 +199,7 @@ undecodable record preserved so it can actually be diagnosed.
 
 ### relay delivery is not cancelled when the consumer group rebalances
 
-**Issue:** [#54](https://github.com/lilabrooks/my-local-platform/issues/54) ·
+**Issue:** [#69](https://github.com/lilabrooks/my-local-platform/issues/69) ·
 **Found:** 2026-08-30 · **Address:** on a change to `RELAY_DELIVERY_TIMEOUT` or
 `RELAY_RETRY_DELAYS` that lets one record's total work approach
 `DefaultRebalanceTimeout`
@@ -188,11 +211,18 @@ kafka-go does joins and generation changes on background goroutines that never
 touch a caller's context. So an old partition owner can still be mid-POST after
 the partition has moved.
 
-This entry is the *mechanism*, not the whole issue. #54's two scheduled items
-are done — `deliver.go`'s comment no longer claims the context is cancelled on
-rebalance, and ADR 0006's Verification section now records both ordering
-results. What remains here is the decision not to make delivery
-rebalance-aware, and why that is defensible.
+This entry is the *mechanism*, not the whole of what
+[#54](https://github.com/lilabrooks/my-local-platform/issues/54) covered. That
+issue's scheduled items are done and it is closed — the ordering tests exist and
+are gated, `deliver.go`'s comment no longer claims the context is cancelled on
+rebalance, and ADR 0006's Verification section records both results. #69 was
+split out for the part nobody is scheduled to fix, which is this one: the
+decision not to make delivery rebalance-aware, and why that is defensible.
+
+It was pointed at #54 until this file was reconciled on 2026-08-31 and #54 had
+closed underneath it. Every entry here names an **open** issue; one pointing at
+a closed issue reads as resolved-but-not-removed, which is the state this file
+says it does not keep.
 
 **The predicted consequence did not reproduce.**
 `scripts/verify-ordering-rebalance.sh` was written to catch it: two runs, both
