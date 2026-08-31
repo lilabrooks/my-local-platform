@@ -434,12 +434,45 @@ signal. The script restarts the consumer explicitly regardless, which is also th
 more faithful model, since what revives a crashed consumer here is Kubernetes
 rather than the container runtime.
 
-### Still planned
+### Head-of-line blocking, run 2026-08-31
 
-- **Head-of-line blocking**: degrade one subscriber and measure delivery delay
-  for an unrelated tenant on the same partition. This should reproduce Segment's
-  first architecture in miniature, and demonstrating it deliberately is more
-  useful than avoiding it.
+**One blocked record delays every partition its member owns, and none of the
+partitions owned by another member.** `scripts/verify-head-of-line.sh` asserts
+it; `make relay-verify-head-of-line`.
+
+The original plan for this check was to compare against "an unrelated tenant on
+the same partition". That would have proved nothing, for the reason the
+consequences section above now records: with one member there is no unblocked
+comparison to make. The check runs two members and compares a victim sharing the
+blocker's member against a control on the other member.
+
+```text
+                                        baseline     blocked
+victim  (globex, p10, same member)        0.080s      6.336s
+control (demo-01, p2, other member)       0.070s      0.066s
+```
+
+A 96x separation. The control is indistinguishable from its own baseline while
+the victim, **on a different partition from the blocker**, waits.
+
+Every assignment is read from the broker at runtime rather than computed:
+tenant-to-partition by posting a probe and seeing which partition's end offset
+moves, and partition-to-member from `kafka-consumer-groups --verbose`. Both
+depend on the partition count, and this record already says raising that count
+reshuffles the mapping.
+
+**The victim is delayed, not stuck**, and the difference matters. relay's
+per-attempt timeout cancels the parked delivery, so the blocker holds its member
+for the record's retry budget and then dead-letters. That bound is the stall
+budget described above -- this is the failure mode it exists to keep survivable,
+which is also why the budget is service policy rather than an arbitrary number.
+
+The blocker is held open by a **latch** in the sink rather than by a slow
+subscriber and a stopwatch. `POST /control {"latch":"/hooks/flaky"}` parks every
+request to that path and `GET /control` reports how many are parked, so a
+verification waits for an observable state instead of guessing that a retry is
+probably still in flight. `scripts/verify-duplicate-on-crash.sh` uses the same
+mechanism for the same reason.
 
 Dead-lettering is covered: the `relay` smoke check asserts a failed delivery
 reaches `mlp.relay.deliveries.dlq` with a reason on every `make smoke`.

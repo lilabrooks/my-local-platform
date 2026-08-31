@@ -117,6 +117,81 @@ type sink struct {
 
 	ready   atomic.Bool
 	rejects atomic.Int64
+
+	// A latch parks requests to one path until they are explicitly released.
+	//
+	// Latency is not a substitute. A verification that slows a subscriber and
+	// then races a wall clock -- "it should still be retrying about now" --
+	// passes or fails on how loaded the machine is, which is how a CI gate
+	// becomes a coin flip. A latch converts that into an observable state: the
+	// caller waits until `held` says a request is actually parked, acts, and
+	// releases. See scripts/verify-duplicate-on-crash.sh and
+	// scripts/verify-head-of-line.sh.
+	latchMu sync.Mutex
+	latched map[string]chan struct{} // path -> closed on release
+	held    map[string]int           // path -> requests currently parked
+}
+
+// enterLatch reports the release channel for a path, or nil when it is not
+// latched. A non-nil return means the caller must call leaveLatch.
+func (s *sink) enterLatch(path string) chan struct{} {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	ch, ok := s.latched[path]
+	if !ok {
+		return nil
+	}
+	s.held[path]++
+	return ch
+}
+
+func (s *sink) leaveLatch(path string) {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	if s.held[path] > 0 {
+		s.held[path]--
+	}
+}
+
+// setLatch arms a path. Arming an already-armed path is a no-op rather than an
+// error, so a script that fails partway can re-run without a reset step.
+func (s *sink) setLatch(path string) {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	if s.latched == nil {
+		s.latched = map[string]chan struct{}{}
+		s.held = map[string]int{}
+	}
+	if _, ok := s.latched[path]; !ok {
+		s.latched[path] = make(chan struct{})
+	}
+}
+
+// releaseLatch frees everything parked on a path and disarms it. Releasing a
+// path that was never armed is also a no-op, for the same reason.
+func (s *sink) releaseLatch(path string) {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	if ch, ok := s.latched[path]; ok {
+		close(ch)
+		delete(s.latched, path)
+	}
+}
+
+// latchState is what GET /control reports: which paths are armed, and how many
+// requests are parked on each right now.
+func (s *sink) latchState() (armed []string, held map[string]int) {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	held = map[string]int{}
+	for p, n := range s.held {
+		held[p] = n
+	}
+	for p := range s.latched {
+		armed = append(armed, p)
+	}
+	sort.Strings(armed)
+	return armed, held
 }
 
 func main() {
@@ -143,6 +218,7 @@ func main() {
 	mux.HandleFunc("GET /received", s.getReceived)
 	mux.HandleFunc("DELETE /received", s.deleteReceived)
 	mux.HandleFunc("POST /control", s.postControl)
+	mux.HandleFunc("GET /control", s.getControl)
 	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -196,6 +272,21 @@ func (s *sink) handle(failRate float64) http.HandlerFunc {
 			log.Printf("rejected delivery on %s: %v", r.URL.Path, err)
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
+		}
+
+		// The latch is checked before latency, and after verification for the
+		// same reason latency is: a forged delivery is rejected promptly rather
+		// than parked. A parked request holds the connection open, which is the
+		// point -- relay is mid-delivery and its offset stays uncommitted.
+		if release := s.enterLatch(r.URL.Path); release != nil {
+			defer s.leaveLatch(r.URL.Path)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				// relay went away mid-request: killed, or shutting down. Not a
+				// delivery, and nothing to record.
+				return
+			}
 		}
 
 		// Latency is applied after verification so a slow sink still rejects a
@@ -311,6 +402,9 @@ func (s *sink) deleteReceived(w http.ResponseWriter, _ *http.Request) {
 type control struct {
 	LatencyMS *int64   `json:"latency_ms,omitempty"`
 	FailRate  *float64 `json:"fail_rate,omitempty"`
+	// Latch parks every request to this path until Release names it.
+	Latch   *string `json:"latch,omitempty"`
+	Release *string `json:"release,omitempty"`
 }
 
 // postControl adjusts behaviour at runtime, so the demo can slow this sink and
@@ -335,9 +429,37 @@ func (s *sink) postControl(w http.ResponseWriter, r *http.Request) {
 		}
 		s.setFailRate(*c.FailRate)
 	}
+	if c.Latch != nil {
+		if *c.Latch == "" {
+			http.Error(w, "latch must be a path", http.StatusBadRequest)
+			return
+		}
+		s.setLatch(*c.Latch)
+	}
+	if c.Release != nil {
+		if *c.Release == "" {
+			http.Error(w, "release must be a path", http.StatusBadRequest)
+			return
+		}
+		s.releaseLatch(*c.Release)
+	}
+	s.writeControlState(w)
+}
+
+// getControl reports current state. The `held` counts are what a verification
+// waits on before acting, which is the whole reason the latch is observable
+// rather than just a timer somewhere else.
+func (s *sink) getControl(w http.ResponseWriter, _ *http.Request) {
+	s.writeControlState(w)
+}
+
+func (s *sink) writeControlState(w http.ResponseWriter) {
+	armed, held := s.latchState()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"latency_ms": s.latencyMS.Load(),
 		"fail_rate":  s.failRateValue(),
+		"latched":    armed,
+		"held":       held,
 	})
 }
 

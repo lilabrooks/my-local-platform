@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -429,5 +430,121 @@ func TestUnboundedRetentionIsStillPossible(t *testing.T) {
 	}
 	if got := s.count(); got != 500 {
 		t.Errorf("unbounded sink retained %d of 500 -- the ring bounded it anyway", got)
+	}
+}
+
+// The latch exists to remove a wall clock from verification. These assert the
+// two properties the scripts rely on: a parked request is observable before
+// anything acts on it, and releasing lets it finish normally.
+func latchRequest(t *testing.T, path string) *http.Request {
+	t.Helper()
+	body := []byte(`{"type":"t","data":{}}`)
+	now := time.Now()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	for k, v := range signedHeaders("evt_latch", now, body, testSecret) {
+		req.Header[k] = v
+	}
+	return req
+}
+
+func TestLatchParksUntilReleased(t *testing.T) {
+	s := &sink{secret: []byte(testSecret), retain: defaultRetain}
+	handler := s.handle(0)
+
+	s.setLatch("/hooks/ok")
+
+	done := make(chan int, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		handler(rr, latchRequest(t, "/hooks/ok"))
+		done <- rr.Code
+	}()
+
+	// The request must become observably parked. Polling is not a race here:
+	// nothing releases it, so this either becomes true or the test fails.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, held := s.latchState(); held["/hooks/ok"] == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("request never became observably parked; the latch is not holding it")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case code := <-done:
+		t.Fatalf("request completed with %d while latched; it should be parked", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.releaseLatch("/hooks/ok")
+
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Errorf("released request returned %d, want 200", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not complete after release")
+	}
+
+	if _, held := s.latchState(); held["/hooks/ok"] != 0 {
+		t.Errorf("held count is %d after release, want 0", held["/hooks/ok"])
+	}
+}
+
+// An unlatched path must be untouched by the mechanism.
+func TestLatchOnlyAffectsItsOwnPath(t *testing.T) {
+	t.Parallel()
+
+	s := &sink{secret: []byte(testSecret), retain: defaultRetain}
+	s.setLatch("/hooks/flaky")
+
+	rr := httptest.NewRecorder()
+	s.handle(0)(rr, latchRequest(t, "/hooks/ok"))
+	if rr.Code != http.StatusOK {
+		t.Errorf("/hooks/ok returned %d while /hooks/flaky was latched, want 200", rr.Code)
+	}
+}
+
+// A parked request whose client disappears -- relay SIGKILLed mid-delivery --
+// must not be recorded as a delivery, and must not leak its held count.
+func TestLatchedRequestAbandonedByItsClientIsNotADelivery(t *testing.T) {
+	s := &sink{secret: []byte(testSecret), retain: defaultRetain}
+	s.setLatch("/hooks/ok")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rr := httptest.NewRecorder()
+		s.handle(0)(rr, latchRequest(t, "/hooks/ok").WithContext(ctx))
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, held := s.latchState(); held["/hooks/ok"] == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("request never parked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after its client went away")
+	}
+
+	if got := s.count(); got != 0 {
+		t.Errorf("recorded %d deliveries for an abandoned request, want 0", got)
+	}
+	if _, held := s.latchState(); held["/hooks/ok"] != 0 {
+		t.Errorf("held count is %d after abandonment, want 0 -- leaked", held["/hooks/ok"])
 	}
 }

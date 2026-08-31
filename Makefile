@@ -127,6 +127,13 @@ relay-verify-ordering: ## Assert one tenant's events are delivered in the order 
 relay-verify-duplicate-on-crash: ## Kill the consumer mid-record; assert the same webhook-id is redelivered
 	./scripts/verify-duplicate-on-crash.sh
 
+# Not in CI, for the same reason as the rebalance probe: it starts a second
+# consumer and measures wall-clock delay, which is a demonstration rather than a
+# gate. Issue #73 asked for it that way deliberately.
+.PHONY: relay-verify-head-of-line
+relay-verify-head-of-line: ## Show head-of-line blocking is member-scoped, not partition-scoped
+	./scripts/verify-head-of-line.sh
+
 # Not in CI, unlike the other three verify targets: it starts a second consumer,
 # waits on a real group rebalance, and takes about a minute. It is a tool for
 # investigating issue #69 rather than a gate.
