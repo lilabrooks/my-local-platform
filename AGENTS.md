@@ -97,6 +97,23 @@ section naming the command that produced the result. A claim that cannot be
 checked from the repository is one a reviewer has to re-derive. If you change
 a decision, update its ADR and say what you actually ran.
 
+**A condition that closes work names the evidence, not a string.** When an issue
+carries an acceptance criterion for an ADR, write it as "a dated command, the
+topology, and the measured result" — or, if the answer turns out to be no, "an
+explicit deferral with an observable revisit condition". Do not write "the
+heading `Still planned` no longer appears in `docs/adr/`".
+
+That criterion was real, on [#73](https://github.com/lilabrooks/my-local-platform/issues/73),
+and it did no harm: the work was done and the heading went with it. The problem
+is that it could have been satisfied by a rename, and it does not assert the
+thing anyone cares about. A condition standing in for the evidence is a
+condition that can come apart from it.
+
+This is the same defect as an unobservable backlog trigger, which
+[docs/backlog.md](docs/backlog.md) has its own rule about after issue #21 needed
+three attempts at one. Both are conditions written to sound checkable rather
+than to be the thing being checked.
+
 **A document that states intent carries a status line, and the commit that
 fulfils it updates that line.** `docs/goal-relay.md` and
 `docs/roadmap-relay.md` are written before the work and describe what is
