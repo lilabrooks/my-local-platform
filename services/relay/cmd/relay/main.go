@@ -35,13 +35,23 @@ import (
 // Set at build time: -ldflags "-X main.version=..."
 var version = "dev"
 
-// rebalanceTimeout is given to the consumer group and is the bound the retry
-// schedule is validated against: a consumer busy with one record for longer
-// than this cannot rejoin its group after a rebalance, so the delivery is
-// reassigned. See docs/adr/0006-kafka-over-sqs-for-delivery.md.
-//
-// Defined in config so k8s/validate checks manifests against the same value.
-const rebalanceTimeout = config.DefaultRebalanceTimeout
+// These two were one constant until 2026-08-31, and collapsing them is what
+// produced a wrong rationale that survived two corrections. They are 30s each
+// by coincidence, not derivation, and they bound unrelated things.
+
+// stallBudget is the longest one record may occupy this consumer. Service
+// policy: head-of-line delay across every partition the member owns, and the
+// pod's 45s termination grace period. Defined in config so k8s/validate checks
+// manifests against the same value.
+const stallBudget = config.DefaultStallBudget
+
+// rebalanceTimeout is the Kafka protocol field of that name -- how long the
+// coordinator waits for members to send JoinGroup during a rebalance. It has
+// nothing to do with how long a handler runs: kafka-go's group management runs
+// on its own goroutines, so a busy consumer still rejoins. Set explicitly to
+// kafka-go's own default rather than left implicit.
+// See docs/adr/0006-kafka-over-sqs-for-delivery.md.
+const rebalanceTimeout = 30 * time.Second
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "relay", "version", version)
@@ -68,14 +78,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("RELAY_DELIVERY_TIMEOUT: %w", err)
 	}
-	if err := schedule.ValidateLiveness(rebalanceTimeout, attemptTimeout); err != nil {
+	if err := schedule.ValidateStallBudget(stallBudget, attemptTimeout); err != nil {
 		return err
 	}
 	log.Info("retry schedule",
 		"schedule", schedule.String(),
 		"attempt_timeout", attemptTimeout,
 		"worst_case_per_record", schedule.WorstCase(attemptTimeout),
-		"rebalance_timeout", rebalanceTimeout)
+		"stall_budget", stallBudget)
 
 	switch mode {
 	case "ingest":

@@ -179,7 +179,7 @@ undecodable record preserved so it can actually be diagnosed.
 **Issue:** [#69](https://github.com/lilabrooks/my-local-platform/issues/69) ·
 **Found:** 2026-08-30 · **Address:** on a change to `RELAY_DELIVERY_TIMEOUT` or
 `RELAY_RETRY_DELAYS` that lets one record's total work approach the 30s stall
-budget (still spelled `config.DefaultRebalanceTimeout` until that rename lands)
+budget (`config.DefaultStallBudget`)
 
 `runDeliver` builds one context from `signal.NotifyContext`
 (`cmd/relay/main.go:174`) and passes it down through `Consumer.Run` and

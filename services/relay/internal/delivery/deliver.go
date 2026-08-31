@@ -36,7 +36,7 @@ type Deliverer struct {
 	client   *http.Client
 	schedule config.RetrySchedule
 	// timeout bounds a single attempt. The schedule and this together are what
-	// ValidateLiveness checks against the consumer group's rebalance timeout.
+	// ValidateStallBudget checks against the stall budget.
 	timeout time.Duration
 	// sleep is time.Sleep in production and instant in tests, so a test of the
 	// retry logic does not actually wait out the schedule.
@@ -44,7 +44,7 @@ type Deliverer struct {
 }
 
 // NewDeliverer builds a Deliverer. The schedule must already have passed
-// ValidateLiveness.
+// ValidateStallBudget.
 func NewDeliverer(schedule config.RetrySchedule, timeout time.Duration) *Deliverer {
 	return &Deliverer{
 		client: &http.Client{
@@ -124,7 +124,9 @@ func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription,
 
 		switch {
 		case reqErr != nil && ctx.Err() != nil:
-			// Shutting down or rebalancing, not a subscriber failure.
+			// Shutting down, not a subscriber failure. (Not rebalancing: see
+			// the note on Deliver above -- nothing cancels this context on a
+			// generation change.)
 			return out, ctx.Err()
 		case reqErr != nil:
 			out.Reason = fmt.Sprintf("attempt %d: %v", attempt, reqErr)

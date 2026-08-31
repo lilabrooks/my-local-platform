@@ -29,11 +29,19 @@ import (
 //
 // Worth being precise about what each half catches, because they are not
 // symmetric. relay's own startup check already caps the worst case below
-// DefaultRebalanceTimeout (30s), so with a grace period at or above that the
-// budget can never outgrow it -- probed directly: "demo" is 25s and starts,
-// "10s,20s" is 36s and does not. The grace assertion therefore guards one
-// direction only, someone lowering the grace period, and the schedule
-// assertion guards the other, a manifest that deploys straight to a crashloop.
+// DefaultStallBudget (30s), so with a grace period above that the budget can
+// never outgrow it -- probed directly: "demo" is 25s and starts, "10s,20s" is
+// 36s and does not. The grace assertion therefore guards one direction only,
+// someone lowering the grace period, and the schedule assertion guards the
+// other, a manifest that deploys straight to a crashloop.
+//
+// That chain has a link nothing used to check. The stall budget is 30s BECAUSE
+// it sits below the grace period -- that is now its stated basis, since it is
+// not a protocol limit (see ADR 0006). Raise the budget past the grace period
+// and the reasoning above inverts silently: relay would happily start on a
+// schedule Kubernetes then SIGKILLs mid-delivery. TestStallBudgetFitsInsideThe
+// GracePeriod below asserts the relationship the budget's justification rests
+// on, rather than leaving it as prose in a record.
 func TestDeliveryConsumerOutlivesItsRetryBudget(t *testing.T) {
 	checked := 0
 
@@ -93,7 +101,7 @@ func TestDeliveryConsumerOutlivesItsRetryBudget(t *testing.T) {
 				// crashloop: relay refuses to start on a schedule it cannot
 				// outlive, and nothing else here would notice until the pod
 				// was already restarting.
-				if err := schedule.ValidateLiveness(config.DefaultRebalanceTimeout, attemptTimeout); err != nil {
+				if err := schedule.ValidateStallBudget(config.DefaultStallBudget, attemptTimeout); err != nil {
 					t.Errorf("%s would not start: %v", name(deploy), err)
 					continue
 				}
@@ -187,5 +195,62 @@ func gracePeriod(podSpec map[string]any) (time.Duration, error) {
 		return time.Duration(v) * time.Second, nil
 	default:
 		return 0, fmt.Errorf("terminationGracePeriodSeconds is %T (%v), want a number", raw, raw)
+	}
+}
+
+// TestStallBudgetFitsInsideTheGracePeriod asserts the relationship the stall
+// budget's own justification rests on.
+//
+// DefaultStallBudget is not a protocol limit. ADR 0006 records what replaced
+// the one it was mistaken for: head-of-line delay across the member, and this
+// grace period. "30s is comfortably below the 45s grace period" is the argument
+// for the number, and until this test it was only prose.
+//
+// Without it the chain breaks quietly. Raising the budget past the grace period
+// leaves relay starting on a schedule Kubernetes then SIGKILLs mid-delivery,
+// and the assertion above -- which only compares grace against a SCHEDULE --
+// would still pass for every schedule that happens to be short.
+func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
+	checked := 0
+
+	for _, dir := range manifestDirs(t) {
+		for _, deploy := range kindsOf(render(t, dir), "Deployment") {
+			spec := nested(deploy, "spec", "template", "spec")
+			if spec == nil {
+				continue
+			}
+			containers, _ := spec["containers"].([]any)
+			isConsumer := false
+			for _, c := range containers {
+				container, _ := c.(map[string]any)
+				if isDeliveryConsumer(container) {
+					isConsumer = true
+					break
+				}
+			}
+			if !isConsumer {
+				continue
+			}
+
+			grace, err := gracePeriod(spec)
+			if err != nil {
+				t.Errorf("%s: %v", name(deploy), err)
+				continue
+			}
+			checked++
+			if config.DefaultStallBudget >= grace {
+				t.Errorf("%s has terminationGracePeriodSeconds=%v but config.DefaultStallBudget is %v.\n"+
+					"The budget's stated basis is that it sits below the grace period, so a record "+
+					"that uses all of it is still drained rather than SIGKILLed. Raise the grace "+
+					"period above %v, or lower the budget.\n"+
+					"See docs/adr/0006-kafka-over-sqs-for-delivery.md.",
+					name(deploy), grace, config.DefaultStallBudget, config.DefaultStallBudget)
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("no RELAY_MODE=deliver container found in any manifest directory; " +
+			"the discovery this test shares with the budget assertion has broken")
 	}
 }
