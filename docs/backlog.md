@@ -178,8 +178,8 @@ undecodable record preserved so it can actually be diagnosed.
 
 **Issue:** [#69](https://github.com/lilabrooks/my-local-platform/issues/69) ·
 **Found:** 2026-08-30 · **Address:** on a change to `RELAY_DELIVERY_TIMEOUT` or
-`RELAY_RETRY_DELAYS` that lets one record's total work approach
-`DefaultRebalanceTimeout`
+`RELAY_RETRY_DELAYS` that lets one record's total work approach the 30s stall
+budget (still spelled `config.DefaultRebalanceTimeout` until that rename lands)
 
 `runDeliver` builds one context from `signal.NotifyContext`
 (`cmd/relay/main.go:174`) and passes it down through `Consumer.Run` and
@@ -217,10 +217,19 @@ rebalance, which needs a longer timeout or a longer retry schedule.
 
 That is a real trigger rather than a hopeful one, and it is the distinction
 [#21](https://github.com/lilabrooks/my-local-platform/issues/21)'s entry above
-had to learn twice: it is a deliberate config change, and
-`config.ValidateLiveness` already rejects schedules whose total passes the
-rebalance timeout. Someone raising either value is the event, and the existing
-guard is where it surfaces.
+had to learn twice: it is a deliberate config change, and relay's startup check
+already rejects schedules whose worst case passes the stall budget. Someone
+raising either value is the event, and the existing guard is where it surfaces.
+
+**Corrected 2026-08-31.** This paragraph used to end "`ValidateLiveness` bounds
+more than the liveness it is named for", and the trigger named
+`DefaultRebalanceTimeout`. Both assumed the cap bounded consumer-group
+liveness. It never did — kafka-go's group management runs independently of how
+long a handler takes, so a consumer asleep in a retry does not miss the rejoin.
+The cap is real but its basis is head-of-line stall and the pod's termination
+grace period, recorded in
+[ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). The trigger survives the
+correction; only its unit changed.
 
 **This bound is a hypothesis, not a measurement.** Two clean runs do not
 establish that ordering cannot break here, and nothing in the repository

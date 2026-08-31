@@ -122,9 +122,45 @@ on the log. The roadmap sets 12 partitions in M0 for this reason.
 ### Head-of-line blocking, and the scale at which it becomes fatal
 
 One event may have several subscribers. The MVP handles all of an event's
-subscribers before committing the offset, so one slow subscriber delays every
-other subscriber on that partition, and cross-tenant isolation holds only to the
-degree tenants hash to different partitions.
+subscribers before committing the offset, so one slow subscriber delays whatever
+is behind it.
+
+**How far behind it reaches is worse than this section originally said, and the
+correction is the important part.** `Consumer.Run` fetches one record, handles
+it to completion, commits, and only then fetches again -- a single serial loop
+per consumer member, with no per-partition concurrency. A member therefore
+processes every partition assigned to it one record at a time.
+
+So the blast radius is the **member**, not the partition. With relay's compose
+topology -- one `relay-deliver` holding all 12 partitions -- a single slow
+subscriber stalls all twelve. Partition-scoped isolation only appears once
+separate members own the partitions, which is what KEDA scaling produces and
+what the M2 demo shows.
+
+Measured on 2026-08-31 against the compose stack, one `relay-deliver` member,
+sink latency 1000ms, `acme`'s always-failing `/hooks/flaky` as the blocker. Each
+figure is time from `POST /v1/events` to the delivery appearing on the sink's
+`/hooks/ok`:
+
+```text
+                                        baseline    behind one acme record
+demo-04, SAME partition as acme (p7)      1.037s                   4.452s
+demo-05, DIFFERENT partition    (p6)      1.054s                   5.439s
+```
+
+**The different-partition tenant was blocked too** — in fact slightly longer,
+being second in the member's fetch order. On one member there is no
+different-partition control to compare against, which is precisely the claim.
+
+Run twice independently: an external review pass measured 1.002/1.000s baseline
+and 3.422/4.412s behind the blocker. The absolute numbers differ with retry
+jitter; the shape — both tenants blocked, neither isolated — is the same.
+
+The committed script, with two members and partition assignment proved at
+runtime, is owed by
+[#73](https://github.com/lilabrooks/my-local-platform/issues/73). These figures
+establish the one-member case that this section's correction rests on; they do
+not replace that demonstration.
 
 This is not a caveat invented here. It is the documented failure mode of this
 design, and the canonical writeup is Segment's
@@ -147,10 +183,18 @@ reordering around a failure means rewriting the data.
 
 **The variable that decides this is not throughput. It is the cardinality of
 isolation domains** -- how many `(tenant, subscriber)` pairs must be able to
-fail independently. Kafka gives exactly as many as there are partitions.
+fail independently. Kafka's ceiling is the partition count; **relay's actual
+number is the count of active consumer members**, which is at most that and, on
+compose, is one.
 
-For `relay` that is 12, against a handful of demo tenants, so the design is
-comfortably inside its envelope. It becomes wrong as concurrently-degraded
+This sentence used to read "Kafka gives exactly as many as there are
+partitions," which is true of Kafka and false of this consumer. The partition
+count is the ceiling a design may reach, not the isolation it has: reaching it
+requires a member per partition. `maxReplicaCount` is 12 for that reason, and
+`k8s/validate` now holds it equal to the partition count.
+
+For `relay` at full scale that is 12, against a handful of demo tenants, so the
+design is comfortably inside its envelope. It becomes wrong as concurrently-degraded
 `(tenant, subscriber)` pairs approach the partition count -- and past that point
 no configuration fixes it, only a different primitive. The intermediate fix, a
 second topic keyed by `(tenant, subscriber)` so each delivery is its own record,
@@ -162,35 +206,57 @@ exist in production at scale -- Toss Payments reportedly runs hundreds of
 millions of webhooks a day on one, with a Redis idempotency cache and dashboard
 replay -- but that is a secondhand report and should be treated as such.
 
-### Retry duration is bounded by consumer group liveness
+### Retry duration is bounded by how long one member may stall
 
-A delivery consumer that sleeps between retries holds its partition assignment
-for the whole wait. So **in-process retry cannot span Svix's published schedule**
--- eight attempts across 27h35m5s -- and the production preset has to be
-rejected rather than merely discouraged.
+A delivery consumer that sleeps between retries holds the record for the whole
+wait -- and, because `Consumer.Run` fetches, handles and commits one record at a
+time, it holds **every partition assigned to that member**. So **in-process
+retry cannot span Svix's published schedule** -- eight attempts across 27h35m5s
+-- and the production preset has to be rejected rather than merely discouraged.
 
-An earlier version of this section named the wrong mechanism. It said Kafka
-evicts a consumer that does not poll within `max.poll.interval.ms`, five minutes
-by default. That is the Java client's design, and this service uses
-`segmentio/kafka-go`, which has no such setting: a background goroutine
-heartbeats every `HeartbeatInterval` (3s) independently of what the application
-is doing, so a sleeping consumer is **never dropped for being slow**. Caught
-while implementing the startup check that this paragraph justifies.
+**This section has now named the wrong mechanism twice, and the second time is
+worth more than the first.**
 
-What actually goes wrong is worse in one way and narrower in another:
+The original said Kafka evicts a consumer that does not poll within
+`max.poll.interval.ms`, five minutes by default. That is the Java client's
+design; `segmentio/kafka-go` has no such setting, because a background goroutine
+heartbeats every `HeartbeatInterval` (3s) regardless of what the application is
+doing. Caught while implementing the startup check this paragraph justifies.
 
-- **Nothing else on that partition moves for the entire wait.** The consumer is
-  alive, heartbeating, and holding the assignment. One subscriber that is down
-  stalls every tenant hashing to the same partition -- head-of-line blocking
-  again, on a scale set by the retry budget rather than by one slow request.
-- **A rebalance during the wait is not survivable.** The coordinator gives
-  members `RebalanceTimeout` (30s by default in kafka-go) to rejoin. A consumer
-  asleep in a retry misses it, its partitions are reassigned, and the delivery
-  is redelivered elsewhere. KEDA scaling makes rebalances routine rather than
-  rare, which is precisely the M2 demo.
+Its replacement said the coordinator gives members `RebalanceTimeout` (30s) to
+rejoin and a consumer asleep in a retry misses it. **That is also wrong**, and it
+survived longer because it sounds like the first correction's lesson applied.
+`RebalanceTimeout` is a JoinGroup protocol field
+(`consumergroup.go:986`) telling the coordinator how long to wait for members to
+rejoin. It is not a record-processing deadline, and nothing couples it to how
+long a handler runs:
 
-So the bound is the rebalance timeout, not a poll interval, and it is 30s rather
-than 5 minutes.
+- kafka-go's group management lives in `Reader.run`, its own loop, independent
+  of the pace at which the application calls `FetchMessage`.
+- The fetch loops start under `gen.Start` (`reader.go:334`) and their send to
+  the message channel selects on the generation context (`reader.go:1553`), so a
+  rebalance unwinds a blocked send however busy the handler is.
+
+A consumer asleep in a retry therefore does **not** miss the rejoin. Corroborated
+by `scripts/verify-ordering-rebalance.sh`, which repeatedly observes the group
+reach two members and split 6/6 while the original member is still mid-POST.
+
+Two things do bound it, and both are real:
+
+- **Head-of-line delay, member-scoped.** One record's retry stalls every
+  partition that member owns, not merely the record's own. See the isolation
+  section above; this is the same defect measured at a scale set by the retry
+  budget rather than by one slow request.
+- **The orchestrator's grace period.** `terminationGracePeriodSeconds` is 45s on
+  `relay-deliver`, and `k8s/validate` asserts it exceeds one record's worst case.
+  If a record could outlive it, every KEDA scale-down would SIGKILL mid-delivery
+  and manufacture duplicates -- and scale-down is half of what M2 demonstrates.
+
+**So the bound is service policy with a checkable relationship, not a broker
+correctness boundary.** It stays at 30s: comfortably below the 45s grace period,
+and a defensible ceiling on how long one member may be stalled by one record.
+Restating the number's basis rather than the number is the whole of this
+correction -- nothing about relay's behaviour changes.
 
 This remains a genuine asymmetry with option B that the driver list above
 missed. SQS visibility timeout extends to 12 hours, so a queue absorbs long
@@ -198,15 +264,15 @@ retries without a second mechanism. On a log, the record must be parked and the
 offset committed. Two ways to do that:
 
 - **Tiered retry topics** -- a 5s topic, a 5m topic, a 30m topic, each with a
-  consumer whose sleep fits inside its own rebalance window. The conventional
+  consumer whose sleep fits inside its own stall budget. The conventional
   Kafka answer.
 - **A due-at row in Postgres with a scheduler**, which is Centrifuge again,
   arrived at from the opposite direction.
 
 Neither is MVP work. What M1 owes is a config surface that cannot lie: a
-schedule whose total reaches the rebalance timeout is **rejected at startup**,
-not discovered through reassignment under load. `demo` totals 15s against a 30s
-default and passes; `standard` does not, and enabling it is what forces the
+schedule whose total reaches the stall budget is **rejected at startup**,
+not discovered through reassignment under load. `demo`'s worst case is 25s against the 30s
+budget and passes; `standard` does not, and enabling it is what forces the
 mechanism above.
 
 **Files that change together.** `local/bootstrap/kafka-topics.sh` (topics),
@@ -311,8 +377,12 @@ would be sampling to a conclusion rather than a result.
 Why the window is hard to hit is a **hypothesis this repository does not
 measure**: `RELAY_DELIVERY_TIMEOUT` caps one attempt while joining a group takes
 seconds, so an old owner's in-flight attempt tends to finish before the new
-owner resumes. If that holds, `config.ValidateLiveness` bounds more than the
-liveness it is named for. Settling it needs instrumentation at the handover.
+owner resumes. Settling it needs instrumentation at the handover.
+
+An earlier version of this paragraph added "if that holds, `ValidateLiveness`
+bounds more than the liveness it is named for". That clause is withdrawn: it
+assumed the retry cap bounded consumer-group liveness, which the section above
+now records that it never did.
 The mechanism behind the question — delivery is not cancelled on a generation
 change — is recorded in [the backlog](../backlog.md) with the condition that
 would make it matter, and in
@@ -352,10 +422,15 @@ Verified by running it against `globex`, which has one healthy subscriber: the
 commit follows delivery too closely to interrupt, no duplicate appears, and the
 check fails. The negative case is what shows the assertion is doing work.
 
-Also measured, and worth knowing before relying on it: compose's
-`restart: unless-stopped` does **not** bring the container back from a SIGKILL —
-it stayed `Exited (137)`. It restarts the exit-1 case it was added for, a fatal
-broker fetch. The script restarts the consumer explicitly, which is also the
+Also measured, and narrower than this record first stated: on Docker Engine
+29.7.2, **`docker kill` is treated as a manual stop and suppresses
+`restart: unless-stopped`** -- the container stayed `Exited (137)` with
+`RestartCount=0`. A SIGKILL the container inflicts on itself is *not* suppressed;
+the same probe restarted it (`RestartCount=3`, running).
+
+This record originally said the policy "does not bring the container back from a
+SIGKILL", which is too broad: what suppresses it is the manual stop, not the
+signal. The script restarts the consumer explicitly regardless, which is also the
 more faithful model, since what revives a crashed consumer here is Kubernetes
 rather than the container runtime.
 
