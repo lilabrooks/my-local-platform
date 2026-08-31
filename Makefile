@@ -130,29 +130,58 @@ relay-verify-ordering: ## Assert one tenant's events are delivered in the order 
 relay-verify-ordering-rebalance: ## Same assertion, with group membership changing mid-run
 	./scripts/verify-ordering-rebalance.sh
 
+# Every Go module, derived rather than restated.
+#
+# This list was hardcoded in four places and wrong in three of them: the CI
+# build matrix (relay and sink "merged with a green tick that built none of
+# their code" -- see ci.yml), AGENTS.md, .github/dependabot.yml, and these
+# targets, where tidy/fmt/vet each covered services/smoke alone. The first
+# three are fixed; a fifth hand-maintained copy is not the way to fix the
+# fourth. scripts/lint.sh has always derived its own list the same way.
+GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
+                -not -path './*/node_modules/*' -exec dirname {} \; \
+                | sed 's|^\./||' | sort)
+
+# Modules whose tests read files the Go test cache does not track, so a cached
+# pass proves nothing. k8s/validate reads the YAML under k8s/manifests and the
+# topic partition counts out of local/bootstrap/kafka-topics.sh.
+UNCACHED_MODULES := k8s/validate
+
 .PHONY: test
-test: ## Run Go tests across all modules
-	cd services/smoke && go test ./...
-	cd services/echo && go test ./...
-	cd services/relay && go test ./...
-	cd services/sink && go test ./...
-	cd k8s/validate && go test -count=1 ./...
+test: ## Run Go tests across every module
+	@for m in $(GO_MODULES); do \
+	  flags=""; \
+	  for u in $(UNCACHED_MODULES); do \
+	    if [ "$$m" = "$$u" ]; then flags="-count=1"; fi; \
+	  done; \
+	  echo "==> $$m: go test $$flags ./..."; \
+	  ( cd "$$m" && go test $$flags ./... ) || exit 1; \
+	done
 
 .PHONY: tidy
-tidy: ## go mod tidy
-	cd services/smoke && go mod tidy
+tidy: ## go mod tidy in every module
+	@for m in $(GO_MODULES); do \
+	  echo "==> $$m: go mod tidy"; \
+	  ( cd "$$m" && go mod tidy ) || exit 1; \
+	done
 
 .PHONY: lint
 lint: ## Run every linter (yaml, shell, markdown, actions, docker, terraform, secrets)
 	./scripts/lint.sh
 
 .PHONY: fmt
-fmt: ## Format Go code
-	cd services/smoke && go fmt ./...
+fmt: ## Format Go code in every module
+	@for m in $(GO_MODULES); do \
+	  echo "==> $$m: go fmt"; \
+	  ( cd "$$m" && go fmt ./... ) || exit 1; \
+	done
 
 .PHONY: vet
-vet: ## go vet
-	cd services/smoke && go vet ./...
+vet: ## go vet every module
+	@for m in $(GO_MODULES); do \
+	  echo "==> $$m: go vet"; \
+	  ( cd "$$m" && go vet ./... ) || exit 1; \
+	done
 
 # ---------------------------------------------------------------------------
 # Kubernetes + GitOps (local, free)

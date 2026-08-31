@@ -48,6 +48,20 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
 
+      # Nothing else checks tidiness -- not scripts/lint.sh, not any other job.
+      # `make tidy` covered services/smoke alone until #65, so four modules
+      # could drift untidy indefinitely with every gate green. The Makefile
+      # target now covers all five; this is the part that notices when someone
+      # forgets to run it.
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::${{ matrix.module }} is not tidy. Run: make tidy"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
       # go vet is a thin net; this adds errcheck, staticcheck, unused and
       # ineffassign. Config lives at the repo root.
       # action v9, not v6: v6 rejects golangci-lint v2 outright. The linter
