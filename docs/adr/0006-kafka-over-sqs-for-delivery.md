@@ -318,12 +318,49 @@ change — is recorded in [the backlog](../backlog.md) with the condition that
 would make it matter, and in
 [#54](https://github.com/lilabrooks/my-local-platform/issues/54).
 
+### Duplicate on crash, run 2026-08-31
+
+**A consumer killed between delivering and committing redelivers the same
+`webhook-id`.** `scripts/verify-duplicate-on-crash.sh` asserts it, and CI runs
+it on every push.
+
+The failure-semantics table above states this as settled — "the subscriber
+receives a duplicate … Accepted; every delivery carries a stable `webhook-id`
+so subscribers can dedupe" — and nothing had executed it. It is also the half
+of the at-least-once contract that cannot be checked by watching relay work,
+because it is a claim about what happens when relay stops working.
+
+```text
+delivered as evt_e5faae93863123716990d04b65df698f
+SIGKILL, restart
+webhook-id evt_e5faae93863123716990d04b65df698f delivered 2 times
+distinct webhook-ids for this run: 1
+```
+
+The stability of the id is asserted separately from the redelivery. A fresh id
+per attempt would still be "at least once" and would be useless: the subscriber
+side of this contract is deduping on `webhook-id`, which is target behaviour 4
+in [goal-relay.md](../goal-relay.md).
+
+**Why `acme` and not a single-subscriber tenant.** The offset commits only once
+every subscriber for a record reaches a terminal state, so acme's second
+subscription — `/hooks/flaky`, which always fails — holds the commit open for
+seconds while `/hooks/ok` has already been delivered. That gap is the window the
+kill has to land in.
+
+Verified by running it against `globex`, which has one healthy subscriber: the
+commit follows delivery too closely to interrupt, no duplicate appears, and the
+check fails. The negative case is what shows the assertion is doing work.
+
+Also measured, and worth knowing before relying on it: compose's
+`restart: unless-stopped` does **not** bring the container back from a SIGKILL —
+it stayed `Exited (137)`. It restarts the exit-1 case it was added for, a fatal
+broker fetch. The script restarts the consumer explicitly, which is also the
+more faithful model, since what revives a crashed consumer here is Kubernetes
+rather than the container runtime.
+
 ### Still planned
 
-- **Duplicate on crash**: kill the consumer between delivery and commit, assert
-  the subscriber sees the same `webhook-id` twice. The rebalance runs above
-  produced one duplicate each, which is this behaviour appearing incidentally
-  rather than the asserted check.
 - **Head-of-line blocking**: degrade one subscriber and measure delivery delay
   for an unrelated tenant on the same partition. This should reproduce Segment's
   first architecture in miniature, and demonstrating it deliberately is more
