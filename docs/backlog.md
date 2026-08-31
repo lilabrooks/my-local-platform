@@ -181,12 +181,12 @@ undecodable record preserved so it can actually be diagnosed.
 `RELAY_RETRY_DELAYS` that lets one record's total work approach the 30s stall
 budget (`config.DefaultStallBudget`)
 
-`runDeliver` builds one context from `signal.NotifyContext`
-(`cmd/relay/main.go:174`) and passes it down through `Consumer.Run` and
-`handle` into `Deliver`. Nothing cancels it when the group changes generation —
-kafka-go does joins and generation changes on background goroutines that never
-touch a caller's context. So an old partition owner can still be mid-POST after
-the partition has moved.
+`Consumer.Run` uses the process signal context to stop fetching. Work already
+fetched runs under the separate deadline created by `processRecord`; its parent
+cancellation is stripped so SIGTERM can drain the record. Nothing cancels that
+context when the group changes generation. kafka-go does joins and generation
+changes on background goroutines that never touch it, so an old partition owner
+can still be mid-POST after the partition has moved.
 
 This entry is the *mechanism*, not the whole of what
 [#54](https://github.com/lilabrooks/my-local-platform/issues/54) covered. That
@@ -206,7 +206,8 @@ says it does not keep.
 with a real handover (12 partitions split 6/6) and a redelivered record, and no
 ordering violation in either. Stopped at two rather than tuning until a positive
 appeared, which would have been sampling to a conclusion. Duplicates are not
-violations — at-least-once is the stated contract and ADR 0006:225 accepts them.
+violations — at-least-once is the stated contract and ADR 0006's
+failure-semantics table accepts them.
 
 **Why the window is hard to hit, and why that is the trigger.** A single attempt
 is capped by `RELAY_DELIVERY_TIMEOUT` while joining a group takes seconds, so
@@ -226,8 +227,8 @@ more than the liveness it is named for", and the trigger named
 `DefaultRebalanceTimeout`. Both assumed the cap bounded consumer-group
 liveness. It never did — kafka-go's group management runs independently of how
 long a handler takes, so a consumer asleep in a retry does not miss the rejoin.
-The cap is real but its basis is head-of-line stall and the pod's termination
-grace period, recorded in
+The cap is real but its basis is member-scoped head-of-line stall and the
+bounded shutdown drain, recorded in
 [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). The trigger survives the
 correction; only its unit changed.
 

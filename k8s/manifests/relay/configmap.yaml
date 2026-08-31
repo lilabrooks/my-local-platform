@@ -20,9 +20,9 @@ data:
   # is the point when someone is watching a demo, and the cost when a smoke
   # check is waiting for it.
   #
-  # Worst case per record is 15s of delays plus 5 attempts at 2s = 25s, which
-  # is what terminationGracePeriodSeconds has to outlive. k8s/validate asserts
-  # that relationship rather than trusting these two numbers to stay in step.
+  # Subscriber attempts need at most 15s of delays plus 5 attempts at 2s = 25s.
+  # That fits inside relay's 30s complete-record deadline, which in turn fits
+  # inside terminationGracePeriodSeconds. k8s/validate checks both relationships.
   RELAY_RETRY_DELAYS: demo
   RELAY_DELIVERY_TIMEOUT: 2s
   RELAY_RETRY_JITTER: "true"

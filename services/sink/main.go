@@ -125,8 +125,8 @@ type sink struct {
 	// passes or fails on how loaded the machine is, which is how a CI gate
 	// becomes a coin flip. A latch converts that into an observable state: the
 	// caller waits until `held` says a request is actually parked, acts, and
-	// releases. See scripts/verify-duplicate-on-crash.sh and
-	// scripts/verify-head-of-line.sh.
+	// releases. See scripts/verify-duplicate-on-crash.sh,
+	// scripts/verify-graceful-drain.sh and scripts/verify-head-of-line.sh.
 	latchMu sync.Mutex
 	latched map[string]chan struct{} // path -> closed on release
 	held    map[string]int           // path -> requests currently parked

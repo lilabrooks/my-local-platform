@@ -241,22 +241,27 @@ A consumer asleep in a retry therefore does **not** miss the rejoin. Corroborate
 by `scripts/verify-ordering-rebalance.sh`, which repeatedly observes the group
 reach two members and split 6/6 while the original member is still mid-POST.
 
-Two things do bound it, and both are real:
+The replacement is service policy, grounded in the configuration this project
+actually runs:
 
 - **Head-of-line delay, member-scoped.** One record's retry stalls every
   partition that member owns, not merely the record's own. See the isolation
   section above; this is the same defect measured at a scale set by the retry
   budget rather than by one slow request.
-- **The orchestrator's grace period.** `terminationGracePeriodSeconds` is 45s on
-  `relay-deliver`, and `k8s/validate` asserts it exceeds one record's worst case.
-  If a record could outlive it, every KEDA scale-down would SIGKILL mid-delivery
-  and manufacture duplicates -- and scale-down is half of what M2 demonstrates.
+- **The deployed schedule.** The Kubernetes `demo` schedule can spend 25s on
+  subscriber attempts: 15s of waits and five attempts at 2s. A 30s complete-
+  record deadline admits that schedule and leaves 5s for subscription lookup,
+  dead-letter production and offset commit.
+- **Bounded shutdown drain.** On SIGTERM the consumer fails readiness and stops
+  fetching, then lets its current record finish under the same 30s deadline.
+  `terminationGracePeriodSeconds` is 45s, leaving 15s after that deadline for
+  process and container shutdown. `k8s/validate` checks both inequalities.
 
-**So the bound is service policy with a checkable relationship, not a broker
-correctness boundary.** It stays at 30s: comfortably below the 45s grace period,
-and a defensible ceiling on how long one member may be stalled by one record.
-Restating the number's basis rather than the number is the whole of this
-correction -- nothing about relay's behaviour changes.
+The 30s value is an explicit policy judgment. No measured delivery SLO exists
+yet. Its checkable basis is narrower: the 25s deployed schedule fits inside it,
+the 45s termination grace period contains it, and the head-of-line experiment
+below shows the cost this cap controls. It is independent of Kafka group
+correctness.
 
 This remains a genuine asymmetry with option B that the driver list above
 missed. SQS visibility timeout extends to 12 hours, so a queue absorbs long
@@ -386,7 +391,35 @@ now records that it never did.
 The mechanism behind the question — delivery is not cancelled on a generation
 change — is recorded in [the backlog](../backlog.md) with the condition that
 would make it matter, and in
-[#54](https://github.com/lilabrooks/my-local-platform/issues/54).
+[#69](https://github.com/lilabrooks/my-local-platform/issues/69).
+
+### Graceful shutdown drain, run 2026-08-31
+
+**SIGTERM stops new fetches and lets the record already in hand finish and
+commit.** `scripts/verify-graceful-drain.sh` asserts the full container path;
+`make relay-verify-graceful-drain`. CI runs it on every push.
+
+The run used one consumer and acme's two subscriptions. `/hooks/ok` recorded
+one healthy delivery while the sink's latch held `/hooks/flaky` inside the same
+record. `docker stop --time 45` then sent SIGTERM. The consumer stayed alive
+until its retry work finished, committed the offset, and exited with code 0
+after 6s.
+
+After restart, the script posted a second acme event. The tenant id is the Kafka
+key, so this probe followed the original on the same partition. The probe was
+delivered and the original healthy-delivery count stayed at one:
+
+```text
+relay-deliver exited cleanly after 6s with one healthy delivery
+post-restart same-tenant probe delivered
+original healthy delivery count: 1 -> 1
+```
+
+That is the behavior the 45s Kubernetes grace period contains. The record gets
+at most `DefaultStallBudget` (30s) for lookup, delivery, dead-lettering, and
+commit. If that deadline expires, the process exits before SIGKILL and leaves
+the offset uncommitted for redelivery. Unit tests cover both the successful
+drain and the deadline-expired path.
 
 ### Duplicate on crash, run 2026-08-31
 
@@ -448,24 +481,26 @@ blocker's member against a control on the other member.
 
 ```text
                                         baseline     blocked
-victim  (globex, p10, same member)        0.080s      6.336s
-control (demo-01, p2, other member)       0.070s      0.066s
+victim  (globex, p10, same member)        0.088s      6.447s
+control (demo-01, p2, other member)       0.089s      0.084s
 ```
 
-A 96x separation. The control is indistinguishable from its own baseline while
+A 77x separation. The control is indistinguishable from its own baseline while
 the victim, **on a different partition from the blocker**, waits.
 
-Every assignment is read from the broker at runtime rather than computed:
-tenant-to-partition by posting a probe and seeing which partition's end offset
-moves, and partition-to-member from `kafka-consumer-groups --verbose`. Both
-depend on the partition count, and this record already says raising that count
-reshuffles the mapping.
+Every assignment is read from the broker at runtime rather than computed.
+Tenant-to-partition discovery snapshots every end offset, posts a probe, then
+finds that exact accepted event id in the records added after the snapshot.
+This remains attributable if another producer moves a different partition at
+the same time. Partition-to-member comes from
+`kafka-consumer-groups --verbose`. Both mappings depend on the partition count,
+and this record already says raising that count reshuffles them.
 
 **The victim is delayed, not stuck**, and the difference matters. relay's
-per-attempt timeout cancels the parked delivery, so the blocker holds its member
-for the record's retry budget and then dead-letters. That bound is the stall
-budget described above -- this is the failure mode it exists to keep survivable,
-which is also why the budget is service policy rather than an arbitrary number.
+per-attempt timeout cancels each parked request, then the compose retry schedule
+advances. The blocker dead-letters after at most 6.6s: three 2s attempts plus
+200ms and 400ms waits. This run measures that configured schedule. The separate
+30s stall budget is its policy ceiling.
 
 The blocker is held open by a **latch** in the sink rather than by a slow
 subscriber and a stopwatch. `POST /control {"latch":"/hooks/flaky"}` parks every

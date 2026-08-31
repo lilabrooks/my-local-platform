@@ -127,6 +127,10 @@ relay-verify-ordering: ## Assert one tenant's events are delivered in the order 
 relay-verify-duplicate-on-crash: ## Kill the consumer mid-record; assert the same webhook-id is redelivered
 	./scripts/verify-duplicate-on-crash.sh
 
+.PHONY: relay-verify-graceful-drain
+relay-verify-graceful-drain: ## SIGTERM mid-record; assert relay drains, commits, and exits cleanly
+	./scripts/verify-graceful-drain.sh
+
 # Not in CI, for the same reason as the rebalance probe: it starts a second
 # consumer and measures wall-clock delay, which is a demonstration rather than a
 # gate. Issue #73 asked for it that way deliberately.

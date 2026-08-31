@@ -185,6 +185,12 @@ jobs:
       - name: Verify per-tenant delivery ordering
         run: ./scripts/verify-ordering.sh
 
+      # relay-deliver has 45s of termination grace because SIGTERM stops fetches
+      # and lets the current record finish under its 30s record deadline. This
+      # makes the relationship behavioral rather than manifest arithmetic.
+      - name: Verify graceful shutdown drains and commits the current record
+        run: ./scripts/verify-graceful-drain.sh
+
       # ADR 0006's failure-semantics table states this as settled -- a consumer
       # dying after delivering but before committing produces a duplicate, not a
       # loss -- and listed it under "Still planned" from the day it was written.

@@ -69,21 +69,25 @@ var presets = map[string][]time.Duration{
 // DefaultStallBudget is the longest one record may occupy a delivery consumer,
 // and therefore the ceiling every retry schedule is checked against.
 //
-// It is service policy, not a protocol limit. Two things set it:
+// It is service policy, not a protocol limit. Three concrete facts set it:
 //
 //   - Head-of-line stall. Consumer.Run handles one record to completion before
 //     fetching the next, so a record in retry stalls every partition that
 //     member owns -- all twelve on the compose topology.
-//   - The pod's termination grace period. relay-deliver allows 45s, and
-//     k8s/validate asserts that exceeds a record's worst case; a record that
-//     outlived it would be SIGKILLed mid-delivery on every scale-down.
+//   - The Kubernetes demo schedule needs at most 25s for subscriber attempts.
+//     A 30s record deadline leaves 5s for lookup, dead-letter and commit work.
+//   - relay-deliver's 45s termination grace period leaves another 15s after the
+//     record deadline for process and container shutdown.
 //
-// 30s sits below the grace period with margin. This constant was previously
-// named DefaultRebalanceTimeout, on the belief that a consumer busy past
-// kafka-go's RebalanceTimeout could not rejoin its group. That was wrong --
-// group management runs independently of handler duration -- and the two
-// numbers being equal was a coincidence rather than a derivation. See
-// docs/adr/0006-kafka-over-sqs-for-delivery.md.
+// Consumer.Run enforces this as the deadline for complete record work and lets
+// a fetched record use it after SIGTERM. k8s/validate checks both sides of the
+// relationship: the configured delivery schedule fits below this deadline, and
+// the deadline fits below the pod's grace period.
+//
+// This constant was previously named DefaultRebalanceTimeout, on the belief
+// that a consumer busy past kafka-go's RebalanceTimeout could not rejoin its
+// group. That was wrong. Group management runs independently of handler
+// duration, and the two numbers being equal was a coincidence. See ADR 0006.
 //
 // It lives here rather than beside the reader so k8s/validate can assert a
 // manifest's schedule is one relay would actually start on, using the same
@@ -199,9 +203,10 @@ func (s RetrySchedule) jittered(d time.Duration, frac float64) time.Duration {
 // not miss a rejoin either. Both of those were named as the mechanism in
 // earlier versions of this comment and both were wrong.
 //
-// What the bound protects is head-of-line delay across the member, and the
-// pod's termination grace period: a record that outlives the grace period is
-// SIGKILLed mid-delivery on every scale-down, manufacturing duplicates.
+// What the bound protects is head-of-line delay across the member. It also caps
+// graceful-shutdown drain: Consumer.Run stops fetching on SIGTERM, then gives
+// its current record this long to finish and commit. The pod's longer grace
+// period is checked separately in k8s/validate.
 //
 // Long schedules need the record parked and the offset committed -- tiered
 // retry topics, or a due-at row with a scheduler -- which is M3 work.
@@ -220,7 +225,7 @@ func (s RetrySchedule) ValidateStallBudget(budget, attemptTimeout time.Duration)
 		return fmt.Errorf(
 			"retry schedule %q needs up to %s per record (%s of delays plus %d attempts at %s), "+
 				"which is not under the %s stall budget: a consumer busy that long blocks every "+
-				"partition it owns, and risks being SIGKILLed mid-delivery on a scale-down. "+
+				"partition it owns and leaves no time for lookup, dead-letter, or commit work. "+
 				"Shorten the schedule, shorten RELAY_DELIVERY_TIMEOUT, or implement long-retry "+
 				"parking (see docs/adr/0006-kafka-over-sqs-for-delivery.md)",
 			s.Name, worst, s.Total(), s.MaxAttempts(), attemptTimeout, budget)

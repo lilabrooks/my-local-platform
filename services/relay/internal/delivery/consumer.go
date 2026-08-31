@@ -54,11 +54,12 @@ type DeadLetter struct {
 // Consumer reads the delivery topic and fans each record out to its tenant's
 // subscribers.
 type Consumer struct {
-	reader    Reader
-	dlq       Producer
-	subs      SubscriptionSource
-	deliverer *Deliverer
-	log       *slog.Logger
+	reader        Reader
+	dlq           Producer
+	subs          SubscriptionSource
+	deliverer     *Deliverer
+	recordTimeout time.Duration
+	log           *slog.Logger
 
 	ready        atomic.Bool
 	handled      atomic.Int64
@@ -66,12 +67,24 @@ type Consumer struct {
 	deadLettered atomic.Int64
 }
 
-// NewConsumer wires the pieces together.
-func NewConsumer(r Reader, dlq Producer, subs SubscriptionSource, d *Deliverer, log *slog.Logger) *Consumer {
+// NewConsumer wires the pieces together. recordTimeout bounds the complete
+// handle-to-commit work for one fetched record, including a graceful-shutdown
+// drain.
+func NewConsumer(
+	r Reader,
+	dlq Producer,
+	subs SubscriptionSource,
+	d *Deliverer,
+	recordTimeout time.Duration,
+	log *slog.Logger,
+) *Consumer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Consumer{reader: r, dlq: dlq, subs: subs, deliverer: d, log: log}
+	return &Consumer{
+		reader: r, dlq: dlq, subs: subs, deliverer: d,
+		recordTimeout: recordTimeout, log: log,
+	}
 }
 
 // MarkReady flips readiness.
@@ -91,8 +104,16 @@ func (c *Consumer) Stats() map[string]int64 {
 
 // Run consumes until the context is cancelled.
 func (c *Consumer) Run(ctx context.Context) error {
+	if c.recordTimeout <= 0 {
+		return fmt.Errorf("record timeout %s must be positive", c.recordTimeout)
+	}
+
 	c.MarkReady(true)
 	defer c.MarkReady(false)
+	// Stop advertising readiness as soon as shutdown begins. A record already in
+	// hand still drains below; new work should go to members that are staying.
+	stopReadiness := context.AfterFunc(ctx, func() { c.MarkReady(false) })
+	defer stopReadiness()
 
 	for {
 		msg, err := c.reader.FetchMessage(ctx)
@@ -104,33 +125,51 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return fmt.Errorf("fetch: %w", err)
 		}
 
-		start := time.Now()
-		if err := c.handle(ctx, msg); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// Shutting down mid-record. Do not commit: the record is
-				// redelivered, which is at-least-once working as designed.
-				c.log.Info("interrupted before commit, record will be redelivered",
-					"partition", msg.Partition, "offset", msg.Offset)
+		if err := c.processRecord(ctx, msg); err != nil {
+			if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				// The record used its complete drain allowance. Leave the offset
+				// uncommitted and exit before the orchestrator reaches SIGKILL.
+				c.log.Warn("shutdown drain expired, record will be redelivered",
+					"partition", msg.Partition, "offset", msg.Offset,
+					"record_timeout", c.recordTimeout)
 				return nil
 			}
-			// Any other failure also leaves the offset uncommitted, so the
-			// record comes back rather than being silently skipped.
-			return fmt.Errorf("handle partition %d offset %d: %w", msg.Partition, msg.Offset, err)
+			// Every failure leaves the offset uncommitted, so the record comes
+			// back rather than being silently skipped.
+			return err
 		}
 
-		if err := c.reader.CommitMessages(ctx, msg); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return fmt.Errorf("commit partition %d offset %d: %w", msg.Partition, msg.Offset, err)
+		if ctx.Err() != nil {
+			c.log.Info("consumer drained current record and is stopping",
+				"partition", msg.Partition, "offset", msg.Offset)
+			return nil
 		}
-		c.handled.Add(1)
-		// Counted after the commit, so the metric means "finished with", the
-		// same thing the committed offset means. Counting at fetch time would
-		// include records the consumer was interrupted part-way through.
-		metrics.RecordsConsumed.WithLabelValues(strconv.Itoa(msg.Partition)).Inc()
-		metrics.RecordDuration.Observe(time.Since(start).Seconds())
 	}
+}
+
+// processRecord gives work already fetched its own deadline. The parent
+// context stops the next FetchMessage and marks readiness false, while
+// context.WithoutCancel lets this record finish after SIGTERM. The timeout keeps
+// that drain inside the pod's termination grace period.
+func (c *Consumer) processRecord(parent context.Context, msg kafka.Message) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.recordTimeout)
+	defer cancel()
+
+	start := time.Now()
+	if err := c.handle(ctx, msg); err != nil {
+		return fmt.Errorf("handle partition %d offset %d: %w", msg.Partition, msg.Offset, err)
+	}
+
+	if err := c.reader.CommitMessages(ctx, msg); err != nil {
+		return fmt.Errorf("commit partition %d offset %d: %w", msg.Partition, msg.Offset, err)
+	}
+	c.handled.Add(1)
+	// Counted after the commit, so the metric means "finished with", the same
+	// thing the committed offset means. Counting at fetch time would include
+	// records the consumer was interrupted part-way through.
+	metrics.RecordsConsumed.WithLabelValues(strconv.Itoa(msg.Partition)).Inc()
+	metrics.RecordDuration.Observe(time.Since(start).Seconds())
+	return nil
 }
 
 // handle processes one record. Returning nil means the offset may be committed.
