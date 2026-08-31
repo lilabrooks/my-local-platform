@@ -44,8 +44,8 @@ type RetrySchedule struct {
 // `demo` reaches the dead-letter queue in 15 seconds, because a demo nobody
 // watches for a day is not a demo.
 //
-// Note that `standard` will not pass ValidateLiveness against any sane
-// rebalance timeout. That is intended: enabling it is what forces the
+// Note that `standard` will not pass ValidateStallBudget against any sane
+// stall budget. That is intended: enabling it is what forces the
 // long-retry parking mechanism, which is M3 work. See
 // docs/adr/0006-kafka-over-sqs-for-delivery.md.
 var presets = map[string][]time.Duration{
@@ -66,11 +66,29 @@ var presets = map[string][]time.Duration{
 	},
 }
 
-// DefaultRebalanceTimeout is what the delivery consumer gives its group, and
-// therefore the ceiling every retry schedule is checked against. It lives here
-// rather than beside the reader so k8s/validate can assert a manifest's
-// schedule is one relay would actually start on, using the same number.
-const DefaultRebalanceTimeout = 30 * time.Second
+// DefaultStallBudget is the longest one record may occupy a delivery consumer,
+// and therefore the ceiling every retry schedule is checked against.
+//
+// It is service policy, not a protocol limit. Two things set it:
+//
+//   - Head-of-line stall. Consumer.Run handles one record to completion before
+//     fetching the next, so a record in retry stalls every partition that
+//     member owns -- all twelve on the compose topology.
+//   - The pod's termination grace period. relay-deliver allows 45s, and
+//     k8s/validate asserts that exceeds a record's worst case; a record that
+//     outlived it would be SIGKILLed mid-delivery on every scale-down.
+//
+// 30s sits below the grace period with margin. This constant was previously
+// named DefaultRebalanceTimeout, on the belief that a consumer busy past
+// kafka-go's RebalanceTimeout could not rejoin its group. That was wrong --
+// group management runs independently of handler duration -- and the two
+// numbers being equal was a coincidence rather than a derivation. See
+// docs/adr/0006-kafka-over-sqs-for-delivery.md.
+//
+// It lives here rather than beside the reader so k8s/validate can assert a
+// manifest's schedule is one relay would actually start on, using the same
+// number.
+const DefaultStallBudget = 30 * time.Second
 
 // ErrEmptySchedule is returned for a schedule with no delays in it. A zero
 // retry budget is more likely a typo than a decision; spell it "0s" to mean
@@ -167,27 +185,27 @@ func (s RetrySchedule) jittered(d time.Duration, frac float64) time.Duration {
 	return half + time.Duration(frac*float64(half))
 }
 
-// ValidateLiveness rejects a schedule that outlives the consumer's place in its
-// group.
+// ValidateStallBudget rejects a schedule that can occupy a consumer for longer
+// than the budget allows.
 //
-// relay retries in process, holding the record's partition while it waits. In
-// segmentio/kafka-go a background goroutine keeps heartbeating throughout, so a
-// sleeping consumer is never dropped for being slow -- there is no
-// max.poll.interval.ms here, unlike the Java client. Two things go wrong
-// instead:
+// relay retries in process, holding the record the whole time. Because
+// Consumer.Run handles one record to completion before fetching another, that
+// stalls every partition the member owns -- not merely the record's own.
 //
-//   - Nothing else on that partition moves for the whole wait. One subscriber
-//     that is down stalls every tenant hashing to the same partition.
-//   - A rebalance during the wait is not survivable. The coordinator gives
-//     members RebalanceTimeout to rejoin, and a consumer asleep in a retry
-//     misses it, so its partitions are reassigned and the record is redelivered
-//     elsewhere. KEDA scaling makes rebalances routine rather than rare, which
-//     is exactly the M2 demo.
+// Nothing in Kafka forces this bound. A background goroutine heartbeats
+// throughout, so a sleeping consumer is never dropped for being slow (there is
+// no max.poll.interval.ms here, unlike the Java client), and kafka-go's group
+// management runs independently of handler duration, so a busy consumer does
+// not miss a rejoin either. Both of those were named as the mechanism in
+// earlier versions of this comment and both were wrong.
 //
-// So the bound is the rebalance timeout, not a poll interval. Long schedules
-// need the record parked and the offset committed -- tiered retry topics, or a
-// due-at row with a scheduler -- which is M3 work.
-func (s RetrySchedule) ValidateLiveness(rebalanceTimeout, attemptTimeout time.Duration) error {
+// What the bound protects is head-of-line delay across the member, and the
+// pod's termination grace period: a record that outlives the grace period is
+// SIGKILLed mid-delivery on every scale-down, manufacturing duplicates.
+//
+// Long schedules need the record parked and the offset committed -- tiered
+// retry topics, or a due-at row with a scheduler -- which is M3 work.
+func (s RetrySchedule) ValidateStallBudget(budget, attemptTimeout time.Duration) error {
 	if len(s.Delays) == 0 {
 		return ErrEmptySchedule
 	}
@@ -198,19 +216,19 @@ func (s RetrySchedule) ValidateLiveness(rebalanceTimeout, attemptTimeout time.Du
 	// waited in full. Summing only the delays understates it by the time the
 	// attempts themselves take, which for a short schedule is most of it.
 	worst := s.WorstCase(attemptTimeout)
-	if worst >= rebalanceTimeout {
+	if worst >= budget {
 		return fmt.Errorf(
 			"retry schedule %q needs up to %s per record (%s of delays plus %d attempts at %s), "+
-				"which is not under the %s rebalance timeout: a consumer busy that long cannot "+
-				"rejoin its group, so the delivery is reassigned and redelivered. Shorten the "+
-				"schedule, shorten RELAY_DELIVERY_TIMEOUT, or implement long-retry parking "+
-				"(see docs/adr/0006-kafka-over-sqs-for-delivery.md)",
-			s.Name, worst, s.Total(), s.MaxAttempts(), attemptTimeout, rebalanceTimeout)
+				"which is not under the %s stall budget: a consumer busy that long blocks every "+
+				"partition it owns, and risks being SIGKILLed mid-delivery on a scale-down. "+
+				"Shorten the schedule, shorten RELAY_DELIVERY_TIMEOUT, or implement long-retry "+
+				"parking (see docs/adr/0006-kafka-over-sqs-for-delivery.md)",
+			s.Name, worst, s.Total(), s.MaxAttempts(), attemptTimeout, budget)
 	}
 	return nil
 }
 
-// WorstCase is the longest one record can occupy its partition: every delay
+// WorstCase is the longest one record can occupy its consumer: every delay
 // waited in full, and every attempt running to its timeout.
 func (s RetrySchedule) WorstCase(attemptTimeout time.Duration) time.Duration {
 	return s.Total() + time.Duration(s.MaxAttempts())*attemptTimeout

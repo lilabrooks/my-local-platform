@@ -136,7 +136,7 @@ func TestUnknownPresetNamesTheAlternatives(t *testing.T) {
 	}
 }
 
-func TestValidateLiveness(t *testing.T) {
+func TestValidateStallBudget(t *testing.T) {
 	t.Parallel()
 
 	demo, err := ParseRetrySchedule("demo", false)
@@ -145,12 +145,12 @@ func TestValidateLiveness(t *testing.T) {
 	}
 	// demo is 15s of delays plus 5 attempts. At a 2s attempt timeout that is
 	// 25s, which fits inside kafka-go's 30s default rebalance timeout.
-	if err := demo.ValidateLiveness(30*time.Second, 2*time.Second); err != nil {
+	if err := demo.ValidateStallBudget(30*time.Second, 2*time.Second); err != nil {
 		t.Errorf("demo preset rejected against a 30s rebalance timeout: %v", err)
 	}
 	// The same schedule with a longer per-attempt timeout does not fit, which
 	// is the case summing only the delays used to miss.
-	if err := demo.ValidateLiveness(30*time.Second, 5*time.Second); err == nil {
+	if err := demo.ValidateStallBudget(30*time.Second, 5*time.Second); err == nil {
 		t.Error("demo at a 5s attempt timeout (40s worst case) was accepted against a 30s rebalance timeout")
 	}
 
@@ -159,19 +159,19 @@ func TestValidateLiveness(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	// The whole point: the production schedule cannot run in process, and that
-	// has to surface at startup rather than as a mid-retry reassignment.
-	err = std.ValidateLiveness(30*time.Second, 2*time.Second)
+	// has to surface at startup rather than as a stalled member under load.
+	err = std.ValidateStallBudget(30*time.Second, 2*time.Second)
 	if err == nil {
-		t.Fatal("standard preset accepted against a 30s rebalance timeout, want rejection")
+		t.Fatal("standard preset accepted against a 30s stall budget, want rejection")
 	}
-	if !strings.Contains(err.Error(), "rebalance timeout") {
-		t.Errorf("rejection %q should explain the rebalance timeout", err)
+	if !strings.Contains(err.Error(), "stall budget") {
+		t.Errorf("rejection %q should explain the stall budget", err)
 	}
 }
 
-// Equal to the timeout is already too long: a consumer that wakes exactly as
-// the coordinator gives up has still missed it.
-func TestValidateLivenessBoundaryIsExclusive(t *testing.T) {
+// Equal to the budget is already too long: a record that consumes the entire
+// budget has left nothing for anything else on that member.
+func TestValidateStallBudgetBoundaryIsExclusive(t *testing.T) {
 	t.Parallel()
 
 	s, err := ParseRetrySchedule("10s,10s,10s", false)
@@ -179,11 +179,11 @@ func TestValidateLivenessBoundaryIsExclusive(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	// 30s of delays plus 4 attempts at 1s = 34s worst case.
-	if err := s.ValidateLiveness(34*time.Second, time.Second); err == nil {
-		t.Error("a 34s worst case was accepted against a 34s rebalance timeout, want rejection")
+	if err := s.ValidateStallBudget(34*time.Second, time.Second); err == nil {
+		t.Error("a 34s worst case was accepted against a 34s stall budget, want rejection")
 	}
-	if err := s.ValidateLiveness(35*time.Second, time.Second); err != nil {
-		t.Errorf("a 34s worst case was rejected against a 35s rebalance timeout: %v", err)
+	if err := s.ValidateStallBudget(35*time.Second, time.Second); err != nil {
+		t.Errorf("a 34s worst case was rejected against a 35s stall budget: %v", err)
 	}
 }
 
@@ -200,7 +200,7 @@ func TestWorstCaseCountsAttempts(t *testing.T) {
 	}
 }
 
-func TestValidateLivenessRejectsNonPositiveAttemptTimeout(t *testing.T) {
+func TestValidateStallBudgetRejectsNonPositiveAttemptTimeout(t *testing.T) {
 	t.Parallel()
 
 	s, err := ParseRetrySchedule("demo", false)
@@ -208,7 +208,7 @@ func TestValidateLivenessRejectsNonPositiveAttemptTimeout(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	for _, bad := range []time.Duration{0, -time.Second} {
-		if err := s.ValidateLiveness(time.Minute, bad); err == nil {
+		if err := s.ValidateStallBudget(time.Minute, bad); err == nil {
 			t.Errorf("attempt timeout %s accepted, want rejection", bad)
 		}
 	}
@@ -263,7 +263,7 @@ func TestEmptyScheduleIsSentinel(t *testing.T) {
 	if _, err := ParseRetrySchedule("", false); !errors.Is(err, ErrEmptySchedule) {
 		t.Errorf("empty spec error = %v, want ErrEmptySchedule", err)
 	}
-	if err := (RetrySchedule{}).ValidateLiveness(time.Minute, time.Second); !errors.Is(err, ErrEmptySchedule) {
+	if err := (RetrySchedule{}).ValidateStallBudget(time.Minute, time.Second); !errors.Is(err, ErrEmptySchedule) {
 		t.Errorf("zero schedule error = %v, want ErrEmptySchedule", err)
 	}
 }
