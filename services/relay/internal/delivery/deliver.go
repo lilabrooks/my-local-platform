@@ -85,19 +85,20 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // exhausting the budget is a normal, expected result that gets dead-lettered,
 // not an operational fault.
 //
-// It only returns an error when the context is cancelled, which means the
-// consumer is SHUTTING DOWN and the offset must not be committed.
+// It only returns an error when the record context ends. That can mean its
+// complete-record deadline expired during normal work, or its bounded shutdown
+// drain ran out. In either case the offset must not be committed.
 //
 // Not a rebalance. This comment used to claim both, and the rebalance half was
-// false: the context here descends from signal.NotifyContext in runDeliver and
-// nothing links it to consumer-group membership, because kafka-go performs
-// joins, heartbeats and generation changes on background goroutines that never
-// touch a caller's context. An old partition owner therefore keeps delivering
+// false: Consumer.processRecord creates this context with its own deadline, and
+// nothing links it to consumer-group membership. kafka-go performs joins,
+// heartbeats and generation changes on background goroutines that never touch
+// a caller's context. An old partition owner can therefore keep delivering
 // after the partition has moved.
 //
 // The commit-only-when-finished invariant does not depend on that cancellation,
 // so it still holds -- but it was documented as if it did, which is why the
-// claim is corrected here rather than quietly dropped. See issue #54 and the
+// claim is corrected here rather than quietly dropped. See issue #69 and the
 // backlog entry for what is being lived with and what would change it.
 func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription, rec event.Record) (Outcome, error) {
 	body, err := json.Marshal(rec.Payload())
@@ -124,9 +125,9 @@ func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription,
 
 		switch {
 		case reqErr != nil && ctx.Err() != nil:
-			// Shutting down, not a subscriber failure. (Not rebalancing: see
-			// the note on Deliver above -- nothing cancels this context on a
-			// generation change.)
+			// The complete-record deadline expired, or shutdown exhausted its
+			// drain allowance. This is not a subscriber failure. (It is not a
+			// rebalance either: see the note on Deliver above.)
 			return out, ctx.Err()
 		case reqErr != nil:
 			out.Reason = fmt.Sprintf("attempt %d: %v", attempt, reqErr)

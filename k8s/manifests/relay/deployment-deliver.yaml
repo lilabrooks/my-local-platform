@@ -74,10 +74,8 @@ spec:
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
-      # Must outlive the worst case for one record: RELAY_RETRY_DELAYS=demo is
-      # 15s of delays plus 5 attempts at RELAY_DELIVERY_TIMEOUT=2s, so 25s.
-      # SIGKILL before that leaves the offset uncommitted and the record is
-      # redelivered -- correct, but it means every KEDA scale-down manufactures
-      # duplicates, and scale-down is half the demo. k8s/validate asserts this
-      # against the ConfigMap rather than trusting the two to stay in step.
+      # On SIGTERM relay stops fetching and drains its current record for at most
+      # DefaultStallBudget (30s). This 45s grace leaves 15s for process and
+      # container shutdown after that deadline. k8s/validate also checks that
+      # the ConfigMap's 25s delivery schedule fits inside the record deadline.
       terminationGracePeriodSeconds: 45

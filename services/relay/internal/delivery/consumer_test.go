@@ -113,7 +113,7 @@ func newConsumer(t *testing.T, r Reader, dlq Producer, subs SubscriptionSource) 
 	}
 	d := NewDeliverer(s, 2*time.Second)
 	d.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
-	return NewConsumer(r, dlq, subs, d, slog.New(slog.DiscardHandler))
+	return NewConsumer(r, dlq, subs, d, 30*time.Second, slog.New(slog.DiscardHandler))
 }
 
 func alwaysOK(t *testing.T) *httptest.Server {
@@ -283,41 +283,136 @@ func TestNonContextDeliveryErrorBlocksTheCommit(t *testing.T) {
 	}
 }
 
-// The other branch of the same change, and the one that must NOT become an
-// error the consumer reports. Cancellation mid-record is a shutdown: the
-// offset stays uncommitted so the record is redelivered, and Run exits nil
-// rather than treating a SIGTERM as a fault.
-//
-// Worth its own test because handle now returns joined delivery errors rather
-// than a rebuilt context.Cause, and errors.Is has to keep reaching the
-// context.Canceled inside that join or every shutdown starts logging as a
-// crash.
-func TestCancellationDuringDeliveryIsAShutdownNotAFault(t *testing.T) {
+// SIGTERM stops fetching and drops readiness, then lets the record already in
+// hand finish and commit. This is what gives terminationGracePeriodSeconds a
+// real job instead of leaving it as unused manifest arithmetic.
+func TestCancellationDuringDeliveryDrainsAndCommits(t *testing.T) {
 	t.Parallel()
 
-	bad := alwaysFails(t) // fails, so delivery reaches the retry sleep
-	defer bad.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ok.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: ok.URL, Secret: "s"}}})
+
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	<-started
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for c.Ready() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if c.Ready() {
+		t.Fatal("consumer stayed ready after shutdown began")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned before the in-flight record was released: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Run after drain: %v", err)
+	}
+	if got := r.commits(); got != 1 {
+		t.Errorf("committed %d times after draining, want 1", got)
+	}
+	if got := len(dlq.letters(t)); got != 0 {
+		t.Errorf("wrote %d dead letters for a successful drain, want 0", got)
+	}
+}
+
+func TestRecordTimeoutBoundsWorkAndLeavesOffsetUncommitted(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		blocked.Close()
+	})
 
 	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
 	dlq := &fakeDLQ{}
-	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: bad.URL, Secret: "s"}}})
-	c.deliverer.sleep = func(ctx context.Context, _ time.Duration) error {
-		cancel() // SIGTERM arrives while the record is in flight
-		return ctx.Err()
-	}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: blocked.URL, Secret: "s"}}})
+	c.recordTimeout = 50 * time.Millisecond
 
-	if err := c.Run(ctx); err != nil {
-		t.Errorf("Run returned %v on cancellation, want nil -- a shutdown is not a fault", err)
+	done := make(chan error, 1)
+	go func() { done <- c.Run(context.Background()) }()
+	<-started
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after the record deadline")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run returned %v, want record deadline exceeded", err)
 	}
 	if got := r.commits(); got != 0 {
-		t.Errorf("committed %d times after being cancelled mid-record, want 0 -- "+
-			"the record must come back rather than be marked done", got)
+		t.Errorf("committed %d times after the record deadline, want 0", got)
 	}
-	if got := len(dlq.letters(t)); got != 0 {
-		t.Errorf("wrote %d dead letters for a shutdown, want 0 -- the event is not at fault", got)
+}
+
+func TestCancellationDrainTimeoutStopsCleanlyWithoutCommit(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		blocked.Close()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: blocked.URL, Secret: "s"}}})
+	c.recordTimeout = 50 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	<-started
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v when the shutdown drain expired, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after the shutdown drain deadline")
+	}
+	if c.Ready() {
+		t.Fatal("consumer stayed ready after shutdown drain expired")
+	}
+	if got := r.commits(); got != 0 {
+		t.Errorf("committed %d times after the shutdown drain expired, want 0", got)
 	}
 }
 

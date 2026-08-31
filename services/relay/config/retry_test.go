@@ -144,14 +144,14 @@ func TestValidateStallBudget(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	// demo is 15s of delays plus 5 attempts. At a 2s attempt timeout that is
-	// 25s, which fits inside kafka-go's 30s default rebalance timeout.
+	// 25s, which fits inside the service's 30s stall budget.
 	if err := demo.ValidateStallBudget(30*time.Second, 2*time.Second); err != nil {
-		t.Errorf("demo preset rejected against a 30s rebalance timeout: %v", err)
+		t.Errorf("demo preset rejected against a 30s stall budget: %v", err)
 	}
 	// The same schedule with a longer per-attempt timeout does not fit, which
 	// is the case summing only the delays used to miss.
 	if err := demo.ValidateStallBudget(30*time.Second, 5*time.Second); err == nil {
-		t.Error("demo at a 5s attempt timeout (40s worst case) was accepted against a 30s rebalance timeout")
+		t.Error("demo at a 5s attempt timeout (40s worst case) was accepted against a 30s stall budget")
 	}
 
 	std, err := ParseRetrySchedule("standard", false)

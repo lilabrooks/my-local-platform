@@ -8,41 +8,30 @@ import (
 	"github.com/lilabrooks/my-local-platform/relay/config"
 )
 
-// A delivery consumer holds one record for as long as its retry schedule says
-// it might: every delay waited in full, and every attempt running to its
-// timeout. If Kubernetes SIGKILLs the pod before that, the offset is
-// uncommitted and the record is redelivered.
+// On SIGTERM a delivery consumer stops fetching, fails readiness, and drains the
+// record already in hand. Consumer.Run caps that complete work at
+// DefaultStallBudget. If Kubernetes SIGKILLs the pod before the cap expires, the
+// offset is uncommitted and the record is redelivered.
 //
 // Redelivery is correct -- at-least-once is the stated contract -- but it means
 // every scale-down manufactures duplicate deliveries, and scale-down is half of
 // what M2 demonstrates. KEDA removing a pod mid-delivery should be a drain, not
 // a dropped record.
 //
-// The two settings that have to agree live in different files and look
-// unrelated. RELAY_RETRY_DELAYS and RELAY_DELIVERY_TIMEOUT are in a ConfigMap;
-// terminationGracePeriodSeconds is in a Deployment. Nothing about either
-// mentions the other, so this is the only thing keeping them in step.
+// The settings that have to agree live in different files and look unrelated.
+// RELAY_RETRY_DELAYS and RELAY_DELIVERY_TIMEOUT are in a ConfigMap; the record
+// deadline is in relay's config package; terminationGracePeriodSeconds is in a
+// Deployment. These assertions keep the chain in step.
 //
 // The worst case is computed with relay's own config package rather than a copy
 // of the preset table, so changing what "demo" means cannot leave this
 // assertion passing against numbers nothing uses.
 //
-// Worth being precise about what each half catches, because they are not
-// symmetric. relay's own startup check already caps the worst case below
-// DefaultStallBudget (30s), so with a grace period above that the budget can
-// never outgrow it -- probed directly: "demo" is 25s and starts, "10s,20s" is
-// 36s and does not. The grace assertion therefore guards one direction only,
-// someone lowering the grace period, and the schedule assertion guards the
-// other, a manifest that deploys straight to a crashloop.
-//
-// That chain has a link nothing used to check. The stall budget is 30s BECAUSE
-// it sits below the grace period -- that is now its stated basis, since it is
-// not a protocol limit (see ADR 0006). Raise the budget past the grace period
-// and the reasoning above inverts silently: relay would happily start on a
-// schedule Kubernetes then SIGKILLs mid-delivery. TestStallBudgetFitsInsideThe
-// GracePeriod below asserts the relationship the budget's justification rests
-// on, rather than leaving it as prose in a record.
-func TestDeliveryConsumerOutlivesItsRetryBudget(t *testing.T) {
+// The schedule assertion prevents a manifest from deploying straight to a
+// crashloop. The grace assertion catches a shorter grace period. The second test
+// below catches a record deadline raised past that grace period. Together they
+// prove schedule worst case < record deadline < termination grace period.
+func TestDeliveryScheduleFitsInsideRecordDeadlineAndGracePeriod(t *testing.T) {
 	checked := 0
 
 	for _, dir := range manifestDirs(t) {
@@ -198,18 +187,13 @@ func gracePeriod(podSpec map[string]any) (time.Duration, error) {
 	}
 }
 
-// TestStallBudgetFitsInsideTheGracePeriod asserts the relationship the stall
-// budget's own justification rests on.
+// TestStallBudgetFitsInsideTheGracePeriod asserts that the bounded drain relay
+// performs after SIGTERM ends before Kubernetes may send SIGKILL.
 //
-// DefaultStallBudget is not a protocol limit. ADR 0006 records what replaced
-// the one it was mistaken for: head-of-line delay across the member, and this
-// grace period. "30s is comfortably below the 45s grace period" is the argument
-// for the number, and until this test it was only prose.
-//
-// Without it the chain breaks quietly. Raising the budget past the grace period
-// leaves relay starting on a schedule Kubernetes then SIGKILLs mid-delivery,
-// and the assertion above -- which only compares grace against a SCHEDULE --
-// would still pass for every schedule that happens to be short.
+// DefaultStallBudget is service policy. Consumer.Run enforces it as the complete
+// record deadline during normal work and shutdown drain. Raising that deadline
+// past the grace period would leave relay waiting when Kubernetes sends
+// SIGKILL, while the schedule-only assertion above could still pass.
 func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 	checked := 0
 

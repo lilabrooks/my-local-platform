@@ -8,19 +8,19 @@
 #
 # The hypothesis being tested, from #54:
 #
-#   relay passes ONE context, from signal.NotifyContext, all the way down to
-#   Deliver (cmd/relay/main.go:174). Nothing cancels it when the consumer
-#   group changes generation, because kafka-go handles joins and generation
-#   changes on background goroutines that never touch a caller's context. So
-#   an old partition owner can still be mid-POST when the partition has
-#   already moved. The new owner resumes from the last committed offset and
-#   moves on; the old owner's in-flight delivery lands afterwards.
+#   Consumer.Run uses the signal context to stop fetching. Work already fetched
+#   runs under a separate complete-record deadline created by processRecord.
+#   Nothing cancels that context when the consumer group changes generation,
+#   because kafka-go handles joins and generation changes on background
+#   goroutines that never touch it. An old partition owner can therefore still
+#   be mid-POST after the partition moves. The new owner resumes from the last
+#   committed offset and moves on; the old owner's delivery can land later.
 #
 # Expected shape of a violation at the sink: ... 11, 12, 11 ...
 #
 # What is NOT a violation: a repeated value in place, such as 11, 11, 12. The
 # contract is at-least-once (docs/goal-relay.md target behaviour 4), duplicates
-# carry a stable webhook-id for deduping, and ADR 0006:225 accepts them
+# carry a stable webhook-id for deduping, and ADR 0006's failure-semantics table accepts them
 # explicitly. Only a DECREASE breaks ordering, so consecutive duplicates are
 # collapsed before the assertion.
 #
@@ -112,9 +112,13 @@ say "checking relay and the sink are up"
 curl -sf "$INGEST/readyz" >/dev/null || fail "relay ingest is not reachable at $INGEST -- run 'make up-apps'"
 curl -sf "$SINK/healthz"  >/dev/null || fail "the sink is not reachable at $SINK -- run 'make up-apps'"
 
-say "checking the group has exactly one member to start from"
-before=$(members | wc -l | tr -d ' ')
-[ "$before" = "1" ] || fail "expected 1 group member to start from, found $before -- remove any extra relay-deliver containers first"
+say "waiting for the group to settle at exactly one member"
+for _ in $(seq 1 45); do
+  before=$(members | wc -l | tr -d ' ')
+  [ "$before" = "1" ] && break
+  sleep 1
+done
+[ "${before:-0}" = "1" ] || fail "expected 1 group member to start from, found ${before:-0} after 45s -- remove any extra relay-deliver containers first"
 note "$(members | awk '{print $NF" partitions held by "$1}')"
 
 # A latency at or above RELAY_DELIVERY_TIMEOUT makes every attempt time out and
@@ -228,7 +232,7 @@ if printf '%s' "$result" | grep -q VIOLATIONS; then
   cat <<EOF
 
   Ordering did NOT survive the rebalance. This is the failure predicted in
-  issue #54: an old partition owner completed a delivery after the new owner
+  issue #69: an old partition owner completed a delivery after the new owner
   had already moved past it.
 
   Record this in ADR 0006's consequences and the backlog -- NOT by editing
@@ -239,25 +243,24 @@ EOF
 fi
 
 pass "ordering survived the rebalance: no delivered sequence went backwards"
-note "Duplicates are expected and are not a violation; see ADR 0006:225."
+note "Duplicates are expected and are not a violation; see ADR 0006's failure-semantics table."
 
 cat <<EOF
 
-  What a pass here does NOT establish. The mechanism in #54 is real -- nothing
-  cancels the delivery context when the group changes generation -- so this
+  What a pass here does NOT establish. The mechanism in #69 is real -- nothing
+  cancels the record context when the group changes generation -- so this
   says the window is hard to hit with this configuration, not that it is
   closed.
 
   One reason it is hard, which is a hypothesis this script does not measure:
   RELAY_DELIVERY_TIMEOUT (${timeout_spec}) caps a single attempt, while joining a
   group takes seconds. The old owner's in-flight attempt therefore tends to
-  finish BEFORE the new owner resumes, and a late arrival that lands before
-  the next record is not a reordering. The case that would still bite is an
-  old owner asleep in retry backoff across the whole rebalance, which
-  RELAY_RETRY_DELAYS bounds -- and which config.ValidateLiveness already
-  rejects when the total grows past the rebalance timeout.
+	finish BEFORE the new owner resumes, and a late arrival that lands before
+	the next record is not a reordering. The case that would still bite is an
+	old owner whose record work spans the whole rebalance. RELAY_RETRY_DELAYS
+	and the per-record stall deadline limit that exposure; neither cancels work
+	on a generation change.
 
-  If that hypothesis holds, ValidateLiveness bounds more than the liveness it
-  is named for. Confirming it needs instrumentation at the handover, not more
-  runs of this script.
+	Confirming the timing hypothesis needs instrumentation at the handover, not
+	more runs of this script.
 EOF

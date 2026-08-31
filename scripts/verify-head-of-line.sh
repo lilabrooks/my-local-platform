@@ -80,29 +80,59 @@ owner() {
 }
 
 post() {
-  local tenant="$1" tag="$2" code
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$INGEST/v1/events" \
-    -H 'content-type: application/json' \
-    -d "{\"tenant_id\":\"$tenant\",\"type\":\"hol.check\",\"data\":{\"marker\":\"$MARKER-$tag\"}}")
-  [ "$code" = "202" ] || fail "ingest returned $code for $tenant, expected 202"
+	local tenant="$1" tag="$2" response code body
+	response=$(curl -sS -w $'\n%{http_code}' -X POST "$INGEST/v1/events" \
+	  -H 'content-type: application/json' \
+	  -d "{\"tenant_id\":\"$tenant\",\"type\":\"hol.check\",\"data\":{\"marker\":\"$MARKER-$tag\"}}")
+	code=${response##*$'\n'}
+	body=${response%$'\n'*}
+	[ "$code" = "202" ] || fail "ingest returned $code for $tenant, expected 202"
+	printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
 }
 
-# partition_of <tenant> -- posts one probe and reports which partition's end
-# offset moved. Read at runtime rather than computed: the mapping depends on the
-# partition count and on the producer's balancer, and restating either here
-# would be a second copy that can disagree with the first.
+# partition_contains_event <partition> <offset> <count> <event-id>
+partition_contains_event() {
+	local partition="$1" offset="$2" count="$3" event_id="$4"
+	[ "$count" -gt 0 ] || return 1
+	kafka kafka-console-consumer.sh --bootstrap-server localhost:19092 \
+	  --topic "$TOPIC" --partition "$partition" --offset "$offset" \
+	  --max-messages "$count" --timeout-ms 3000 2>/dev/null \
+	  | EVENT_ID="$event_id" python3 -c 'import json,os,sys
+want = os.environ["EVENT_ID"]
+found = False
+for line in sys.stdin:
+    try:
+        if json.loads(line).get("id") == want:
+            found = True
+    except (ValueError, AttributeError):
+        pass
+raise SystemExit(0 if found else 1)'
+}
+
+# partition_of <tenant> -- posts one probe and finds that exact event in the
+# records added after the snapshot. Offset movement alone is ambiguous when
+# another producer is active; correlating the accepted event id keeps discovery
+# correct even when several partitions move concurrently.
 partition_of() {
-  local tenant="$1" before after
-  before=$(end_offsets)
-  post "$tenant" "probe"
-  for _ in $(seq 1 50); do
-    after=$(end_offsets)
-    local moved
-    moved=$(join <(echo "$before") <(echo "$after") | awk '$3 > $2 {print $1}')
-    if [ "$(echo "$moved" | grep -c .)" = "1" ]; then echo "$moved"; return 0; fi
-    sleep 0.2
-  done
-  return 1
+	local tenant="$1" before after event_id partition end start count found
+	before=$(end_offsets)
+	event_id=$(post "$tenant" "probe")
+	for _ in $(seq 1 50); do
+	  after=$(end_offsets)
+	  found=""
+	  while read -r partition end; do
+	    start=$(printf '%s\n' "$before" | awk -v want="$partition" '$1 == want {print $2}')
+	    [ -n "$start" ] || continue
+	    count=$((end - start))
+	    if partition_contains_event "$partition" "$start" "$count" "$event_id"; then
+	      [ -z "$found" ] || return 1
+	      found="$partition"
+	    fi
+	  done <<<"$after"
+	  if [ -n "$found" ]; then echo "$found"; return 0; fi
+	  sleep 0.2
+	done
+	return 1
 }
 
 delivered() {
@@ -124,9 +154,9 @@ for x in (d.get("deliveries") or []):
 
 # time_to_delivery <tenant> <tag> <budget-seconds>
 time_to_delivery() {
-  local tenant="$1" tag="$2" budget="$3" start
-  start=$(python3 -c 'import time;print(time.time())')
-  post "$tenant" "$tag"
+	local tenant="$1" tag="$2" budget="$3" start
+	start=$(python3 -c 'import time;print(time.time())')
+	post "$tenant" "$tag" >/dev/null
   while :; do
     [ -n "$(delivered "$tag")" ] && { python3 -c "import time;print(f'{time.time()-$start:.3f}')"; return 0; }
     if [ "$(python3 -c "import time;print(int(time.time()-$start))")" -ge "$budget" ]; then
@@ -188,7 +218,7 @@ note "control $base_control s"
 say "latching $BLOCKED_PATH and blocking $BLOCKER"
 curl -sf -o /dev/null -X POST "$SINK/control" -d "{\"latch\":\"$BLOCKED_PATH\"}" ||
   fail "could not latch $BLOCKED_PATH"
-post "$BLOCKER" "block"
+post "$BLOCKER" "block" >/dev/null
 
 say "waiting for the blocker to be observably parked"
 for _ in $(seq 1 60); do
@@ -199,9 +229,9 @@ done
 [ "${held:-0}" -ge 1 ] || fail "nothing parked on $BLOCKED_PATH; the blocker is not holding its member"
 note "member $blocker_owner is now stuck inside one record"
 
-# Budget, not a sleep: the victim is expected to time out and the control is
-# expected not to. A fixed wait would make the result depend on how long this
-# script chose to be patient.
+# Budget, not a sleep: the victim is expected to be delayed and the control is
+# expected to stay near its baseline. A fixed wait would make the result depend
+# on how long this script chose to be patient.
 BUDGET="${BUDGET:-15}"
 say "measuring both while the member is blocked (budget ${BUDGET}s)"
 held_control=$(time_to_delivery "$control" "hc" "$BUDGET")
@@ -217,11 +247,12 @@ printf '  %-38s %-12s %s\n' "control ($control, p$control_part, other member)" "
 printf '\n'
 
 # The victim is NOT expected to hang forever. relay's per-attempt timeout
-# eventually cancels the parked request, so the blocker holds its member for the
-# record's retry budget and then dead-letters -- which is the stall budget from
-# ADR 0006 doing its job. The claim is that the victim is delayed by roughly
-# that budget while the control is not delayed at all, so this compares the two
-# rather than waiting for an artificial timeout.
+# eventually cancels the parked request, so the blocker holds its member through
+# its configured retry work and then dead-letters. The 30s stall budget is the
+# ceiling on that work, not the duration this compose run should measure. The
+# claim is that the victim is delayed by the configured work while the control
+# stays near its baseline, so this compares the two rather than waiting for an
+# artificial timeout.
 verdict=$(python3 -c '
 import sys
 bv, bc, hv, hc = sys.argv[1:5]
@@ -230,8 +261,12 @@ if "TIMEOUT" in (hv, hc):
 bv, bc, hv, hc = float(bv), float(bc), float(hv), float(hc)
 if hc > 1.0:
     print(f"CONTROL_BLOCKED {hc:.3f}")
+elif hc > max(bc, 0.001) * 5:
+    print(f"CONTROL_REGRESSED {bc:.3f} {hc:.3f}")
 elif hv < 1.0:
     print(f"VICTIM_NOT_BLOCKED {hv:.3f}")
+elif hv < max(bv, 0.001) * 5:
+    print(f"VICTIM_UNCHANGED {bv:.3f} {hv:.3f}")
 elif hv < hc * 5:
     print(f"NO_SEPARATION {hv:.3f} vs {hc:.3f}")
 else:
@@ -239,16 +274,22 @@ else:
 ' "$base_victim" "$base_control" "$held_victim" "$held_control")
 
 case "$verdict" in
-  CONTROL_BLOCKED*)
+	CONTROL_BLOCKED*)
     fail "the control on the OTHER member was delayed too (${held_control}s).
     Partitions owned by a different member should be unaffected. Check that
-    both members really hold partitions." ;;
-  VICTIM_NOT_BLOCKED*)
+	    both members really hold partitions." ;;
+	CONTROL_REGRESSED*)
+	  fail "the control on the other member grew from ${base_control}s baseline to ${held_control}s.
+	    The member boundary did not preserve the control's measured behaviour." ;;
+	VICTIM_NOT_BLOCKED*)
     fail "the victim on the SAME member was delivered in ${held_victim}s despite its
     member being stuck inside a latched record. Either the blocker was not
     holding the member, or Consumer.Run no longer serialises records per member
-    -- in which case ADR 0006's head-of-line section needs revisiting rather
-    than this script." ;;
+	    -- in which case ADR 0006's head-of-line section needs revisiting rather
+	    than this script." ;;
+	VICTIM_UNCHANGED*)
+	  fail "the victim changed from ${base_victim}s baseline to ${held_victim}s, less than the
+	    required 5x slowdown. The run did not demonstrate head-of-line delay." ;;
   NO_SEPARATION*)
     fail "victim and control were delayed comparably ($verdict).
     Without separation this demonstrates nothing about member scope." ;;
@@ -262,16 +303,16 @@ pass "head-of-line blocking is member-scoped: victim ${held_victim}s vs control 
 
 cat <<EOF
 
-  What this shows, precisely. One record parked inside its consumer blocks
-  every partition that MEMBER owns -- the victim sat on a DIFFERENT partition
-  and still waited ${held_victim}s -- while a partition owned by the other
-  member kept delivering in ${held_control}s, indistinguishable from its
-  ${base_control}s baseline.
+	What this shows, precisely. One record parked inside its consumer blocks
+	every partition that MEMBER owns -- the victim sat on a DIFFERENT partition
+	and still waited ${held_victim}s -- while a partition owned by the other
+	member kept delivering in ${held_control}s against its ${base_control}s
+	baseline, inside both the 1s ceiling and the 5x baseline bound.
 
-  The victim is delayed rather than stuck: relay's per-attempt timeout cancels
-  the parked delivery, so the blocker holds its member for the record's retry
-  budget and then dead-letters. That bound is the stall budget ADR 0006
-  describes, which is what keeps this failure survivable.
+	The victim is delayed rather than stuck: relay's per-attempt timeout cancels
+	each parked request. The blocker retries according to compose's configured
+	schedule, dead-letters, and releases the member. This run measures that 6.6s
+	worst case; the separate 30s stall budget is its policy ceiling.
 
   This is Segment's first architecture in miniature, and the reason ADR 0006
   says the isolation this design has is the count of active members rather than

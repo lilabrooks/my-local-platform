@@ -239,7 +239,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 
 	consumer := delivery.NewConsumer(
 		reader, dlq, subscriptions.New(pool),
-		delivery.NewDeliverer(schedule, attemptTimeout), log,
+		delivery.NewDeliverer(schedule, attemptTimeout), stallBudget, log,
 	)
 
 	// Health endpoints run alongside the consume loop: a consumer has no

@@ -23,6 +23,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE=(docker compose -f local/docker-compose.yml)
 INGEST="${RELAY_INGEST_URL:-http://localhost:8082}"
 SINK="${SINK_URL:-http://localhost:8084}"
+GROUP="${RELAY_CONSUMER_GROUP:-relay-deliver}"
 
 # acme, deliberately. It is the one seeded tenant with TWO subscriptions
 # (local/bootstrap/relay-db.sh): /hooks/ok, which succeeds, and /hooks/flaky,
@@ -32,7 +33,8 @@ SINK="${SINK_URL:-http://localhost:8084}"
 #
 # That gap is the whole experiment. Against a single-subscriber tenant the
 # commit follows delivery by milliseconds and the window is not reliably
-# hittable; here it is seconds wide and the kill lands inside it every time.
+# hittable. Here the failing subscriber keeps the commit open while the script
+# waits for an observable parked request.
 TENANT="${TENANT:-acme}"
 
 # The path held open while the kill lands. acme's second subscription always
@@ -79,6 +81,11 @@ for x in (d.get("deliveries") or []):
 }
 
 deliver_container() { "${COMPOSE[@]}" ps -q relay-deliver | head -1; }
+kafka() { local tool="$1"; shift; docker exec mlp-kafka "/opt/kafka/bin/$tool" "$@"; }
+members_raw() {
+  kafka kafka-consumer-groups.sh --bootstrap-server localhost:19092 \
+    --group "$GROUP" --describe --members --verbose 2>/dev/null | awk 'NF>0 && $1!="GROUP"'
+}
 
 say "checking relay and the sink are up"
 curl -sf "$INGEST/readyz" >/dev/null || fail "relay ingest is not reachable at $INGEST -- run 'make up-apps'"
@@ -86,6 +93,17 @@ curl -sf "$SINK/healthz"  >/dev/null || fail "the sink is not reachable at $SINK
 
 ctr=$(deliver_container)
 [ -n "$ctr" ] || fail "no relay-deliver container is running -- run 'make up-apps'"
+
+# The attribution proof assumes one owner. A second member could take the
+# partition during this run and redeliver before the deliberate kill, recreating
+# the false-positive path this script is meant to exclude.
+say "checking consumer group $GROUP has exactly one member"
+for _ in $(seq 1 30); do
+  member_count=$(members_raw | wc -l | tr -d ' ')
+  [ "$member_count" = "1" ] && break
+  sleep 1
+done
+[ "${member_count:-0}" = "1" ] || fail "consumer group $GROUP has ${member_count:-0} members, want exactly 1 for attributable crash verification"
 
 # The latch replaced a latency-based window, so there is no longer a latency to
 # validate against RELAY_DELIVERY_TIMEOUT. The timeout still matters for a
@@ -126,23 +144,33 @@ before=$(delivered_ids | grep -c "^${first_id}$")
     Something redelivered this record already, so a duplicate afterwards could
     not be attributed to the kill."
 
-say "waiting for $BLOCKED_PATH to be observably parked"
+say "waiting for $BLOCKED_PATH to be observably parked, then killing immediately"
 waited=0
+killed=0
 while :; do
   held=$(curl -sf "$SINK/control" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("held",{}).get("'"$BLOCKED_PATH"'",0))' 2>/dev/null || echo 0)
-  [ "$held" -ge 1 ] && break
+  if [ "$held" -ge 1 ]; then
+    # Re-read the attribution guard in the same branch that kills. The latch is
+    # still subject to relay's per-attempt deadline, so leaving output or a sleep
+    # between the observation and docker kill would reopen a timing window.
+    at_kill=$(delivered_ids | grep -c "^${first_id}$")
+    [ "$at_kill" = "$before" ] || fail "$first_id grew from $before to $at_kill before the deliberate kill; attribution is no longer possible"
+    docker kill "$ctr" >/dev/null 2>&1 || fail "could not kill $ctr"
+    killed=1
+    break
+  fi
   waited=$((waited + 1))
-  [ "$waited" -ge 60 ] && fail "nothing ever parked on $BLOCKED_PATH; relay is not mid-delivery, so the kill would not land between delivery and commit"
-  sleep 1
+  [ "$waited" -ge 1200 ] && fail "nothing ever parked on $BLOCKED_PATH; relay is not mid-delivery, so the kill would not land between delivery and commit"
+  sleep 0.05
 done
-note "delivered as $first_id, and relay is parked on $BLOCKED_PATH"
+[ "$killed" = "1" ] || fail "the consumer was not killed"
+note "delivered as $first_id; relay was observably parked on $BLOCKED_PATH when killed"
 note "the offset cannot commit until every subscriber is finished, so it is held open"
 
 # docker kill, not stop: SIGKILL gives the consumer no chance to commit or shut
 # down cleanly, which is the crash this is about. A graceful stop would exercise
-# the shutdown path instead, and that path deliberately does NOT commit either.
-say "killing the consumer before it can commit"
-docker kill "$ctr" >/dev/null 2>&1 || fail "could not kill $ctr"
+# the bounded drain path instead.
+say "consumer killed before commit"
 
 # Started explicitly rather than waiting on compose's `restart: unless-stopped`.
 # Measured on Docker Engine 29.7.2: `docker kill` counts as a MANUAL STOP and
