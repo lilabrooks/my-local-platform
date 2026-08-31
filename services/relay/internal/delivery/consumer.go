@@ -164,24 +164,35 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 	// schedule, which is exactly what "one failing subscriber does not stop
 	// delivery to a healthy one" forbids.
 	outcomes := make([]Outcome, len(subs))
+	errs := make([]error, len(subs))
 	var wg sync.WaitGroup
-	var interrupted atomic.Bool
 
 	for i, sub := range subs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			out, err := c.deliverer.Deliver(ctx, sub, rec)
-			if err != nil {
-				interrupted.Store(true)
-			}
-			outcomes[i] = out
+			outcomes[i], errs[i] = c.deliverer.Deliver(ctx, sub, rec)
 		}()
 	}
 	wg.Wait()
 
-	if interrupted.Load() {
-		return context.Cause(ctx)
+	// Return what actually failed, rather than rebuilding an error from the
+	// context.
+	//
+	// This used to record "something failed" in a bool and then return
+	// context.Cause(ctx). The two agreed only while Deliver returned nothing
+	// but ctx.Err() -- an invariant held in a different function and enforced
+	// nowhere. For any other error the cause was nil, handle returned nil, and
+	// the caller committed the offset as though every subscriber had
+	// succeeded. Silent data loss, and Deliver is one line from producing it:
+	// it returns d.sleep's error verbatim.
+	//
+	// Joined rather than first-wins because each subscriber has its own budget
+	// and losing the others' failures is how this went wrong the first time.
+	// errors.Join is nil when every element is nil, and errors.Is still reaches
+	// a context.Canceled inside it, so Run's shutdown path is unchanged.
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 
 	// Only once every subscriber has reached a terminal state is the record

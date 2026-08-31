@@ -239,6 +239,88 @@ func TestDLQFailureBlocksTheCommit(t *testing.T) {
 	}
 }
 
+// The most important property this consumer has is that an offset commits only
+// when every subscriber is finished. handle used to record "something failed"
+// as a bool and then rebuild an error with context.Cause(ctx) -- so a delivery
+// error that was NOT a cancellation produced a nil cause, handle returned nil,
+// and the record committed as though every subscriber had succeeded. Silent
+// data loss, guarded only by an invariant maintained in a different function:
+// Deliver happening to return nothing but ctx.Err().
+//
+// That invariant is not enforced anywhere, and it is one line from being false
+// -- Deliver returns d.sleep's error verbatim (deliver.go), so any sleep that
+// fails for its own reasons walks straight into this path. This test makes the
+// error non-context and asserts the record is NOT committed.
+//
+// See issue #24.
+func TestNonContextDeliveryErrorBlocksTheCommit(t *testing.T) {
+	t.Parallel()
+
+	bad := alwaysFails(t) // fails, so delivery reaches the retry sleep
+	defer bad.Close()
+
+	boom := errors.New("clock went backwards")
+
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: bad.URL, Secret: "s"}}})
+	// Not a context error, and the context is never cancelled -- so
+	// context.Cause(ctx) is nil and the old code returned nil from handle.
+	c.deliverer.sleep = func(context.Context, time.Duration) error { return boom }
+
+	err := c.Run(context.Background())
+
+	if got := r.commits(); got != 0 {
+		t.Errorf("committed %d times after a non-context delivery error, want 0 -- "+
+			"the record was treated as fully delivered and is now lost", got)
+	}
+	if err == nil {
+		t.Fatal("Run returned nil after a delivery error; the failure was swallowed")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("Run returned %v, want it to wrap %v -- reconstructing an error "+
+			"from the context loses what actually went wrong", err, boom)
+	}
+}
+
+// The other branch of the same change, and the one that must NOT become an
+// error the consumer reports. Cancellation mid-record is a shutdown: the
+// offset stays uncommitted so the record is redelivered, and Run exits nil
+// rather than treating a SIGTERM as a fault.
+//
+// Worth its own test because handle now returns joined delivery errors rather
+// than a rebuilt context.Cause, and errors.Is has to keep reaching the
+// context.Canceled inside that join or every shutdown starts logging as a
+// crash.
+func TestCancellationDuringDeliveryIsAShutdownNotAFault(t *testing.T) {
+	t.Parallel()
+
+	bad := alwaysFails(t) // fails, so delivery reaches the retry sleep
+	defer bad.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: bad.URL, Secret: "s"}}})
+	c.deliverer.sleep = func(ctx context.Context, _ time.Duration) error {
+		cancel() // SIGTERM arrives while the record is in flight
+		return ctx.Err()
+	}
+
+	if err := c.Run(ctx); err != nil {
+		t.Errorf("Run returned %v on cancellation, want nil -- a shutdown is not a fault", err)
+	}
+	if got := r.commits(); got != 0 {
+		t.Errorf("committed %d times after being cancelled mid-record, want 0 -- "+
+			"the record must come back rather than be marked done", got)
+	}
+	if got := len(dlq.letters(t)); got != 0 {
+		t.Errorf("wrote %d dead letters for a shutdown, want 0 -- the event is not at fault", got)
+	}
+}
+
 // A database blip is not the event's fault; the record must come back.
 func TestSubscriptionLookupFailureBlocksTheCommit(t *testing.T) {
 	t.Parallel()
