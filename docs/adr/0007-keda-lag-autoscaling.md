@@ -231,5 +231,16 @@ issue tracker, not run. `enable_msk` does not exist yet.
   the per-subscriber topic [ADR 0006](0006-kafka-over-sqs-for-delivery.md)
   describes.
 - **`maxReplicaCount` and the partition count disagree.** They are set equal on
-  purpose and nothing enforces it; a `k8s/validate` invariant would, and would
-  have been worth more than this sentence if the number ever changes.
+  purpose, and since 2026-08-30 `k8s/validate` enforces it:
+  `TestScaledObjectMaxReplicasMatchesPartitionCount` reads `maxReplicaCount`
+  from the rendered ScaledObject and the partition count from
+  `local/bootstrap/kafka-topics.sh`, and fails when either moves alone. The
+  topic comes from the ScaledObject's own trigger rather than being restated in
+  the test, so repointing the trigger follows the trigger.
+
+  This bullet used to end "a `k8s/validate` invariant would, and would have been
+  worth more than this sentence if the number ever changes." It was right, and
+  the sentence sat here unacted on until
+  [#56](https://github.com/lilabrooks/my-local-platform/issues/56) was filed
+  from an external review. Run the invariant with `-count=1`; the Go test cache
+  does not track the files it reads.
