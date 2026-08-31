@@ -155,29 +155,6 @@ from "decide to look" into a real trigger.
 
 Full reasoning on the issue.
 
-### relay interrupted delivery discards its error and can commit silently
-
-**Issue:** [#24](https://github.com/lilabrooks/my-local-platform/issues/24) ·
-**Found:** 2026-08-25 · **Address:** next time
-`internal/delivery/consumer.go` is open
-
-`Consumer.handle` sets an `interrupted` flag when `Deliver` returns a non-nil
-error, then discards that error and reconstructs one with `context.Cause(ctx)`.
-
-The two correlate today only because `Deliver` returns nothing but `ctx.Err()`
-— an invariant maintained in a different function. If it ever returns any other
-non-nil error, `context.Cause(ctx)` is nil, `handle` returns nil, and **the
-record commits as though every subscriber succeeded**. That is silent data loss.
-
-Deferred because it is currently unreachable, not because it is unimportant.
-Commit-only-when-finished is the most important property this consumer has, and
-it should not depend on an invariant held somewhere else. Cheap to fix; the
-trigger is proximity rather than severity.
-
-Done means capturing and propagating the actual error from `Deliver`, plus a
-test where a deliverer returns a non-context error and the offset is not
-committed.
-
 ### relay poison-record dead letters carry an empty tenant key
 
 **Issue:** [#25](https://github.com/lilabrooks/my-local-platform/issues/25) ·
