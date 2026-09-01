@@ -51,18 +51,22 @@ docs/adr/       why each choice was made, and what was verified
 
 ## The stack
 
-| Component | Local | Real AWS |
+| Component | Local | Real AWS counterpart |
 |---|---|---|
 | Object storage | floci S3 | S3 |
 | Container-backed AWS | floci RDS/EKS (opt-in socket) | the real services |
 | Pub/sub + queues | floci SNS/SQS | SNS + SQS with a DLQ |
 | Email | floci SES | SES |
-| Event streaming | Apache Kafka (KRaft) | MSK, or self-managed |
+| Event streaming | Apache Kafka (KRaft) | MSK or self-managed |
 | Message broker | RabbitMQ | Amazon MQ |
 | Relational | Postgres 18 | RDS (`enable_rds`) |
 | Kubernetes | minikube (`mlp` profile) | EKS (`enable_eks`) |
 | Deployment | ArgoCD, app-of-apps | same manifests, ECR images |
 | Telemetry | OTel → Prometheus + Tempo + Grafana | OTel → Datadog |
+
+The Terraform currently implements S3, SNS/SQS, ECR, and optional SES, RDS,
+and EKS. MSK is proposed for M4; Amazon MQ is a service counterpart, not a
+resource this repository provisions.
 
 `relay` and its sink are scraped by Prometheus directly and come with a
 provisioned Grafana dashboard at
@@ -114,8 +118,9 @@ the same as the component working. It exits non-zero on failure, so it doubles
 as a CI gate.
 
 It is also the reference for how to talk to each component: the AWS SDK against
-a custom endpoint, a Kafka producer and consumer group, an AMQP round trip,
-`pgx`, and OTLP tracing that wraps every check in a span.
+a custom endpoint, a Kafka produce-and-fetch at the returned partition and
+offset, an AMQP round trip, `pgx`, and OTLP tracing that wraps every check in a
+span.
 
 ## Kubernetes and GitOps
 
@@ -126,21 +131,24 @@ make argocd-install  # ArgoCD + app-of-apps
 make argocd-ui       # https://localhost:8081
 ```
 
-ArgoCD pulls from a git URL. This repository is private, so ArgoCD needs a
-read-only deploy key before it can sync — `make argocd-repo-creds` generates
-one, registers it, and repoints the Applications at the SSH URL.
+ArgoCD pulls from a git URL. A private remote needs a read-only deploy key;
+`make argocd-repo-creds` generates one, registers it, and repoints the live
+Applications at the SSH URL. A public remote can use HTTPS without credentials.
+Keep the tracked Application URLs and `REPO_URL` consistent with that choice.
 `make k8s-apply-local` applies the same manifests directly, without git.
 **[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the details.
 
 ## Real AWS
 
-Requires an SSO session:
+Requires an SSO session and the one-time remote-state bootstrap described in
+[the cost guide](docs/costs.md#remote-state-comes-first):
 
 ```bash
 make aws-login      # aws sso login
 make aws-whoami
 make aws-bootstrap  # once for a new account: versioned S3 state backend
-make aws-plan       # read-only; initializes that backend first
+make aws-init       # bind this checkout to the account-scoped backend
+make aws-plan       # read-only; also runs aws-init as a prerequisite
 make aws-up         # prompts before creating anything billable
 make aws-cost       # month-to-date spend
 make aws-down       # destroy through the already initialized backend
@@ -160,7 +168,7 @@ nothing idle. EKS and RDS are behind `enable_eks` and `enable_rds`, both
 make lint
 ```
 
-Ten checks: Go, YAML, shell, Markdown, GitHub Actions workflows, the
+Ten checks: Go, YAML, shell, Markdown, GitHub Actions workflows, every service
 Dockerfile, Terraform formatting and lint rules, infrastructure security, and a
 secret scan across git history.
 
@@ -238,8 +246,8 @@ installed and its sync engine verified against a public repo; the `echo`
 manifests apply cleanly and serve traffic.
 
 The GitOps loop is verified end to end: a commit pushed to GitHub changed the
-running replica count ~12 seconds later, with no `kubectl`. CI is green across
-all thirteen jobs on GitHub Actions.
+running replica count ~12 seconds later, with no `kubectl`. The last main run
+that received GitHub-hosted runners passed all thirteen jobs.
 
 **`relay` is built through M2 and its demo runs.** `make relay-demo` drives six
 steps in 190 seconds against minikube: an event delivered, the subscriber slowed,

@@ -1,6 +1,6 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-08-27
+Date: 2026-08-24 · Last audited: 2026-08-31
 Status: **M0, M1 and M2 are built and their milestones closed.** M3 and M4
 remain proposed, and are alternatives rather than a sequence -- see the decision
 point below. The header used to read "Proposed -- no code written".
@@ -289,6 +289,13 @@ when someone reads the code carefully.
   attempts without being evicted from its group, so the record has to be parked
   and the offset committed: tiered retry topics, or a due-at row in Postgres
   with a scheduler. ADR 0006 records both and why neither is MVP work.
+
+  **Mechanism correction, 2026-08-31:** kafka-go keeps heartbeating and rejoins
+  independently of handler duration, so the consumer is not evicted for
+  sleeping. Parking remains the proposed M3 shape because an in-process wait
+  stalls every partition assigned to that member and cannot fit relay's 30s
+  record and shutdown budget. The corrected basis and measurements are in
+  [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-how-long-one-member-may-stall).
 
 ---
 

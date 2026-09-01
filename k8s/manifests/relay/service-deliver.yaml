@@ -6,8 +6,8 @@ metadata:
     app.kubernetes.io/name: relay-deliver
     app.kubernetes.io/part-of: my-local-platform
 # The delivery consumer takes no inbound traffic -- it pulls from Kafka. This
-# Service exists for its health endpoints and, once #22 lands, for Prometheus
-# to scrape /metrics off.
+# The Service exists for health endpoints and for Prometheus to scrape
+# `/metrics` from every delivery pod.
 spec:
   type: ClusterIP
   selector:

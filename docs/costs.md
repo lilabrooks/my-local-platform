@@ -34,8 +34,8 @@ interactively with the same backend configuration:
 make aws-init AWS_INIT_ARGS=-migrate-state
 ```
 
-Do not use `-reconfigure` when local state contains resources; it selects the
-remote backend without copying the existing state.
+Do not use `-reconfigure` as a shortcut when local state contains resources;
+that selects the remote backend without copying the existing state.
 
 ## The cheap tier — created by default
 
@@ -44,7 +44,7 @@ remote backend without copying the existing state.
 | S3 bucket | $0.023/GB-month | ~$0 |
 | SNS topic | $0.50 per million publishes, first million free | ~$0 |
 | SQS queue + DLQ | $0.40 per million requests, first million free | ~$0 |
-| SES identity | $0.10 per thousand emails | ~$0 |
+| SES identity (when `ses_sender_email` is set) | $0.10 per thousand emails | ~$0 |
 | ECR repository | $0.10/GB-month | ~$0 |
 
 Leaving these standing costs approximately nothing. The bucket has a 30-day
@@ -73,7 +73,8 @@ from [AWS's own EKS pricing page](https://aws.amazon.com/eks/pricing/).
 
 This is not hypothetical. The first draft of `expensive.tf` pinned `1.31`,
 which is already in extended support and would have quietly billed at the
-higher rate. It is now pinned to `1.35`, in standard support until 2027-03-26.
+higher rate. It is now pinned to `1.35`, in standard support until 2027-03-27
+per [AWS's EKS release calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html).
 
 Check before changing the version:
 
@@ -115,8 +116,11 @@ aws resourcegroupstaggingapi get-resources \
   --profile aws-public-change-feed
 ```
 
-Every resource Terraform creates here is tagged `Project=my-local-platform`
-and `Ephemeral=true`, so that query is exhaustive.
+Every taggable dev-stack resource carries `Project=my-local-platform` and
+`Ephemeral=true`. The bootstrap bucket and lock table carry the project tag and
+`Stack=bootstrap` instead. The query is the first inventory check, not a proof
+that nothing else exists: AWS-created EKS log groups are outside Terraform's
+tagged resource set.
 
 Two things `terraform destroy` will not clean up, by design:
 

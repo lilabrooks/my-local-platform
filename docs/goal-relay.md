@@ -1,6 +1,6 @@
 # Goal: `relay`
 
-Date: 2026-08-24 · Last audited: 2026-08-27
+Date: 2026-08-24 · Last audited: 2026-08-31
 Status: **Built.** The target behaviour below was delivered by M1 and M2, and
 the demo it describes runs as `make relay-demo`. Kept as written rather than
 rewritten in the past tense: it is the thing the work was measured against, and
@@ -180,8 +180,16 @@ Four rules that keep the surface honest:
 
    `demo` totals 15s and passes. `standard` totals 27h35m5s and does not;
    running it needs the parking mechanism in
-   [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-consumer-group-liveness).
+   [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-how-long-one-member-may-stall).
    Failing at startup beats losing the delivery mid-retry.
+
+> **Mechanism correction, 2026-08-31.** The startup rejection above shipped,
+> but the rebalance explanation did not survive implementation. kafka-go keeps
+> group membership alive on background goroutines while a handler waits. The
+> 30s cap instead bounds how long one member may stall every partition it owns
+> and fits the record drain inside Kubernetes' shutdown grace period. ADR 0006
+> records the code paths and measured handover. The original target text stays
+> here because this document is the prediction the work was judged against.
 
 ## The demo
 
