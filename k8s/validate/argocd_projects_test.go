@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -11,8 +12,6 @@ import (
 )
 
 const argocdManifestRoot = "../argocd"
-
-const trackedRepoURL = "git@github.com:lilabrooks/my-local-platform.git"
 
 type objectMetadata struct {
 	Name      string `yaml:"name"`
@@ -82,6 +81,22 @@ func requireManifestHeader(t *testing.T, path, apiVersion, kind string, metadata
 	if metadata.Namespace != "argocd" {
 		t.Fatalf("%s is in namespace %q, want argocd", path, metadata.Namespace)
 	}
+}
+
+func readArgoCDInstall(t *testing.T) (string, string) {
+	t.Helper()
+
+	path := filepath.Join(argocdManifestRoot, "install.sh")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	text := string(b)
+	match := regexp.MustCompile(`(?m)^REPO_URL="\$\{REPO_URL:-([^}]+)\}"$`).FindStringSubmatch(text)
+	if len(match) != 2 || match[1] == "" {
+		t.Fatalf("%s has no parseable REPO_URL default", path)
+	}
+	return text, match[1]
 }
 
 func TestDefaultProjectHasNoPermissions(t *testing.T) {
@@ -190,6 +205,7 @@ func TestRootApplicationUsesRootProject(t *testing.T) {
 }
 
 func TestChildApplicationsUseWorkloadProject(t *testing.T) {
+	_, expectedRepoURL := readArgoCDInstall(t)
 	paths, err := filepath.Glob("../apps/*.yaml")
 	if err != nil {
 		t.Fatalf("find child Applications: %v", err)
@@ -209,9 +225,9 @@ func TestChildApplicationsUseWorkloadProject(t *testing.T) {
 			if app.Spec.Project != "mlp" {
 				t.Fatalf("%s uses project %q, want mlp", path, app.Spec.Project)
 			}
-			if app.Spec.Source.RepoURL != trackedRepoURL {
+			if app.Spec.Source.RepoURL != expectedRepoURL {
 				t.Fatalf("%s uses repository %q, want %q",
-					path, app.Spec.Source.RepoURL, trackedRepoURL)
+					path, app.Spec.Source.RepoURL, expectedRepoURL)
 			}
 			if app.Spec.Destination.Server != "https://kubernetes.default.svc" ||
 				app.Spec.Destination.Namespace != "mlp" {
@@ -222,29 +238,20 @@ func TestChildApplicationsUseWorkloadProject(t *testing.T) {
 	}
 }
 
-func TestArgoCDInstallUsesTheTrackedRepoAndRequiredVersion(t *testing.T) {
-	installPath := filepath.Join(argocdManifestRoot, "install.sh")
-	installBytes, err := os.ReadFile(installPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", installPath, err)
-	}
-	install := string(installBytes)
+func TestArgoCDInstallUsesConsistentRepoAndRequiredVersion(t *testing.T) {
+	install, expectedRepoURL := readArgoCDInstall(t)
 	if !strings.Contains(install, `readonly ARGOCD_VERSION="v3.5.1"`) {
 		t.Fatal("install.sh must fix ArgoCD at the version that enforces resource names")
 	}
 	if strings.Contains(install, `${ARGOCD_VERSION:-`) {
 		t.Fatal("install.sh permits an ArgoCD version override")
 	}
-	if !strings.Contains(install, `REPO_URL="${REPO_URL:-`+trackedRepoURL+`}"`) {
-		t.Fatalf("install.sh default repository does not match %q", trackedRepoURL)
-	}
-
 	makefileBytes, err := os.ReadFile("../../Makefile")
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
-	if !strings.Contains(string(makefileBytes), "REPO_URL         ?= "+trackedRepoURL) {
-		t.Fatalf("Makefile default repository does not match %q", trackedRepoURL)
+	if !strings.Contains(string(makefileBytes), "REPO_URL         ?= "+expectedRepoURL) {
+		t.Fatalf("Makefile default repository does not match %q", expectedRepoURL)
 	}
 }
 
