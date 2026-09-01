@@ -78,9 +78,21 @@ echo
 YAMLLINT_IMAGE=pipelinecomponents/yamllint:0.35.10
 YAMLLINT_VERSION=1.37.1
 MARKDOWNLINT_VERSION=0.23.2
+SHELLCHECK_VERSION=0.11.0
+ACTIONLINT_VERSION=1.7.12
+HADOLINT_VERSION=2.15.1
+GOLANGCI_VERSION=2.13.1
+TRIVY_VERSION=0.74.0
+GITLEAKS_VERSION=8.30.1
 
 # pinned <version> <version-output> -- true when the installed tool matches.
-pinned() { printf '%s' "$2" | grep -qF "$1"; }
+# The numeric boundaries matter: a substring check would accept 2.13.10 when
+# the repository pins 2.13.1.
+pinned() {
+  local escaped
+  escaped=$(printf '%s' "$1" | sed 's/\./\\./g')
+  printf '%s' "$2" | grep -Eq "(^|[^0-9])${escaped}([^0-9]|$)"
+}
 
 if has yamllint && pinned "$YAMLLINT_VERSION" "$(yamllint --version 2>&1)"; then
   out=$(yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
@@ -97,55 +109,65 @@ SCRIPTS=()
 while IFS= read -r f; do SCRIPTS+=("$f"); done < <(
   find . -name '*.sh' -not -path '*/.terraform/*' | sort
 )
-if has shellcheck; then
+if has shellcheck && pinned "$SHELLCHECK_VERSION" "$(shellcheck --version 2>&1)"; then
   out=$(shellcheck "${SCRIPTS[@]}" 2>&1); report "shellcheck" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/mnt -w /mnt koalaman/shellcheck:v0.11.0 \
+  out=$(docker run --rm -v "$PWD":/mnt -w /mnt "koalaman/shellcheck:v$SHELLCHECK_VERSION" \
         "${SCRIPTS[@]}" 2>&1); report "shellcheck" $? "$out"
 else
-  skip "shellcheck" "install with: brew install shellcheck"
+  skip "shellcheck" "needs docker or shellcheck $SHELLCHECK_VERSION"
 fi
 
 # --- Markdown ---------------------------------------------------------------
 if has markdownlint-cli2 && \
    pinned "$MARKDOWNLINT_VERSION" "$(markdownlint-cli2 --version 2>&1 | head -1)"; then
   out=$(markdownlint-cli2 2>&1); report "markdownlint" $? "$out"
+elif has_docker; then
+  # Prefer the container to npx. A damaged host npm cache used to fail this
+  # path even though the pinned image was already available.
+  out=$(retry_net 3 docker run --rm -v "$PWD":/workdir \
+        "davidanson/markdownlint-cli2:v$MARKDOWNLINT_VERSION"); code=$?
+  report "markdownlint" "$code" "$out"
 elif has npx; then
   # @VERSION, not bare: `npx --yes markdownlint-cli2` fetches whatever is
   # newest, so this gate could change under a repository that did not.
   out=$(npx --yes "markdownlint-cli2@$MARKDOWNLINT_VERSION" 2>&1 | grep -vE '^npm notice'); code=$?
-  report "markdownlint" "$code" "$out"
-elif has_docker; then
-  # The container matters more than it looks: it is what makes Docker alone
-  # sufficient to run EVERY linter here except golangci-lint. Without it this
-  # was the one check that needed a Node toolchain, and under LINT_STRICT a
-  # runner without npx would fail the build over a missing tool rather than a
-  # finding.
-  out=$(retry_net 3 docker run --rm -v "$PWD":/workdir \
-        "davidanson/markdownlint-cli2:v$MARKDOWNLINT_VERSION"); code=$?
   report "markdownlint" "$code" "$out"
 else
   skip "markdownlint" "needs docker, npx, or markdownlint-cli2 $MARKDOWNLINT_VERSION"
 fi
 
 # --- GitHub Actions ---------------------------------------------------------
-if has actionlint; then
+if has actionlint && pinned "$ACTIONLINT_VERSION" "$(actionlint -version 2>&1)"; then
   out=$(actionlint 2>&1); report "actionlint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12 2>&1)
+  out=$(docker run --rm -v "$PWD":/repo -w /repo "rhysd/actionlint:$ACTIONLINT_VERSION" 2>&1)
   report "actionlint" $? "$out"
 else
-  skip "actionlint" "needs docker or: brew install actionlint"
+  skip "actionlint" "needs docker or actionlint $ACTIONLINT_VERSION"
 fi
 
 # --- Dockerfiles ------------------------------------------------------------
-if has hadolint; then
-  out=$(hadolint services/echo/Dockerfile 2>&1); report "hadolint" $? "$out"
+DOCKERFILES=()
+while IFS= read -r f; do DOCKERFILES+=("$f"); done < <(
+  find . -name Dockerfile -not -path '*/.terraform/*' | sort
+)
+if has hadolint && pinned "$HADOLINT_VERSION" "$(hadolint --version 2>&1)"; then
+  out=$(hadolint "${DOCKERFILES[@]}" 2>&1); report "hadolint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -i hadolint/hadolint:v2.15.1-alpine hadolint - \
-        < services/echo/Dockerfile 2>&1); report "hadolint" $? "$out"
+  docker_fail=0 docker_out=""
+  for dockerfile in "${DOCKERFILES[@]}"; do
+    out=$(docker run --rm -i "hadolint/hadolint:v$HADOLINT_VERSION-alpine" \
+          hadolint - < "$dockerfile" 2>&1) || {
+      docker_fail=1
+      docker_out="${docker_out}${dockerfile}:
+${out}
+"
+    }
+  done
+  report "hadolint" "$docker_fail" "$docker_out"
 else
-  skip "hadolint" "needs docker or: brew install hadolint"
+  skip "hadolint" "needs docker or hadolint $HADOLINT_VERSION"
 fi
 
 # --- Terraform --------------------------------------------------------------
@@ -221,10 +243,11 @@ fi
 # Modules are discovered rather than listed. A hardcoded list silently skipped
 # services/relay when it was added, and reported PASS -- a lint run that does
 # not lint the new code is worse than one that fails.
-if has golangci-lint; then
-  go_fail=0 go_out=""
-  go_mods=$(find . -name go.mod -not -path './*/.terraform/*' -not -path './*/node_modules/*' \
-            -exec dirname {} \; | sed 's|^\./||' | sort)
+go_fail=0 go_out=""
+go_mods=$(find . -name go.mod -not -path './*/.terraform/*' -not -path './*/node_modules/*' \
+          -exec dirname {} \; | sed 's|^\./||' | sort)
+if has golangci-lint && \
+   pinned "$GOLANGCI_VERSION" "$(golangci-lint --version 2>&1)"; then
   for mod in $go_mods; do
     out=$(cd "$mod" && golangci-lint run --config ../../.golangci.yml --timeout 5m 2>&1) || {
       go_fail=1
@@ -234,8 +257,20 @@ ${out}
     }
   done
   report "golangci-lint" "$go_fail" "$go_out"
+elif has_docker; then
+  for mod in $go_mods; do
+    out=$(docker run --rm -v "$PWD":/repo -w "/repo/$mod" \
+          "golangci/golangci-lint:v$GOLANGCI_VERSION" \
+          golangci-lint run --config /repo/.golangci.yml --timeout 5m 2>&1) || {
+      go_fail=1
+      go_out="${go_out}${mod}:
+${out}
+"
+    }
+  done
+  report "golangci-lint" "$go_fail" "$go_out"
 else
-  skip "golangci-lint" "install with: brew install golangci-lint"
+  skip "golangci-lint" "needs docker or golangci-lint $GOLANGCI_VERSION"
 fi
 
 # --- Infrastructure security ------------------------------------------------
@@ -243,30 +278,35 @@ fi
 # overlap not at all -- trivy found six issues tflint passed clean.
 # --skip-dirs matters: .terraform/ holds vendored upstream modules whose
 # example manifests are not ours to fix.
-if has trivy; then
-  out=$(trivy fs --scanners misconfig,secret \
+TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache"
+mkdir -p "$TRIVY_CACHE"
+if has trivy && pinned "$TRIVY_VERSION" "$(trivy --version 2>&1 | head -1)"; then
+  out=$(retry_net 3 trivy fs --scanners vuln,misconfig,secret \
+        --cache-dir "$TRIVY_CACHE" \
         --severity MEDIUM,HIGH,CRITICAL \
         --skip-dirs '**/.terraform' \
         --exit-code 1 --quiet . 2>&1)
   report "trivy" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo aquasec/trivy:0.74.0 fs \
-        --scanners misconfig,secret --severity MEDIUM,HIGH,CRITICAL \
+  out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
+        -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
+        -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
+        --scanners vuln,misconfig,secret --severity MEDIUM,HIGH,CRITICAL \
         --skip-dirs '**/.terraform' --exit-code 1 --quiet . 2>&1)
   report "trivy" $? "$out"
 else
-  skip "trivy" "needs docker or: brew install trivy"
+  skip "trivy" "needs docker or trivy $TRIVY_VERSION"
 fi
 
 # --- Secrets ----------------------------------------------------------------
 # Runs last: it is the one whose failure should be impossible to miss.
-if has gitleaks; then
+if has gitleaks && pinned "$GITLEAKS_VERSION" "$(gitleaks version 2>&1)"; then
   out=$(gitleaks detect --source=. --no-banner --redact 2>&1); report "gitleaks" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:v8.30.1 \
+  out=$(docker run --rm -v "$PWD":/repo -w /repo "zricethezav/gitleaks:v$GITLEAKS_VERSION" \
         detect --source=. --no-banner --redact 2>&1); report "gitleaks" $? "$out"
 else
-  skip "gitleaks" "needs docker or: brew install gitleaks"
+  skip "gitleaks" "needs docker or gitleaks $GITLEAKS_VERSION"
 fi
 
 echo
