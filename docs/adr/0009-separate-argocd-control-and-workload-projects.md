@@ -66,6 +66,11 @@ Both active projects accept one repository URL, substituted by the installation
 scripts. The `mlp` Namespace permission carries a name restriction, so
 `CreateNamespace=true` cannot create another namespace.
 
+That name restriction requires ArgoCD v3.3 or newer. The installer is fixed at
+the verified v3.5.1 release instead of accepting an `ARGOCD_VERSION` override;
+otherwise an older install could accept the project manifest without enforcing
+the boundary it records.
+
 The representative path is now:
 
 1. The root Application reads `k8s/apps/` from the configured repository under
@@ -122,7 +127,8 @@ does not manage them from `k8s/apps/`; changing them requires rerunning
 Checked on 2026-08-31:
 
 - `make k8s-validate` passed with the new project, root, child-discovery, and
-  script-order tests.
+  script-order tests. It also checks the fixed ArgoCD version and one repository
+  URL across the install path and every child Application.
 - `bash -n k8s/argocd/install.sh k8s/argocd/repo-creds.sh` and ShellCheck both
   passed.
 - A server-side dry run accepted all 3 AppProjects and the root Application on

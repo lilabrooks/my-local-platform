@@ -65,6 +65,8 @@ the repository.
 A public remote needs no deploy key when every Application and `REPO_URL` use
 its HTTPS URL. Change those tracked URLs when repository visibility changes;
 leaving an SSH URL in one child Application still requires SSH credentials.
+`make k8s-validate` checks that all child Applications, the install script, and
+the Make default use the same URL.
 
 ## Project boundaries
 
@@ -85,6 +87,10 @@ Both installation scripts create `mlp-root`, move the root Application, narrow
 `mlp`, then disable `default`. This order also upgrades a cluster created with
 the old single-project configuration. `make k8s-validate` checks the projects,
 the script order, and every tracked child Application.
+
+The installer is fixed at ArgoCD v3.5.1. The `name: mlp` restriction on the
+Namespace permission needs ArgoCD v3.3 or newer, so an environment override to
+an older version would silently weaken the boundary the project claims.
 
 [ADR 0009](adr/0009-separate-argocd-control-and-workload-projects.md) records
 the boundary, its remaining limit, and the condition that would require a
