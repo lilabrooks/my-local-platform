@@ -6,6 +6,37 @@ Prices are `us-east-1` list rates as of August 2026 and exclude data transfer.
 Treat them as the right order of magnitude, not a quote. The authority on what
 you are actually spending is `make aws-cost`.
 
+## Remote state comes first
+
+The dev stack stores state in the account-scoped S3 bucket created by the
+bootstrap stack. Create that backend once before the first dev plan:
+
+```bash
+make aws-bootstrap
+make aws-init
+```
+
+If this checkout previously ran `make aws-init` with DynamoDB locking, update
+its saved backend configuration once:
+
+```bash
+make aws-init AWS_INIT_ARGS=-reconfigure
+```
+
+The bucket, key and region stay the same, so this operation updates local
+backend metadata without moving state.
+
+An older checkout may instead have ignored local dev state. Inspect it before
+moving anything. If it contains resources that must be preserved, migrate it
+interactively with the same backend configuration:
+
+```bash
+make aws-init AWS_INIT_ARGS=-migrate-state
+```
+
+Do not use `-reconfigure` when local state contains resources; it selects the
+remote backend without copying the existing state.
+
 ## The cheap tier — created by default
 
 | Resource | Billing | Idle cost |

@@ -10,7 +10,7 @@ COMPOSE_ENV = MLP_ENV_FILE="$(ENV_FILE)" python3 scripts/with-compose-env.py
 
 AWS_PROFILE_NAME ?= aws-public-change-feed
 AWS_REAL_REGION ?= us-east-1
-AWS_INIT_ARGS ?= -input=false
+AWS_INIT_ARGS ?=
 AWS_REAL_ENV = env -i \
 	HOME="$(HOME)" \
 	PATH="$(PATH)" \
@@ -428,7 +428,7 @@ aws-init: aws-whoami ## Initialize the remote state backend for the dev environm
 	@mlp_account_id="$$($(AWS_REAL_ENV) aws sts get-caller-identity \
 	  --query Account --output text)"; \
 	  cd infra/terraform/envs/dev && \
-	  $(AWS_REAL_ENV) terraform init $(AWS_INIT_ARGS) \
+	  $(AWS_REAL_ENV) terraform init -input=false $(AWS_INIT_ARGS) \
 	    -backend-config="bucket=mlp-tfstate-$$mlp_account_id" \
 	    -backend-config="key=envs/dev/terraform.tfstate" \
 	    -backend-config="region=$(AWS_REAL_REGION)" \
