@@ -285,16 +285,22 @@ fi
 # --skip-dirs matters: .terraform/ holds vendored upstream modules whose
 # example manifests are not ours to fix.
 TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache"
-mkdir -p "$TRIVY_CACHE"
+TRIVY_CHECKS_INPUT="$TRIVY_CACHE/checks-prefetch-input"
+mkdir -p "$TRIVY_CACHE" "$TRIVY_CHECKS_INPUT"
 if has trivy && pinned "$TRIVY_VERSION" "$(trivy --version 2>&1 | head -1)"; then
   if db_out=$(retry_net 3 trivy image --download-db-only \
       --cache-dir "$TRIVY_CACHE"); then
-    out=$(trivy fs --scanners vuln,misconfig,secret \
-          --cache-dir "$TRIVY_CACHE" --skip-db-update \
-          --severity MEDIUM,HIGH,CRITICAL \
-          --skip-dirs '**/.terraform' \
-          --exit-code 1 --quiet . 2>&1)
-    report "trivy" $? "$out"
+    if checks_out=$(retry_net 3 trivy config --cache-dir "$TRIVY_CACHE" \
+        --exit-code 0 --quiet "$TRIVY_CHECKS_INPUT"); then
+      out=$(trivy fs --scanners vuln,misconfig,secret \
+            --cache-dir "$TRIVY_CACHE" --skip-db-update --skip-check-update \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --skip-dirs '**/.terraform' \
+            --exit-code 1 --quiet . 2>&1)
+      report "trivy" $? "$out"
+    else
+      report "trivy" 1 "checks bundle download failed after 3 attempts:\n$checks_out"
+    fi
   else
     report "trivy" 1 "vulnerability database download failed after 3 attempts:\n$db_out"
   fi
@@ -302,13 +308,20 @@ elif has_docker; then
   if db_out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
       -v "$TRIVY_CACHE":/trivy-cache "aquasec/trivy:$TRIVY_VERSION" \
       image --download-db-only --cache-dir /trivy-cache); then
-    out=$(docker run --rm --user "$(id -u):$(id -g)" \
-          -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
-          -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
-          --skip-db-update --scanners vuln,misconfig,secret \
-          --severity MEDIUM,HIGH,CRITICAL --skip-dirs '**/.terraform' \
-          --exit-code 1 --quiet . 2>&1)
-    report "trivy" $? "$out"
+    if checks_out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
+        -v "$TRIVY_CACHE":/trivy-cache "aquasec/trivy:$TRIVY_VERSION" \
+        config --cache-dir /trivy-cache --exit-code 0 --quiet \
+        /trivy-cache/checks-prefetch-input); then
+      out=$(docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
+            -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
+            --skip-db-update --skip-check-update --scanners vuln,misconfig,secret \
+            --severity MEDIUM,HIGH,CRITICAL --skip-dirs '**/.terraform' \
+            --exit-code 1 --quiet . 2>&1)
+      report "trivy" $? "$out"
+    else
+      report "trivy" 1 "checks bundle download failed after 3 attempts:\n$checks_out"
+    fi
   else
     report "trivy" 1 "vulnerability database download failed after 3 attempts:\n$db_out"
   fi
