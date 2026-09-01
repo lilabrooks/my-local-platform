@@ -16,6 +16,8 @@ REPO_SLUG="${REPO_SLUG:-lilabrooks/my-local-platform}"
 KEY_PATH="${KEY_PATH:-$HOME/.ssh/argocd_${REPO_SLUG##*/}}"
 NAMESPACE=argocd
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 command -v gh >/dev/null || { echo "gh is required" >&2; exit 1; }
@@ -52,7 +54,13 @@ kubectl create secret generic "repo-${REPO_SLUG##*/}" \
 
 say "pointing the Applications at the SSH URL"
 SSH_URL="git@github.com:${REPO_SLUG}.git"
-for f in k8s/argocd/project.yaml k8s/argocd/root-app.yaml; do
+# Keep the upgrade order in install.sh: create the root project, move the root
+# app, then narrow the workload and default projects.
+for f in \
+  "$HERE/root-project.yaml" \
+  "$HERE/root-app.yaml" \
+  "$HERE/project.yaml" \
+  "$HERE/default-project.yaml"; do
   sed "s|__REPO_URL__|${SSH_URL}|g" "$f" | kubectl apply -f - >/dev/null
 done
 

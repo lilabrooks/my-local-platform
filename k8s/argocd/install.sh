@@ -4,8 +4,11 @@
 # Idempotent. Safe to re-run after changing REPO_URL.
 set -euo pipefail
 
-ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.1}"
-REPO_URL="${REPO_URL:-https://github.com/lilabrooks/my-local-platform}"
+# The AppProject boundary below depends on the cluster-resource name filter
+# added in ArgoCD 3.3. Keep this fixed, rather than allowing an environment
+# override to install an older CRD that accepts the field but cannot enforce it.
+readonly ARGOCD_VERSION="v3.5.1"
+REPO_URL="${REPO_URL:-git@github.com:lilabrooks/my-local-platform.git}"
 NAMESPACE=argocd
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,10 +42,15 @@ for deploy in argocd-repo-server argocd-server argocd-applicationset-controller 
 done
 kubectl rollout status -n "$NAMESPACE" statefulset/argocd-application-controller --timeout=300s
 
-say "applying AppProject and root Application (repo: $REPO_URL)"
+say "applying scoped AppProjects and root Application (repo: $REPO_URL)"
 # The manifests carry a placeholder so a fork can point them elsewhere without
-# editing tracked files.
-for f in "$HERE/project.yaml" "$HERE/root-app.yaml"; do
+# editing tracked files. This order keeps an existing root app valid while its
+# project moves, then narrows the workload and default projects.
+for f in \
+  "$HERE/root-project.yaml" \
+  "$HERE/root-app.yaml" \
+  "$HERE/project.yaml" \
+  "$HERE/default-project.yaml"; do
   sed "s|__REPO_URL__|${REPO_URL}|g" "$f" | kubectl apply -f - >/dev/null
 done
 

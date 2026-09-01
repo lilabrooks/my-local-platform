@@ -36,6 +36,11 @@ The `AppProject` restricts source repos and destination namespaces. ArgoCD's
 `default` project permits any repo to deploy anything anywhere, which is a
 strange default to inherit for a repository intended as a reference.
 
+> **Security-boundary amendment, 2026-08-31.**
+> [ADR 0009](0009-separate-argocd-control-and-workload-projects.md) splits the
+> root and workload permissions into `mlp-root` and `mlp`, disables the
+> built-in `default` project, and adds repository tests for the boundary.
+
 ## Consequences
 
 **The GitOps loop needs a reachable git remote.** ArgoCD pulls from a URL; it

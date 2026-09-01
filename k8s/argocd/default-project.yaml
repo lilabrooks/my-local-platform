@@ -1,0 +1,18 @@
+# ArgoCD creates this project with unrestricted permissions. Keep it present but
+# unusable so an Application cannot bypass the repository's scoped projects by
+# naming `default`.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  description: Disabled; applications must use a scoped project
+  sourceRepos: []
+  sourceNamespaces: []
+  destinations: []
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: "*"
+      kind: "*"

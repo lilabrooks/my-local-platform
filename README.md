@@ -40,7 +40,7 @@ services/
   relay/        webhook delivery service: ingest to Kafka, deliver with retries
   sink/         subscriber relay delivers to, deliberately slow or failing
 k8s/
-  argocd/       ArgoCD install, AppProject, root Application
+  argocd/       ArgoCD install, scoped AppProjects, root Application
   apps/         one Application per workload (app-of-apps)
   manifests/    what those Applications point at
 infra/terraform/
@@ -76,7 +76,7 @@ count, delivery latency, and the outcomes behind both. Details in the
 
 ## Design decisions
 
-Eight choices shape this repository, each recorded with the evidence behind it:
+Nine choices shape this repository, each recorded with the evidence behind it:
 
 - **[Local-first, ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)** —
   an always-on version of this stack runs ~$150-250/month on a personal
@@ -102,6 +102,9 @@ Eight choices shape this repository, each recorded with the evidence behind it:
   the autoscaling demo's argument is a picture, so the thing that draws it has
   to live where the pods do. Amends ADR 0005, which had kept telemetry out of
   the cluster on purpose.
+- **[Separate ArgoCD control and workload projects](docs/adr/0009-separate-argocd-control-and-workload-projects.md)**:
+  the root may create child Applications, workloads stay inside `mlp`, and the
+  built-in `default` project has no permissions.
 
 The Kafka one covers `relay`, the first application — see
 **[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
@@ -137,6 +140,10 @@ Applications at the SSH URL. A public remote can use HTTPS without credentials.
 Keep the tracked Application URLs and `REPO_URL` consistent with that choice.
 `make k8s-apply-local` applies the same manifests directly, without git.
 **[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the details.
+
+The root Application uses `mlp-root`, which can create only Application objects
+inside `argocd`. Child Applications use `mlp`, which is confined to namespace
+`mlp`. ArgoCD's built-in `default` project is disabled.
 
 ## Real AWS
 

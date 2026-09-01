@@ -243,7 +243,7 @@ MINIKUBE_PROFILE ?= mlp
 # Memory cannot be changed on an existing cluster with the docker driver:
 # `make k8s-delete` first, then `make k8s-up`.
 MINIKUBE_MEMORY  ?= 6g
-REPO_URL         ?= https://github.com/lilabrooks/my-local-platform
+REPO_URL         ?= git@github.com:lilabrooks/my-local-platform.git
 
 .PHONY: k8s-up
 k8s-up: ## Start the local Kubernetes cluster (minikube profile 'mlp')

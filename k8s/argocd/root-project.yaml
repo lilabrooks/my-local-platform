@@ -1,0 +1,22 @@
+# The root Application reads k8s/apps/ and creates child Applications. It has
+# no authority to deploy workloads or cluster-scoped resources itself.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: mlp-root
+  namespace: argocd
+spec:
+  description: my-local-platform app-of-apps control plane
+
+  sourceRepos:
+    - __REPO_URL__
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+
+  clusterResourceWhitelist: []
+
+  namespaceResourceWhitelist:
+    - group: argoproj.io
+      kind: Application

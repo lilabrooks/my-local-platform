@@ -148,6 +148,14 @@ proves a port is listening, which is a different claim.
 | `k8s/argocd/` | `install.sh`, which substitutes | works |
 | `k8s/apps/` | ArgoCD, read from git | must be a real URL |
 
+**ArgoCD control and workload permissions stay separate.** The root Application
+uses `mlp-root`, which can create only `Application` objects in `argocd`.
+Children use `mlp`, which can deploy only into namespace `mlp`; the built-in
+`default` project is disabled. `install.sh` and `repo-creds.sh` apply the root
+project, root Application, workload project, and default project in that order
+so an existing cluster can migrate without stranding the root Application.
+`k8s/validate` tests the boundary. See ADR 0009.
+
 **Metrics libraries are a per-service call, not a repository default.**
 `services/relay` uses `prometheus/client_golang` because it needs a latency
 histogram, labelled counters and per-partition gauges — bucket arithmetic and
