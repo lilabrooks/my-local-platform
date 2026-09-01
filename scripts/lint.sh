@@ -32,8 +32,8 @@ report() {
 # every skip into a failure, except the names in LINT_SKIP_OK, so an intended
 # exception is declared in the workflow rather than hidden in the output.
 skip() {
-  local name="$1" why="$2"
-  case ",${LINT_SKIP_OK:-}," in *",$name,"*) allowed=1 ;; *) allowed= ;; esac
+  local name="$1" why="$2" allowed=
+  case ",${LINT_SKIP_OK:-}," in *",$name,"*) allowed=1 ;; esac
   if [ -n "${LINT_STRICT:-}" ] && [ -z "$allowed" ]; then
     printf '  %s  %s -- %s\n' "$(red FAIL)" "$name" \
       "$why (LINT_STRICT: a linter that did not run is not a linter that passed)"
@@ -41,6 +41,10 @@ skip() {
     return
   fi
   printf '  %s  %s -- %s\n' "$(amber SKIP)" "$name" "$why"; SKIP=$((SKIP + 1))
+}
+
+skip_allowed() {
+  case ",${LINT_SKIP_OK:-}," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 
 # retry_net <attempts> <command...> -- for steps that reach the network.
@@ -246,7 +250,9 @@ fi
 go_fail=0 go_out=""
 go_mods=$(find . -name go.mod -not -path './*/.terraform/*' -not -path './*/node_modules/*' \
           -exec dirname {} \; | sed 's|^\./||' | sort)
-if has golangci-lint && \
+if skip_allowed "golangci-lint"; then
+  skip "golangci-lint" "covered by the dedicated CI job"
+elif has golangci-lint && \
    pinned "$GOLANGCI_VERSION" "$(golangci-lint --version 2>&1)"; then
   for mod in $go_mods; do
     out=$(cd "$mod" && golangci-lint run --config ../../.golangci.yml --timeout 5m 2>&1) || {
@@ -281,19 +287,31 @@ fi
 TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache"
 mkdir -p "$TRIVY_CACHE"
 if has trivy && pinned "$TRIVY_VERSION" "$(trivy --version 2>&1 | head -1)"; then
-  out=$(retry_net 3 trivy fs --scanners vuln,misconfig,secret \
-        --cache-dir "$TRIVY_CACHE" \
-        --severity MEDIUM,HIGH,CRITICAL \
-        --skip-dirs '**/.terraform' \
-        --exit-code 1 --quiet . 2>&1)
-  report "trivy" $? "$out"
+  if db_out=$(retry_net 3 trivy image --download-db-only \
+      --cache-dir "$TRIVY_CACHE"); then
+    out=$(trivy fs --scanners vuln,misconfig,secret \
+          --cache-dir "$TRIVY_CACHE" --skip-db-update \
+          --severity MEDIUM,HIGH,CRITICAL \
+          --skip-dirs '**/.terraform' \
+          --exit-code 1 --quiet . 2>&1)
+    report "trivy" $? "$out"
+  else
+    report "trivy" 1 "vulnerability database download failed after 3 attempts:\n$db_out"
+  fi
 elif has_docker; then
-  out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
-        -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
-        -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
-        --scanners vuln,misconfig,secret --severity MEDIUM,HIGH,CRITICAL \
-        --skip-dirs '**/.terraform' --exit-code 1 --quiet . 2>&1)
-  report "trivy" $? "$out"
+  if db_out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
+      -v "$TRIVY_CACHE":/trivy-cache "aquasec/trivy:$TRIVY_VERSION" \
+      image --download-db-only --cache-dir /trivy-cache); then
+    out=$(docker run --rm --user "$(id -u):$(id -g)" \
+          -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
+          -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
+          --skip-db-update --scanners vuln,misconfig,secret \
+          --severity MEDIUM,HIGH,CRITICAL --skip-dirs '**/.terraform' \
+          --exit-code 1 --quiet . 2>&1)
+    report "trivy" $? "$out"
+  else
+    report "trivy" 1 "vulnerability database download failed after 3 attempts:\n$db_out"
+  fi
 else
   skip "trivy" "needs docker or trivy $TRIVY_VERSION"
 fi

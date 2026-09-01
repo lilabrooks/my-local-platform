@@ -24,8 +24,8 @@ updates:
         patterns: ["*"]
 
   # Multi-stage service images live outside the Compose directory. Without a
-  # Docker ecosystem entry, the pinned Go builder and Alpine base digests never
-  # receive update proposals.
+  # Docker ecosystem entry, the pinned Go builder tags never receive update
+  # proposals. The final service stages use scratch and have no base to update.
   - package-ecosystem: docker
     directories:
       - "/services/echo"
