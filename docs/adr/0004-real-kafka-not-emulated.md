@@ -14,6 +14,11 @@ covers, floci backs MSK with Redpanda and Amazon MQ with `rabbitmq:3-management`
 Run Apache Kafka (`apache/kafka:4.1.0`, KRaft mode, no ZooKeeper) and RabbitMQ
 (`rabbitmq:4.1-management`) as first-class containers instead.
 
+> **Version update, 2026-08-31.** Those were the pins when this decision was
+> made. The current Compose stack uses Kafka `4.3.1` and RabbitMQ
+> `4.3-management`; Dependabot covers the Compose images. The decision to run
+> the upstream brokers directly is unchanged.
+
 ## Consequences
 
 The stated goal is learning Kafka and RabbitMQ, not learning the MSK and Amazon

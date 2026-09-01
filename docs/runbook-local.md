@@ -174,9 +174,9 @@ floci problem and is not.
 
 ## Running the smoke checks against real AWS
 
-The same binary works against the real account. For a new account, create the
-remote-state bucket once with `make aws-bootstrap`, then create the cheap tier
-through the guarded Make target:
+The same binary works against the real account. Bootstrap remote state once as
+described in [costs.md](costs.md#remote-state-comes-first), then create the
+cheap tier through the guarded Make target:
 
 ```bash
 make aws-up                           # creates the cheap tier, ~$0
@@ -214,8 +214,10 @@ real email. `make aws-down` destroys the dev stack when finished.
 `make seed`. This happens after `docker compose down -v`, which deletes the
 floci volume.
 
-**Kafka check is slow (~10s).** Expected. The consumer uses a fresh group id
-each run and waits out the initial group-join.
+**Kafka check is slow (~10s).** That is the old implementation. The current
+check uses the partition and offset returned by its write and usually finishes
+in about 200ms, independent of topic size. Confirm `make smoke` is running the
+current source and inspect broker latency if it regresses.
 
 **Grafana shows no traces.** Three separate causes, in order of likelihood:
 
@@ -236,12 +238,17 @@ each run and waits out the initial group-join.
    `curl http://localhost:3200/ready`.
 
 **`otel-collector` container exits immediately.** Almost always a config error;
-`docker logs mlp-otel-collector` states it plainly. If you enabled the Datadog
-config without `DD_API_KEY`, it exits with
+`docker logs mlp-otel-collector` states it plainly. The Datadog path requires
+`OTEL_COLLECTOR_CONFIG=config.datadog.yaml` and `DD_API_KEY` in `.env`. If the
+config is selected without the key, it exits with
 `exporters::datadog: api.key is not set`.
 
 **Ports already in use.** This stack claims 3000, 3200, 4317, 4318, 4566, 5432,
-5672, 8080, 8889, 9090, 9092 and 15672.
+5672, 8080, 8082, 8083, 8084, 8889, 9090, 9092, 9094 and 15672. Everything
+except Postgres `5432` and Kafka's cluster listener `9094` binds to loopback.
+Those two remain on all host interfaces because minikube pods reach them
+through `host.minikube.internal`; do not expose this development stack on an
+untrusted network.
 
 ### Grafana exits with "Datasource provisioning error: data source not found"
 

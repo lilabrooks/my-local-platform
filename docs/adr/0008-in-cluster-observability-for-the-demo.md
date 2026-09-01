@@ -255,6 +255,12 @@ cluster costs ~1.8 GB on top of a ~1.6 GB stack. `make k8s-up` pins
 `--memory=3g` and will need raising. The new figure must be measured, not
 estimated.
 
+> **Measured amendment, 2026-08-27.** The run below established a 3.64 GiB
+> peak under load and showed the supporting stack could not run within 3 GiB.
+> `MINIKUBE_MEMORY` is now 6g, and the local runbook carries the measured
+> progression. The paragraph above is the predicted consequence that prompted
+> the measurement, not the current configuration.
+
 **Another pinned version to maintain**, alongside `KEDA_VERSION` and the
 Kubernetes version.
 
@@ -454,11 +460,11 @@ name assumed throughout this record.
 
 ## Rollback
 
-Uninstall the chart, revert the `ServiceMonitor` and ConfigMap, restore
-`--memory=3g`, and the cluster is where it is today. Nothing in relay or the
-sink changes: #22's `/metrics` endpoints are useful with or without this, and
-the compose dashboard is untouched. Cheap to reverse -- what has been spent is
-the decision, not the code.
+Uninstall the chart and revert the `ServiceMonitor` and ConfigMap. Keep the 6g
+profile cap; 3g is a recorded failure point, not a safe rollback target.
+Nothing in relay or the sink changes: #22's `/metrics` endpoints are useful
+with or without this, and the compose dashboard is untouched. The code remains
+cheap to reverse; what has been spent is the decision.
 
 ## Revisit when
 

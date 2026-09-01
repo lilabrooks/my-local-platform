@@ -109,7 +109,7 @@ module "eks" {
   # applied automatically with no approval step. Check before changing:
   #   aws eks describe-cluster-versions \
   #     --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
-  # 1.35 is in standard support until 2027-03-26.
+  # 1.35 is in standard support until 2027-03-27.
   kubernetes_version = "1.35"
 
   vpc_id     = module.vpc[0].vpc_id

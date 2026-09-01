@@ -27,6 +27,11 @@ A separate minikube profile matters: there was already a 3-node `minikube`
 profile on this machine, and adopting it would have meant installing ArgoCD
 into someone else's cluster. `mlp` is single-node, 4 CPU, 3 GB.
 
+> **Capacity amendment, 2026-08-27.** The dedicated profile and CPU count
+> remain the decision. Its memory cap is now 6 GiB after the M2 stack failed at
+> 3 GiB under control-plane pressure. ADR 0008 records the measured failure and
+> the replacement cap.
+
 The `AppProject` restricts source repos and destination namespaces. ArgoCD's
 `default` project permits any repo to deploy anything anywhere, which is a
 strange default to inherit for a repository intended as a reference.
@@ -59,8 +64,9 @@ fails, which is worse than an honest gap.
 
 > **Amended 2026-08-26 by
 > [ADR 0008](0008-in-cluster-observability-for-the-demo.md), accepted.** This
-> paragraph, and only this paragraph, no longer holds: Prometheus and Grafana
-> now run in the cluster, installed by `make monitoring-install`.
+> paragraph no longer holds: Prometheus and Grafana now run in the cluster,
+> installed by `make monitoring-install`. The 2026-08-27 capacity amendment
+> above is the other change; the rest of ADR 0005 stands.
 >
 > The reasoning above was not wrong for its time. It held while the only
 > workload was `echo` and there was nothing to look at, and what it was
@@ -68,7 +74,7 @@ fails, which is worse than an honest gap.
 > right instinct. ADR 0008 inherits it: the chart's `serviceMonitorSelector`
 > drops an unlabelled `ServiceMonitor` without an error, so the demo asserts
 > the panel's own query before it starts rather than trusting that the pieces
-> exist. The rest of ADR 0005 stands.
+> exist.
 
 ## Verification
 

@@ -156,11 +156,11 @@ Run twice independently: an external review pass measured 1.002/1.000s baseline
 and 3.422/4.412s behind the blocker. The absolute numbers differ with retry
 jitter; the shape — both tenants blocked, neither isolated — is the same.
 
-The committed script, with two members and partition assignment proved at
-runtime, is owed by
-[#73](https://github.com/lilabrooks/my-local-platform/issues/73). These figures
-establish the one-member case that this section's correction rests on; they do
-not replace that demonstration.
+The two-member script requested by
+[#73](https://github.com/lilabrooks/my-local-platform/issues/73) is now
+committed and its partition assignment is read from the broker at runtime. Its
+measured 77x separation is in the Verification section below. The figures here
+remain the one-member case that motivated that demonstration.
 
 This is not a caveat invented here. It is the documented failure mode of this
 design, and the canonical writeup is Segment's

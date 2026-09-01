@@ -34,10 +34,10 @@ make k8s-apply-local
 make argocd-install REPO_URL=https://github.com/<you>/my-local-platform
 ```
 
-### Private repositories
+### When the repository is private
 
-This repository is private, so ArgoCD cannot clone it anonymously. Without
-credentials the applications report:
+A private remote cannot be cloned anonymously. Without credentials the
+applications report:
 
 ```text
 failed to list refs: authentication required: Repository not found.
@@ -61,6 +61,10 @@ a compromised workload to rewrite your git history.
 
 The private key is written to `~/.ssh/` and into the cluster. It never enters
 the repository.
+
+A public remote needs no deploy key when every Application and `REPO_URL` use
+its HTTPS URL. Change those tracked URLs when repository visibility changes;
+leaving an SSH URL in one child Application still requires SSH credentials.
 
 ## The UI
 
@@ -192,7 +196,7 @@ dashboard and look identical.
 | Grafana | <http://localhost:3000> | <http://localhost:3001> (`make monitoring-ui`) |
 | Started by | `make up-obs` | `make monitoring-install` |
 | Scrapes | the compose relay and sink | the pods in `mlp` |
-| Login | anonymous admin | anonymous admin |
+| Login | anonymous viewer | anonymous admin |
 | Dashboard | `/d/relay-delivery` | `/d/relay-delivery` |
 
 **Same uid, same title, same panels, different source.** Looking at 3000 while
@@ -236,9 +240,12 @@ relay-deliver   /172.18.0.2     6      <- the compose container
 relay-deliver   /172.18.0.1     6      <- the pod
 ```
 
-Each event is still delivered exactly once, but by whichever consumer owns its
-partition -- and the two deliver to different sinks. Half the traffic lands
-somewhere you are not looking. `make smoke` fails with
+Each partition is assigned to one group member at a time, so in steady state a
+record is handled by whichever side owns that partition. The delivery contract
+is still at-least-once: a crash after the webhook POST and before the offset
+commit can redeliver the same `webhook-id`. The two sides deliver to different
+sinks, so half the traffic lands somewhere you are not looking. `make smoke`
+fails with
 
 ```text
 FAIL  relay  45000ms  event evt_... was not delivered to the sink
@@ -281,9 +288,10 @@ delete the Application with `--cascade=orphan`.
 make k8s-validate
 ```
 
-Renders the kustomization and asserts four invariants: the Deployment selector
-stays free of mutable labels, pods still carry them, the Service selector
-matches the pods it is meant to reach, and the container has both probes.
+Renders the kustomizations and checks selector immutability, pod and Service
+labels, probes, local image policy, the delivery deadline and shutdown grace
+period, KEDA's replica ceiling against Kafka's partition count, and the shared
+dashboard contract. These are repository-specific tests, not only YAML syntax.
 
 Always run with `-count=1` (the make target does). These tests read manifests
 via `kubectl kustomize`, and Go's test cache does not track those files — plain
