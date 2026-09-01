@@ -61,7 +61,7 @@ services:
       - floci-data:/data
 
   floci:
-    image: floci/floci:1.7.0
+    image: floci/floci:2.0.1
     container_name: mlp-floci
     profiles: [core, all]
     ports:
