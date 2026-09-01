@@ -16,6 +16,8 @@ make aws-bootstrap
 make aws-init
 ```
 
+Terraform 1.10 or newer uses the S3 backend's native lockfile here.
+
 If this checkout previously ran `make aws-init` with DynamoDB locking, update
 its saved backend configuration once:
 
@@ -25,6 +27,9 @@ make aws-init AWS_INIT_ARGS=-reconfigure
 
 The bucket, key and region stay the same, so this operation updates local
 backend metadata without moving state.
+
+An older bootstrap state may still track the unused `mlp-tfstate-lock`
+DynamoDB table. The next reviewed bootstrap apply will propose deleting it.
 
 An older checkout may instead have ignored local dev state. Inspect it before
 moving anything. If it contains resources that must be preserved, migrate it
@@ -117,7 +122,7 @@ aws resourcegroupstaggingapi get-resources \
 ```
 
 Every taggable dev-stack resource carries `Project=my-local-platform` and
-`Ephemeral=true`. The bootstrap bucket and lock table carry the project tag and
+`Ephemeral=true`. The bootstrap bucket carries the project tag and
 `Stack=bootstrap` instead. The query is the first inventory check, not a proof
 that nothing else exists: AWS-created EKS log groups are outside Terraform's
 tagged resource set.
