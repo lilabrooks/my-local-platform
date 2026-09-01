@@ -5,7 +5,30 @@
 
 SHELL := /bin/bash
 COMPOSE := docker compose -f local/docker-compose.yml
+
+# Docker Compose reads .env itself. Include the same file as Make variables so
+# settings used by recipes, such as AWS_PROFILE_NAME, do not silently diverge.
+# Recipes do not inherit these values unless they explicitly source or export
+# them; that keeps local emulator credentials away from real-AWS commands.
+ifneq (,$(wildcard .env))
+include .env
+endif
+
 AWS_PROFILE_NAME ?= aws-public-change-feed
+AWS_DEFAULT_REGION ?= us-east-1
+AWS_INIT_ARGS ?= -input=false
+AWS_REAL_ENV := env \
+	-u AWS_ENDPOINT_URL \
+	-u AWS_ENDPOINT_URL_DYNAMODB \
+	-u AWS_ENDPOINT_URL_S3 \
+	-u AWS_ENDPOINT_URL_STS \
+	-u AWS_ACCESS_KEY_ID \
+	-u AWS_SECRET_ACCESS_KEY \
+	-u AWS_SESSION_TOKEN \
+	-u AWS_DEFAULT_PROFILE \
+	-u AWS_ROLE_ARN \
+	-u AWS_WEB_IDENTITY_TOKEN_FILE \
+	AWS_PROFILE="$(AWS_PROFILE_NAME)"
 
 .DEFAULT_GOAL := help
 
@@ -62,6 +85,7 @@ up-obs: ## Start OTel collector, Prometheus, Tempo, Grafana
 	$(COMPOSE) --profile obs up -d
 
 .PHONY: seed
+seed: export RELAY_SIGNING_SECRET := $(RELAY_SIGNING_SECRET)
 seed: ## Create local AWS resources and Kafka topics (idempotent)
 	./local/bootstrap/seed.sh
 	./local/bootstrap/kafka-topics.sh
@@ -93,7 +117,7 @@ urls: ## Print the local endpoints
 	@echo "Postgres        localhost:5432           (platform/platform)"
 	@echo "OTLP gRPC       localhost:4317"
 	@echo "Prometheus      http://localhost:9090"
-	@echo "Grafana         http://localhost:3000    (anonymous admin)"
+	@echo "Grafana         http://localhost:3000    (anonymous viewer)"
 	@echo "relay dashboard http://localhost:3000/d/relay-delivery"
 	@echo "relay ingest    http://localhost:8082    (POST /v1/events, /metrics; apps profile)"
 	@echo "relay deliver   http://localhost:8083    (/readyz, /metrics; apps profile)"
@@ -105,7 +129,8 @@ urls: ## Print the local endpoints
 
 .PHONY: smoke
 smoke: ## Run the end-to-end smoke check against the local stack
-	cd services/smoke && go run ./cmd/smoke
+	@if [ -f .env ]; then set -a; source ./.env; set +a; fi; \
+	  cd services/smoke && go run ./cmd/smoke
 
 .PHONY: relay-replay
 relay-replay: ## Redeliver relay events from the last SINCE (default 1h; or SINCE=earliest)
@@ -384,32 +409,48 @@ k8s-status: ## Show ArgoCD applications and the mlp namespace
 
 .PHONY: aws-login
 aws-login: ## Refresh the AWS SSO session
-	aws sso login --profile $(AWS_PROFILE_NAME)
+	$(AWS_REAL_ENV) aws sso login
 
 .PHONY: aws-whoami
 aws-whoami: ## Show the active AWS identity
-	aws sts get-caller-identity --profile $(AWS_PROFILE_NAME)
+	$(AWS_REAL_ENV) aws sts get-caller-identity
+
+.PHONY: aws-bootstrap
+aws-bootstrap: aws-whoami ## Create the one-time S3 state backend and lock table
+	@echo "This creates persistent remote-state resources in the selected AWS account."
+	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
+	cd infra/terraform/bootstrap && $(AWS_REAL_ENV) terraform init -input=false && \
+	  $(AWS_REAL_ENV) terraform apply
+
+.PHONY: aws-init
+aws-init: aws-whoami ## Initialize the remote state backend for the dev environment
+	@mlp_account_id="$$($(AWS_REAL_ENV) aws sts get-caller-identity \
+	  --query Account --output text)"; \
+	  cd infra/terraform/envs/dev && \
+	  $(AWS_REAL_ENV) terraform init $(AWS_INIT_ARGS) \
+	    -backend-config="bucket=mlp-tfstate-$$mlp_account_id" \
+	    -backend-config="key=envs/dev/terraform.tfstate" \
+	    -backend-config="region=$(AWS_DEFAULT_REGION)" \
+	    -backend-config="dynamodb_table=mlp-tfstate-lock" \
+	    -backend-config="encrypt=true"
 
 .PHONY: aws-plan
-aws-plan: ## Terraform plan for the dev environment (free, read-only)
-	cd infra/terraform/envs/dev && terraform init -input=false && \
-	  AWS_PROFILE=$(AWS_PROFILE_NAME) terraform plan
+aws-plan: aws-init ## Terraform plan for the dev environment (free, read-only)
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform plan
 
 .PHONY: aws-up
-aws-up: ## Apply the dev environment to real AWS (INCURS COST)
+aws-up: aws-init ## Apply the dev environment to real AWS (INCURS COST)
 	@echo "This creates real, billable AWS resources. See docs/costs.md."
 	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
-	cd infra/terraform/envs/dev && terraform init -input=false && \
-	  AWS_PROFILE=$(AWS_PROFILE_NAME) terraform apply
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform apply
 
 .PHONY: aws-down
-aws-down: ## Destroy the dev environment (do this when you stop working)
-	cd infra/terraform/envs/dev && \
-	  AWS_PROFILE=$(AWS_PROFILE_NAME) terraform destroy
+aws-down: aws-init ## Destroy the dev environment (do this when you stop working)
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform destroy
 
 .PHONY: aws-cost
 aws-cost: ## Month-to-date spend on the account
-	@AWS_PROFILE=$(AWS_PROFILE_NAME) aws ce get-cost-and-usage \
+	@$(AWS_REAL_ENV) aws ce get-cost-and-usage \
 	  --time-period Start=$$(date -u +%Y-%m-01),End=$$(date -u -v+1d +%Y-%m-%d) \
 	  --granularity MONTHLY --metrics UnblendedCost \
 	  --query 'ResultsByTime[0].Total.UnblendedCost' --output table

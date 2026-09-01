@@ -1,6 +1,9 @@
 package platform
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestLoadUsesDefaultsWhenUnset(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL", "")
@@ -27,6 +30,36 @@ func TestLoadPrefersEnvironment(t *testing.T) {
 	}
 	if cfg.Bucket != "other-bucket" {
 		t.Errorf("Bucket = %q, want other-bucket", cfg.Bucket)
+	}
+}
+
+func TestEmptyRelayURLDisablesRelayCheck(t *testing.T) {
+	t.Setenv("RELAY_INGEST_URL", "")
+
+	if got := Load().RelayIngestURL; got != "" {
+		t.Errorf("RelayIngestURL = %q, want an explicit empty value to be preserved", got)
+	}
+}
+
+func TestUnsetRelayURLUsesLocalDefault(t *testing.T) {
+	old, wasSet := os.LookupEnv("RELAY_INGEST_URL")
+	if err := os.Unsetenv("RELAY_INGEST_URL"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			if err := os.Setenv("RELAY_INGEST_URL", old); err != nil {
+				t.Errorf("restore RELAY_INGEST_URL: %v", err)
+			}
+			return
+		}
+		if err := os.Unsetenv("RELAY_INGEST_URL"); err != nil {
+			t.Errorf("clear RELAY_INGEST_URL: %v", err)
+		}
+	})
+
+	if got := Load().RelayIngestURL; got != "http://localhost:8082" {
+		t.Errorf("RelayIngestURL = %q, want the local default", got)
 	}
 }
 

@@ -57,7 +57,8 @@ INSERT INTO relay_subscriptions (tenant_id, url, signing_secret) VALUES
     ('acme',   'http://sink:8081/hooks/ok',    :'secret'),
     ('acme',   'http://sink:8081/hooks/flaky', :'secret'),
     ('globex', 'http://sink:8081/hooks/ok',    :'secret')
-ON CONFLICT (tenant_id, url) DO NOTHING;
+ON CONFLICT (tenant_id, url) DO UPDATE
+SET signing_secret = EXCLUDED.signing_secret;
 
 -- Tenants for the autoscaling demo, one healthy subscriber each.
 --
@@ -75,15 +76,12 @@ ON CONFLICT (tenant_id, url) DO NOTHING;
 INSERT INTO relay_subscriptions (tenant_id, url, signing_secret)
 SELECT 'demo-' || to_char(n, 'FM00'), 'http://sink:8081/hooks/ok', :'secret'
 FROM generate_series(1, 16) AS n
-ON CONFLICT (tenant_id, url) DO NOTHING;
+ON CONFLICT (tenant_id, url) DO UPDATE
+SET signing_secret = EXCLUDED.signing_secret;
 SQL
 
 say "relay database ready"
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -c \
   'SELECT tenant_id, url, active FROM relay_subscriptions ORDER BY tenant_id, url'
 
-cat <<EOF
-
-  Subscriptions signed with: $RELAY_SIGNING_SECRET
-  The sink defaults to the same value. If you override one, override both.
-EOF
+say "subscription signing secret configured (value not printed)"
