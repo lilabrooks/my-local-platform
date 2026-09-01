@@ -2,8 +2,8 @@
 #
 # Split by cost, deliberately:
 #
-#   ALWAYS CREATED -- serverless, pay-per-request, ~$0/month when idle.
-#     S3, SNS, SQS, SES identity, ECR. Safe to leave standing.
+#   CHEAP TIER -- serverless, pay-per-request, ~$0/month when idle.
+#     S3, SNS, SQS and ECR are always created. SES is optional.
 #
 #   FLAG-GATED -- billed per hour whether or not you use them. Default false.
 #     enable_rds  ~$15/month   db.t4g.micro, single-AZ
@@ -12,7 +12,7 @@
 # `terraform destroy` when you finish a session. See docs/costs.md.
 
 terraform {
-  required_version = ">= 1.9"
+  required_version = ">= 1.10"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -20,16 +20,11 @@ terraform {
     }
   }
 
-  # Fill in after running the bootstrap stack, then `terraform init -migrate-state`.
-  # Left commented so a fresh clone can `plan` with local state.
-  #
-  # backend "s3" {
-  #   bucket       = "mlp-tfstate-<account-id>"
-  #   key          = "envs/dev/terraform.tfstate"
-  #   region       = "us-east-1"
-  #   dynamodb_table = "mlp-tfstate-lock"
-  #   encrypt      = true
-  # }
+  # `make aws-init` supplies the account-scoped bucket and the remaining
+  # settings created by infra/terraform/bootstrap. Keeping the backend active
+  # prevents a real apply from quietly falling back to ignored local state.
+  # Migrate older local state with `make aws-init AWS_INIT_ARGS=-migrate-state`.
+  backend "s3" {}
 }
 
 provider "aws" {

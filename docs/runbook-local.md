@@ -79,8 +79,8 @@ Memory cannot be changed on a running cluster with the docker driver:
 | Collector metrics | localhost:8889 | none |
 | Prometheus | http://localhost:9090 | none |
 | Tempo | http://localhost:3200 | none |
-| Grafana | http://localhost:3000 | anonymous, admin role |
-| relay dashboard | http://localhost:3000/d/relay-delivery | anonymous, admin role |
+| Grafana | http://localhost:3000 | anonymous, viewer role |
+| relay dashboard | http://localhost:3000/d/relay-delivery | anonymous, viewer role |
 
 ## Metrics and the relay dashboard
 
@@ -174,21 +174,30 @@ floci problem and is not.
 
 ## Running the smoke checks against real AWS
 
-The same binary works against the real account. Only environment changes:
+The same binary works against the real account. For a new account, create the
+remote-state bucket once with `make aws-bootstrap`, then create the cheap tier
+through the guarded Make target:
 
 ```bash
-cd infra/terraform/envs/dev
-terraform apply                       # creates the cheap tier, ~$0
-BUCKET=$(terraform output -raw bucket)
+make aws-up                           # creates the cheap tier, ~$0
 
-cd ../../../services/smoke
-AWS_PROFILE=aws-public-change-feed \
-AWS_DEFAULT_REGION=us-east-1 \
-MLP_USE_REAL_AWS=1 \
-MLP_BUCKET="$BUCKET" \
-MLP_TOPIC=mlp-dev-events \
-MLP_QUEUE=mlp-dev-events \
-  go run ./cmd/smoke
+unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_DYNAMODB AWS_ENDPOINT_URL_S3
+unset AWS_ENDPOINT_URL_STS AWS_ACCESS_KEY_ID
+unset AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+export AWS_PROFILE=aws-public-change-feed
+BUCKET=$(terraform -chdir=infra/terraform/envs/dev output -raw bucket)
+
+(
+  cd services/smoke
+  AWS_DEFAULT_REGION=us-east-1 \
+  MLP_USE_REAL_AWS=1 \
+  MLP_BUCKET="$BUCKET" \
+  MLP_TOPIC=mlp-dev-events \
+  MLP_QUEUE=mlp-dev-events \
+    go run ./cmd/smoke
+)
+
+make aws-down
 ```
 
 `MLP_USE_REAL_AWS=1` is the **only** way to reach a live account. An empty or
@@ -196,8 +205,8 @@ unset `AWS_ENDPOINT_URL` still means "local", so a stray
 `export AWS_ENDPOINT_URL=` cannot silently redirect these checks at production.
 
 Expect S3 and SNS-to-SQS to take roughly a second each rather than tens of
-milliseconds. SES is skipped on purpose — a smoke check should not send real
-email. Run `terraform destroy` when finished.
+milliseconds. SES is skipped on purpose because a smoke check should not send
+real email. `make aws-down` destroys the dev stack when finished.
 
 ## Troubleshooting
 
@@ -221,7 +230,7 @@ each run and waits out the initial group-join.
 
 2. **The collector's connection to Tempo goes stale if Tempo restarts.** The
    collector logs `no children to pick from` and retries forever.
-   `docker compose -f local/docker-compose.yml --profile obs restart otel-collector`.
+   `docker compose --env-file .env -f local/docker-compose.yml --profile obs restart otel-collector`.
 
 3. Tempo takes ~5-20 seconds after start to report ready. Check
    `curl http://localhost:3200/ready`.
@@ -247,7 +256,8 @@ makes it idempotent against either kind of volume. If a stale volume still gets
 in the way:
 
 ```bash
-docker compose -f local/docker-compose.yml rm -sf grafana && docker volume rm mlp_grafana-data
+docker compose --env-file .env -f local/docker-compose.yml rm -sf grafana
+docker volume rm mlp_grafana-data
 ```
 
 Nothing is lost. Every dashboard and datasource here is provisioned from files.

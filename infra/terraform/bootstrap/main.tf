@@ -4,15 +4,14 @@
 #   cd infra/terraform/bootstrap
 #   AWS_PROFILE=aws-public-change-feed terraform init && terraform apply
 #
-# Cost: effectively zero. An empty S3 bucket and an on-demand DynamoDB table
-# with no traffic bill under $0.01/month.
+# Cost: effectively zero. An empty S3 bucket bills under $0.01/month.
 #
 # This stack keeps its own state as a LOCAL file (bootstrap.tfstate), which is
 # committed to .gitignore. That is deliberate -- it cannot store its state in
 # the bucket it is creating.
 
 terraform {
-  required_version = ">= 1.9"
+  required_version = ">= 1.10"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -82,20 +81,4 @@ resource "aws_s3_bucket_public_access_block" "state" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
-}
-
-# AWS-0024 wants point-in-time recovery. Accepted, not fixed: PITR protects
-# data worth restoring, and this table holds transient lock records that are
-# meaningless the moment they are released. There is nothing a restore would
-# recover.
-#trivy:ignore:AWS-0024
-resource "aws_dynamodb_table" "lock" {
-  name         = "mlp-tfstate-lock"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "LockID"
-
-  attribute {
-    name = "LockID"
-    type = "S"
-  }
 }

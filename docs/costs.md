@@ -6,6 +6,37 @@ Prices are `us-east-1` list rates as of August 2026 and exclude data transfer.
 Treat them as the right order of magnitude, not a quote. The authority on what
 you are actually spending is `make aws-cost`.
 
+## Remote state comes first
+
+The dev stack stores state in the account-scoped S3 bucket created by the
+bootstrap stack. Create that backend once before the first dev plan:
+
+```bash
+make aws-bootstrap
+make aws-init
+```
+
+If this checkout previously ran `make aws-init` with DynamoDB locking, update
+its saved backend configuration once:
+
+```bash
+make aws-init AWS_INIT_ARGS=-reconfigure
+```
+
+The bucket, key and region stay the same, so this operation updates local
+backend metadata without moving state.
+
+An older checkout may instead have ignored local dev state. Inspect it before
+moving anything. If it contains resources that must be preserved, migrate it
+interactively with the same backend configuration:
+
+```bash
+make aws-init AWS_INIT_ARGS=-migrate-state
+```
+
+Do not use `-reconfigure` when local state contains resources; it selects the
+remote backend without copying the existing state.
+
 ## The cheap tier — created by default
 
 | Resource | Billing | Idle cost |
@@ -61,8 +92,20 @@ Both flags default to `false`.
 
 ```bash
 make aws-cost    # month-to-date spend
-make aws-down    # destroy the dev environment
+make aws-down    # destroy through the backend initialized by make aws-init
 ```
+
+`make aws-down` deliberately does not reconfigure state before a destructive
+operation. In a fresh checkout, run `make aws-init` first. After each successful
+apply or destroy, Make saves a mode-0600 recovery copy at
+`infra/terraform/envs/dev/.terraform/mlp-last-known.tfstate`; the versioned S3
+object remains the authority.
+
+If the state bucket is unavailable, stop. Do not run destroy with a local or
+disabled backend: Terraform would no longer know which remote resources it
+owns. Restore the versioned S3 state first. The private recovery copy is there
+to inspect or restore deliberately, not as an automatic fallback that might be
+stale.
 
 Find anything this repo left running:
 

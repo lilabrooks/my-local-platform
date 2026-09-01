@@ -138,25 +138,22 @@ jobs:
           for image in $images; do
             retry docker pull "$image" || { echo "could not pull $image" >&2; exit 1; }
           done
-          retry docker compose -f local/docker-compose.yml \
+          retry docker compose --env-file .env.example -f local/docker-compose.yml \
             --profile core --profile messaging --profile apps \
             pull --ignore-buildable ||
             { echo "could not pull the compose images" >&2; exit 1; }
 
       - name: Start core and messaging
         run: |
-          docker compose -f local/docker-compose.yml \
+          docker compose --env-file .env.example -f local/docker-compose.yml \
             --profile core --profile messaging up -d --wait --wait-timeout 300
 
       - name: Seed AWS resources, Kafka topics and relay subscriptions
-        run: |
-          ./local/bootstrap/seed.sh
-          ./local/bootstrap/kafka-topics.sh
-          ./local/bootstrap/relay-db.sh
+        run: make seed ENV_FILE=.env.example
 
       - name: Start relay and the sink
         run: |
-          docker compose -f local/docker-compose.yml \
+          docker compose --env-file .env.example -f local/docker-compose.yml \
             --profile core --profile messaging --profile apps \
             up -d --build --wait --wait-timeout 600
 
@@ -201,11 +198,11 @@ jobs:
 
       - name: Dump container logs on failure
         if: failure()
-        run: docker compose -f local/docker-compose.yml --profile all logs --tail=100
+        run: docker compose --env-file .env.example -f local/docker-compose.yml --profile all logs --tail=100
 
       - name: Tear down
         if: always()
-        run: docker compose -f local/docker-compose.yml --profile all down -v
+        run: docker compose --env-file .env.example -f local/docker-compose.yml --profile all down -v
 
   image:
     name: build the ${{ matrix.service }} image

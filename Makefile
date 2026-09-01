@@ -4,8 +4,21 @@
 # ephemeral -- see the `aws-*` targets and docs/costs.md before applying.
 
 SHELL := /bin/bash
-COMPOSE := docker compose -f local/docker-compose.yml
+ENV_FILE ?= $(if $(wildcard .env),.env,.env.example)
+COMPOSE = docker compose --env-file "$(ENV_FILE)" -f local/docker-compose.yml
+COMPOSE_ENV = MLP_ENV_FILE="$(ENV_FILE)" python3 scripts/with-compose-env.py
+
 AWS_PROFILE_NAME ?= aws-public-change-feed
+AWS_REAL_REGION ?= us-east-1
+AWS_INIT_ARGS ?=
+AWS_REAL_ENV = env -i \
+	HOME="$(HOME)" \
+	PATH="$(PATH)" \
+	TMPDIR="$(TMPDIR)" \
+	AWS_PROFILE="$(AWS_PROFILE_NAME)" \
+	AWS_REGION="$(AWS_REAL_REGION)" \
+	AWS_DEFAULT_REGION="$(AWS_REAL_REGION)" \
+	TF_VAR_region="$(AWS_REAL_REGION)"
 
 .DEFAULT_GOAL := help
 
@@ -26,19 +39,22 @@ up: ## Start everything (~1.6GB sustained; see docs/runbook-local.md)
 .PHONY: up-core
 up-core: ## Start floci (AWS surface) + postgres only
 	$(COMPOSE) --profile core up -d
-	./local/bootstrap/seed.sh
+	$(COMPOSE_ENV) AWS_ENDPOINT_URL AWS_DEFAULT_REGION \
+		AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- ./local/bootstrap/seed.sh
 
 .PHONY: up-core-containers
 up-core-containers: ## Start core WITH the docker socket (needed for floci RDS/EKS/Lambda)
 	@echo "Granting floci the docker socket: effective root on this host."
 	@echo "Only needed for floci's container-backed services. See ADR 0002."
 	$(COMPOSE) -f local/docker-compose.floci-containers.yml --profile core up -d
-	./local/bootstrap/seed.sh
+	$(COMPOSE_ENV) AWS_ENDPOINT_URL AWS_DEFAULT_REGION \
+		AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- ./local/bootstrap/seed.sh
 
 .PHONY: up-messaging
 up-messaging: ## Start Kafka and RabbitMQ (~660MB)
 	$(COMPOSE) --profile messaging up -d
-	./local/bootstrap/kafka-topics.sh
+	$(COMPOSE_ENV) BROKER_CONTAINER KAFKA_INTERNAL_BOOTSTRAP \
+		-- ./local/bootstrap/kafka-topics.sh
 
 .PHONY: up-tools
 up-tools: ## Add Kafka UI (~285MB; needs the messaging profile)
@@ -46,7 +62,7 @@ up-tools: ## Add Kafka UI (~285MB; needs the messaging profile)
 
 .PHONY: up-apps
 up-apps: ## Start relay and sink (built from source; brings core and messaging too)
-	docker compose -f local/docker-compose.yml \
+	$(COMPOSE) \
 		--profile core --profile messaging --profile apps up -d --build --wait
 	@echo "  relay ingest  http://localhost:8082  (POST /v1/events)"
 	@echo "  relay deliver http://localhost:8083/readyz"
@@ -63,9 +79,12 @@ up-obs: ## Start OTel collector, Prometheus, Tempo, Grafana
 
 .PHONY: seed
 seed: ## Create local AWS resources and Kafka topics (idempotent)
-	./local/bootstrap/seed.sh
-	./local/bootstrap/kafka-topics.sh
-	./local/bootstrap/relay-db.sh
+	$(COMPOSE_ENV) AWS_ENDPOINT_URL AWS_DEFAULT_REGION \
+		AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- ./local/bootstrap/seed.sh
+	$(COMPOSE_ENV) BROKER_CONTAINER KAFKA_INTERNAL_BOOTSTRAP \
+		-- ./local/bootstrap/kafka-topics.sh
+	$(COMPOSE_ENV) PG_CONTAINER POSTGRES_USER POSTGRES_DB RELAY_SIGNING_SECRET \
+		-- ./local/bootstrap/relay-db.sh
 
 .PHONY: down
 down: ## Stop the stack, keep volumes
@@ -93,7 +112,7 @@ urls: ## Print the local endpoints
 	@echo "Postgres        localhost:5432           (platform/platform)"
 	@echo "OTLP gRPC       localhost:4317"
 	@echo "Prometheus      http://localhost:9090"
-	@echo "Grafana         http://localhost:3000    (anonymous admin)"
+	@echo "Grafana         http://localhost:3000    (anonymous viewer)"
 	@echo "relay dashboard http://localhost:3000/d/relay-delivery"
 	@echo "relay ingest    http://localhost:8082    (POST /v1/events, /metrics; apps profile)"
 	@echo "relay deliver   http://localhost:8083    (/readyz, /metrics; apps profile)"
@@ -105,7 +124,13 @@ urls: ## Print the local endpoints
 
 .PHONY: smoke
 smoke: ## Run the end-to-end smoke check against the local stack
-	cd services/smoke && go run ./cmd/smoke
+	$(COMPOSE_ENV) --chdir services/smoke \
+		AWS_ENDPOINT_URL AWS_DEFAULT_REGION MLP_USE_REAL_AWS \
+		MLP_BUCKET MLP_TOPIC MLP_QUEUE MLP_SES_SENDER \
+		KAFKA_BOOTSTRAP MLP_KAFKA_TOPIC MLP_RELAY_DLQ_TOPIC \
+		RELAY_INGEST_URL SINK_URL RABBITMQ_URL DATABASE_URL \
+		OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME \
+		-- go run ./cmd/smoke
 
 .PHONY: relay-replay
 relay-replay: ## Redeliver relay events from the last SINCE (default 1h; or SINCE=earliest)
@@ -365,7 +390,8 @@ k8s-apply-local: ## Apply manifests directly, bypassing git and ArgoCD
 	@echo "  BUT NOT 'make up-apps'. The compose and cluster delivery consumers"
 	@echo "  join the SAME Kafka group and split the partitions between them, so"
 	@echo "  half the events get delivered to whichever sink you are not looking"
-	@echo "  at. Run one or the other:  docker compose -f local/docker-compose.yml \\"
+	@echo "  at. Run one or the other:  docker compose --env-file $(ENV_FILE) \\"
+	@echo "                               -f local/docker-compose.yml \\"
 	@echo "                               stop relay-ingest relay-deliver sink" 
 
 .PHONY: k8s-validate
@@ -384,32 +410,65 @@ k8s-status: ## Show ArgoCD applications and the mlp namespace
 
 .PHONY: aws-login
 aws-login: ## Refresh the AWS SSO session
-	aws sso login --profile $(AWS_PROFILE_NAME)
+	$(AWS_REAL_ENV) aws sso login
 
 .PHONY: aws-whoami
 aws-whoami: ## Show the active AWS identity
-	aws sts get-caller-identity --profile $(AWS_PROFILE_NAME)
+	$(AWS_REAL_ENV) aws sts get-caller-identity
+
+.PHONY: aws-bootstrap
+aws-bootstrap: aws-whoami ## Create the one-time S3 state backend
+	@echo "This creates persistent remote-state resources in the selected AWS account."
+	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
+	cd infra/terraform/bootstrap && $(AWS_REAL_ENV) terraform init -input=false && \
+	  $(AWS_REAL_ENV) terraform apply
+
+.PHONY: aws-init
+aws-init: aws-whoami ## Initialize the remote state backend for the dev environment
+	@mlp_account_id="$$($(AWS_REAL_ENV) aws sts get-caller-identity \
+	  --query Account --output text)"; \
+	  cd infra/terraform/envs/dev && \
+	  $(AWS_REAL_ENV) terraform init -input=false $(AWS_INIT_ARGS) \
+	    -backend-config="bucket=mlp-tfstate-$$mlp_account_id" \
+	    -backend-config="key=envs/dev/terraform.tfstate" \
+	    -backend-config="region=$(AWS_REAL_REGION)" \
+	    -backend-config="use_lockfile=true" \
+	    -backend-config="encrypt=true"
 
 .PHONY: aws-plan
-aws-plan: ## Terraform plan for the dev environment (free, read-only)
-	cd infra/terraform/envs/dev && terraform init -input=false && \
-	  AWS_PROFILE=$(AWS_PROFILE_NAME) terraform plan
+aws-plan: aws-init ## Terraform plan for dev (read-only; needs the state backend)
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform plan
+
+AWS_STATE_BACKUP ?= .terraform/mlp-last-known.tfstate
+
+.PHONY: aws-state-backup
+aws-state-backup: aws-whoami ## Save a private recovery copy of the current remote state
+	@cd infra/terraform/envs/dev; \
+	  set -e; \
+	  umask 077; \
+	  tmp="$(AWS_STATE_BACKUP).tmp"; \
+	  $(AWS_REAL_ENV) terraform state pull > "$$tmp"; \
+	  mv "$$tmp" "$(AWS_STATE_BACKUP)"; \
+	  echo "saved infra/terraform/envs/dev/$(AWS_STATE_BACKUP)"
 
 .PHONY: aws-up
-aws-up: ## Apply the dev environment to real AWS (INCURS COST)
+aws-up: aws-init ## Apply the dev environment to real AWS (INCURS COST)
 	@echo "This creates real, billable AWS resources. See docs/costs.md."
 	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
-	cd infra/terraform/envs/dev && terraform init -input=false && \
-	  AWS_PROFILE=$(AWS_PROFILE_NAME) terraform apply
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform apply
+	$(MAKE) aws-state-backup
 
 .PHONY: aws-down
-aws-down: ## Destroy the dev environment (do this when you stop working)
-	cd infra/terraform/envs/dev && \
-	  AWS_PROFILE=$(AWS_PROFILE_NAME) terraform destroy
+aws-down: aws-whoami ## Destroy dev using its already initialized backend
+	@test -f infra/terraform/envs/dev/.terraform/terraform.tfstate || { \
+	  echo "backend is not initialized; run 'make aws-init' first" >&2; exit 1; \
+	}
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform destroy
+	$(MAKE) aws-state-backup
 
 .PHONY: aws-cost
 aws-cost: ## Month-to-date spend on the account
-	@AWS_PROFILE=$(AWS_PROFILE_NAME) aws ce get-cost-and-usage \
+	@$(AWS_REAL_ENV) aws ce get-cost-and-usage \
 	  --time-period Start=$$(date -u +%Y-%m-01),End=$$(date -u -v+1d +%Y-%m-%d) \
 	  --granularity MONTHLY --metrics UnblendedCost \
 	  --query 'ResultsByTime[0].Total.UnblendedCost' --output table

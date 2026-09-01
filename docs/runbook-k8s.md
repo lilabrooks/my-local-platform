@@ -247,7 +247,8 @@ FAIL  relay  45000ms  event evt_... was not delivered to the sink
 even though nothing is broken. Stop one side:
 
 ```bash
-docker compose -f local/docker-compose.yml stop relay-ingest relay-deliver sink
+docker compose --env-file .env -f local/docker-compose.yml \
+  stop relay-ingest relay-deliver sink
 ```
 
 The same applies to the M2 demo: it runs in the cluster, so the compose apps

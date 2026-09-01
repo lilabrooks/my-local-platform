@@ -52,7 +52,7 @@ func Load() Config {
 		KafkaBrokers: env("KAFKA_BOOTSTRAP", "localhost:9092"),
 		KafkaTopic:   env("MLP_KAFKA_TOPIC", "mlp.events"),
 
-		RelayIngestURL: env("RELAY_INGEST_URL", "http://localhost:8082"),
+		RelayIngestURL: envPreserveEmpty("RELAY_INGEST_URL", "http://localhost:8082"),
 		RelayDLQTopic:  env("MLP_RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq"),
 		SinkURL:        env("SINK_URL", "http://localhost:8084"),
 
@@ -77,6 +77,13 @@ func (c Config) String() string {
 
 func env(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+func envPreserveEmpty(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return def

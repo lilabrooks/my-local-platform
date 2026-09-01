@@ -13,8 +13,9 @@
 #   ------------------------------------------------------------------
 #   all            ~1,570 MB
 #
-# A local minikube (`make k8s-up`) adds ~1.8 GB on top, which makes it the
-# single largest consumer -- `make k8s-down` when not doing GitOps work.
+# The measured M2 minikube setup adds ~3.5 GB on top and has a 6 GB cap, which
+# makes it the single largest consumer -- `make k8s-down` when not doing GitOps
+# work.
 #
 #   make up-core      floci (AWS surface) + postgres
 #   make up-messaging + kafka, kafka-ui, rabbitmq
@@ -64,7 +65,7 @@ services:
     container_name: mlp-floci
     profiles: [core, all]
     ports:
-      - "4566:4566"
+      - "127.0.0.1:4566:4566"
     environment:
       # Must match the service name so returned URLs (SQS queue URLs,
       # pre-signed S3 links) resolve from inside the compose network.
@@ -96,6 +97,8 @@ services:
     container_name: mlp-postgres
     profiles: [core, all]
     ports:
+      # Kept on all host interfaces because pods reach it through
+      # host.minikube.internal. The credentials are local-development only.
       - "5432:5432"
     environment:
       POSTGRES_USER: platform
@@ -125,8 +128,9 @@ services:
     container_name: mlp-kafka
     profiles: [messaging, all]
     ports:
-      - "9092:9092"    # from the host
-      - "9094:9094"    # from inside minikube
+      - "127.0.0.1:9092:9092" # from the host
+      # Kept on all host interfaces for host.minikube.internal.
+      - "9094:9094" # from inside minikube
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -198,7 +202,7 @@ services:
     profiles: [tools, all]
     mem_limit: 512m
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
@@ -212,8 +216,8 @@ services:
     container_name: mlp-rabbitmq
     profiles: [messaging, all]
     ports:
-      - "5672:5672"     # AMQP
-      - "15672:15672"   # management UI -- guest/guest
+      - "127.0.0.1:5672:5672" # AMQP
+      - "127.0.0.1:15672:15672" # management UI -- guest/guest
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
@@ -238,9 +242,9 @@ services:
     # Which config file is used decides whether Datadog receives telemetry.
     command: ["--config=/etc/otel/${OTEL_COLLECTOR_CONFIG:-config.yaml}"]
     ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "8889:8889"   # prometheus scrape endpoint
+      - "127.0.0.1:4317:4317" # OTLP gRPC
+      - "127.0.0.1:4318:4318" # OTLP HTTP
+      - "127.0.0.1:8889:8889" # prometheus scrape endpoint
     environment:
       DD_API_KEY: ${DD_API_KEY:-}
       DD_SITE: ${DD_SITE:-datadoghq.com}
@@ -252,7 +256,7 @@ services:
     container_name: mlp-prometheus
     profiles: [obs, all]
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prom-data:/prometheus
@@ -263,7 +267,7 @@ services:
     profiles: [obs, all]
     command: ["-config.file=/etc/tempo/tempo.yaml"]
     ports:
-      - "3200:3200"   # query API -- handy for `curl`ing traces directly
+      - "127.0.0.1:3200:3200" # query API -- handy for `curl`ing traces directly
     volumes:
       - ./config/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
@@ -273,12 +277,12 @@ services:
     container_name: mlp-grafana
     profiles: [obs, all]
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
     volumes:
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -319,7 +323,7 @@ services:
     restart: unless-stopped
     mem_limit: 128m
     ports:
-      - "8082:8080"
+      - "127.0.0.1:8082:8080"
     environment:
       RELAY_MODE: ingest
       # The internal listener: kafka advertises localhost:9092 to the host and
@@ -350,7 +354,7 @@ services:
     restart: unless-stopped
     mem_limit: 128m
     ports:
-      - "8083:8080"   # health only; a consumer has no inbound traffic
+      - "127.0.0.1:8083:8080" # health only; a consumer has no inbound traffic
     environment:
       RELAY_MODE: deliver
       KAFKA_BOOTSTRAP: kafka:19092
@@ -389,7 +393,7 @@ services:
     ports:
       # 8084 on the host, not 8081: `make argocd-ui` port-forwards the
       # ArgoCD UI to 8081, and the two collide when both are running.
-      - "8084:8081"
+      - "127.0.0.1:8084:8081"
     environment:
       # Must match what local/bootstrap/relay-db.sh wrote into the
       # subscriptions table, or every delivery is rejected 401. Both default to
