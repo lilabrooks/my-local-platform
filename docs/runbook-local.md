@@ -221,7 +221,7 @@ each run and waits out the initial group-join.
 
 2. **The collector's connection to Tempo goes stale if Tempo restarts.** The
    collector logs `no children to pick from` and retries forever.
-   `docker compose -f local/docker-compose.yml --profile obs restart otel-collector`.
+   `docker compose --env-file .env -f local/docker-compose.yml --profile obs restart otel-collector`.
 
 3. Tempo takes ~5-20 seconds after start to report ready. Check
    `curl http://localhost:3200/ready`.
@@ -247,7 +247,8 @@ makes it idempotent against either kind of volume. If a stale volume still gets
 in the way:
 
 ```bash
-docker compose -f local/docker-compose.yml rm -sf grafana && docker volume rm mlp_grafana-data
+docker compose --env-file .env -f local/docker-compose.yml rm -sf grafana
+docker volume rm mlp_grafana-data
 ```
 
 Nothing is lost. Every dashboard and datasource here is provisioned from files.

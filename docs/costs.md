@@ -61,8 +61,20 @@ Both flags default to `false`.
 
 ```bash
 make aws-cost    # month-to-date spend
-make aws-down    # destroy the dev environment
+make aws-down    # destroy through the backend initialized by make aws-init
 ```
+
+`make aws-down` deliberately does not reconfigure state before a destructive
+operation. In a fresh checkout, run `make aws-init` first. After each successful
+apply or destroy, Make saves a mode-0600 recovery copy at
+`infra/terraform/envs/dev/.terraform/mlp-last-known.tfstate`; the versioned S3
+object remains the authority.
+
+If the state bucket is unavailable, stop. Do not run destroy with a local or
+disabled backend: Terraform would no longer know which remote resources it
+owns. Restore the versioned S3 state first. The private recovery copy is there
+to inspect or restore deliberately, not as an automatic fallback that might be
+stale.
 
 Find anything this repo left running:
 

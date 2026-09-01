@@ -139,11 +139,16 @@ Requires an SSO session:
 ```bash
 make aws-login      # aws sso login
 make aws-whoami
-make aws-plan       # free, read-only
+make aws-bootstrap  # once for a new account: versioned S3 state backend
+make aws-plan       # read-only; initializes that backend first
 make aws-up         # prompts before creating anything billable
 make aws-cost       # month-to-date spend
-make aws-down       # destroy
+make aws-down       # destroy through the already initialized backend
 ```
+
+If the account already has the state bucket, skip `make aws-bootstrap`.
+Override the defaults with Make variables, for example
+`make aws-plan AWS_PROFILE_NAME=my-sso-profile AWS_REAL_REGION=us-west-2`.
 
 The default environment is ten serverless resources that cost approximately
 nothing idle. EKS and RDS are behind `enable_eks` and `enable_rds`, both
@@ -204,7 +209,7 @@ truth rather than per-agent copies.
 
 ## Requirements
 
-Docker, Go 1.27+, Terraform 1.9+, the AWS CLI v2, minikube, kubectl and Helm.
+Docker, Go 1.27+, Terraform 1.10+, the AWS CLI v2, minikube, kubectl and Helm.
 
 Helm is needed only by `make monitoring-install`, which renders
 `kube-prometheus-stack` into the cluster so the relay demo has a panel to point

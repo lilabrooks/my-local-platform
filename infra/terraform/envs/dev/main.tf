@@ -12,7 +12,7 @@
 # `terraform destroy` when you finish a session. See docs/costs.md.
 
 terraform {
-  required_version = ">= 1.9"
+  required_version = ">= 1.10"
   required_providers {
     aws = {
       source  = "hashicorp/aws"

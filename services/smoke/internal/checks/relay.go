@@ -32,7 +32,7 @@ import (
 func Relay(cfg platform.Config) Check {
 	return Check{Name: "relay", Run: func(ctx context.Context) (string, error) {
 		if cfg.RelayIngestURL == "" {
-			return "", errRelayDisabled
+			return "skipped (apps profile disabled)", nil
 		}
 
 		marker := fmt.Sprintf("smoke-%d", time.Now().UnixNano())
@@ -64,8 +64,6 @@ func Relay(cfg platform.Config) Check {
 			eventID, delivered, dead.URL, dead.Attempts), nil
 	}}
 }
-
-var errRelayDisabled = fmt.Errorf("RELAY_INGEST_URL is empty; start the apps profile with `make up-apps`")
 
 // postEvent submits one event and returns the id relay assigned it.
 func postEvent(ctx context.Context, ingestURL, marker string) (string, error) {
