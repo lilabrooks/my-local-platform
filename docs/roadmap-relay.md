@@ -1,9 +1,10 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-08-31
-Status: **M0, M1 and M2 are built and their milestones closed.** M3 and M4
-remain proposed, and are alternatives rather than a sequence -- see the decision
-point below. The header used to read "Proposed -- no code written".
+Date: 2026-08-24 · Last audited: 2026-09-01
+Status: **M0, M1 and M2 are built and their milestones closed.** Two M3
+verification items were completed early; its remaining hardening work and M4
+remain proposed. M3 and M4 are alternatives rather than a sequence -- see the
+decision point below. The header used to read "Proposed -- no code written".
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -129,9 +130,9 @@ merely "under 15s". `make lint` 10/10 and `make test` green. Evidence and
 commands in [ADR 0004](adr/0004-real-kafka-not-emulated.md#verification);
 [#1](https://github.com/lilabrooks/my-local-platform/issues/1) closed.
 
-(That line used to point at a Resolved section in `backlog.md`. There is no
-longer one: resolved entries are deleted rather than archived, because the file
-records deferral rationale and the closing commit is the record of a fix.)
+(That line once pointed at a Resolved section in the retired `backlog.md`.
+Issue #1 and its closing commit are the durable record of the fix; git history
+retains the old document.)
 
 ---
 
@@ -267,7 +268,7 @@ depend on M3.
 
 ## M3 -- Harden (optional)
 
-**Free. Two to three days.**
+**Free. Two to three days for the remaining work.**
 
 The work that turns a convincing demo into a service whose guarantees hold up
 when someone reads the code carefully.
@@ -279,11 +280,17 @@ when someone reads the code carefully.
 - **Tracing** -- W3C trace context in Kafka headers, so ingest, consume and
   delivery join into one trace in Tempo. Closes the
   [ADR 0005](adr/0005-argocd-gitops.md) telemetry gap for the in-cluster case.
-- **Per-tenant ordering test** -- prove same-tenant events land on one partition
-  and are delivered in order. An untested claim about ordering is worth nothing.
-- **Head-of-line blocking** -- the per-subscriber topic described in
-  [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md), if the limitation has
-  actually bitten.
+- **Per-tenant ordering test -- built 2026-08-30.** The original M3 item was to
+  prove same-tenant events land on one partition and are delivered in order.
+  `make relay-verify-ordering` now runs that check on every push; the result and
+  its limit across rebalances are in
+  [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#ordering-run-2026-08-30).
+- **Head-of-line blocking -- measured 2026-08-31; remediation deferred.** The
+  experiment confirmed that one blocked record delays every partition owned by
+  its consumer member. The per-subscriber topic described in
+  [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#revisit-when) becomes work
+  when concurrently degraded `(tenant, subscriber)` pairs approach the
+  partition count.
 - **Long-retry parking** -- what the `standard` retry preset needs before M1's
   startup validation will accept it. A consumer cannot sleep 16 hours between
   attempts without being evicted from its group, so the record has to be parked

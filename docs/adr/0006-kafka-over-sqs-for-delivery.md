@@ -389,9 +389,9 @@ bounds more than the liveness it is named for". That clause is withdrawn: it
 assumed the retry cap bounded consumer-group liveness, which the section above
 now records that it never did.
 The mechanism behind the question — delivery is not cancelled on a generation
-change — is recorded in [the backlog](../backlog.md) with the condition that
-would make it matter, and in
-[#69](https://github.com/lilabrooks/my-local-platform/issues/69).
+change — is tracked in
+[#69](https://github.com/lilabrooks/my-local-platform/issues/69), together with
+the configuration change that would schedule it.
 
 ### Graceful shutdown drain, run 2026-08-31
 

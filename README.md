@@ -28,6 +28,25 @@ smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
 all components healthy
 ```
 
+## Project status
+
+GitHub Issues and milestones hold the current backlog. Open work records its
+outcome, trigger, decision owner, governing anchors, dependency relation, and
+checked evidence in the issue body.
+
+| Milestone | State | Purpose |
+|---|---|---|
+| [M0: clear the runway](https://github.com/lilabrooks/my-local-platform/milestone/1) | Closed | Fix the smoke path, create relay topics, and settle the Kafka client. |
+| [M1: the relay delivers](https://github.com/lilabrooks/my-local-platform/milestone/2) | Closed | Deliver one accepted event and dead-letter a refusing subscriber. |
+| [M2: KEDA scaling on lag](https://github.com/lilabrooks/my-local-platform/milestone/3) | Closed | Scale relay-deliver on broker lag, drain the backlog, and scale down. |
+
+M3 and M4 remain optional, unscheduled choices in the
+[relay roadmap](docs/roadmap-relay.md). See the
+[open issues](https://github.com/lilabrooks/my-local-platform/issues) for the
+work queue and
+[#84](https://github.com/lilabrooks/my-local-platform/issues/84) for the backlog
+authority record.
+
 ## What is here
 
 ```text
