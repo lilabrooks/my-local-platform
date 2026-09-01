@@ -109,10 +109,11 @@ is that it could have been satisfied by a rename, and it does not assert the
 thing anyone cares about. A condition standing in for the evidence is a
 condition that can come apart from it.
 
-This is the same defect as an unobservable backlog trigger, which
-[docs/backlog.md](docs/backlog.md) has its own rule about after issue #21 needed
-three attempts at one. Both are conditions written to sound checkable rather
-than to be the thing being checked.
+This is the same defect as an unobservable backlog trigger. Issue
+[#21](https://github.com/lilabrooks/my-local-platform/issues/21) needed three
+attempts before its trigger admitted that no existing signal could surface the
+condition. Both are conditions written to sound checkable rather than to be the
+thing being checked.
 
 **A document that states intent carries a status line, and the commit that
 fulfils it updates that line.** `docs/goal-relay.md` and
@@ -192,36 +193,48 @@ YAML those tests read.
 - **Real AWS requires `MLP_USE_REAL_AWS=1`.** An empty `AWS_ENDPOINT_URL` means
   local, deliberately, so a stray `export` cannot hit a live account.
 
-## Known defects and tracking
+## Work selection and backlog authority
 
-[docs/backlog.md](docs/backlog.md) lists deferred work with the reason it was
-deferred and what "done" means. Read it before assuming a failure is new.
+GitHub Issues and milestones are the backlog authority. Issue
+[#84](https://github.com/lilabrooks/my-local-platform/issues/84) records the
+migration from the retired repository document. Git history retains that file
+and its earlier deferral rationale.
 
-**It is not a copy of the tracker, and trying to keep it in sync is the wrong
-job.** GitHub tracks work; backlog.md records why something was deliberately
-not done yet and what would change that. Most open issues never belong in it —
-they are scheduled, and a milestone already says so. An entry earns its place
-when the decision to defer is itself worth keeping, which is a much smaller set
-than "everything open".
+When no issue is named, inspect the current milestone, open issues, stated
+dependencies, owner gates, and triggers. Recommend the next item and explain
+the choice. GitHub mutations require separate authority.
 
-That framing is deliberate. An earlier version of this section called the file
-"the copy that survives without network access", and the two records drifted
-exactly as you would expect: issue #1 sat open for a while after backlog.md had
-already called it resolved. The fix is not more diligence, it is a file with a
-narrower job. Resolved entries are now deleted rather than archived — the
-closing commit is the record, and an ADR carries the measurements.
+Each planned issue starts with these fields:
+
+- **Stable ID:** authority-independent identity used across migrations and
+  cross-issue relations.
+- **Outcome and Trigger:** the result sought and the observable condition that
+  schedules it. Use `none` when work is ready or waits only for an owner.
+- **Decision owner:** `none` for an implementation decision already made, or
+  the role that must choose between materially different outcomes.
+- **Governing anchors and Seam:** the documents and code boundary the work must
+  keep consistent.
+- **Relation and Evidence:** machine-readable dependency shape and the checked
+  facts that justify the issue.
+
+Use exactly one `state:*` label and one `kind:*` label. `state:ready` means no
+unresolved wait blocker. `state:waiting` carries at least one of
+`wait:trigger`, `wait:owner`, or `wait:dependency`. `horizon:later` keeps
+deliberately unscheduled work outside the governed milestone sequence. Keep
+component labels such as `relay` and classifications such as `security` where
+they help searches.
 
 **End the commit or PR that resolves an item with `Closes #N`.** GitHub closes
 the issue on merge, and that is the only part of this arrangement that does not
 depend on someone remembering to do it.
 
 Milestones group issues by roadmap stage. The roadmap document holds the detail;
-a milestone is a pointer to it, never a second copy.
+a milestone is a pointer to it, never a second copy. Roadmaps may describe
+unscheduled options; an option enters the backlog when an issue is filed.
 
-The Kafka smoke check defect that used to be described here was fixed in M0. Its
-measurements are in
+The Kafka smoke check defect was fixed in M0. Its measurements are in
 [ADR 0004](docs/adr/0004-real-kafka-not-emulated.md#verification), which is
-where a resolved entry's evidence belongs rather than in the backlog.
+where resolved work's durable evidence belongs.
 
 ## Secrets
 
