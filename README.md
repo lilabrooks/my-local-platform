@@ -261,3 +261,7 @@ One gap remains, stated plainly: **the expensive Terraform tier has never been
 applied.** The cheap tier has — applied to a real account, verified with the
 smoke checks against live S3 and SNS/SQS, then destroyed. EKS and RDS are
 plan-only, so nothing is proven against a live cluster or database.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
