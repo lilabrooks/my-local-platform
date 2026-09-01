@@ -15,7 +15,7 @@ metadata:
     # Without this, deleting the root app orphans every child app.
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: mlp
+  project: mlp-root
 
   source:
     repoURL: __REPO_URL__
@@ -30,5 +30,3 @@ spec:
     automated:
       prune: true      # remove resources whose manifests were deleted
       selfHeal: true   # revert manual kubectl edits back to git
-    syncOptions:
-      - CreateNamespace=true

@@ -39,10 +39,15 @@ for deploy in argocd-repo-server argocd-server argocd-applicationset-controller 
 done
 kubectl rollout status -n "$NAMESPACE" statefulset/argocd-application-controller --timeout=300s
 
-say "applying AppProject and root Application (repo: $REPO_URL)"
+say "applying scoped AppProjects and root Application (repo: $REPO_URL)"
 # The manifests carry a placeholder so a fork can point them elsewhere without
-# editing tracked files.
-for f in "$HERE/project.yaml" "$HERE/root-app.yaml"; do
+# editing tracked files. This order keeps an existing root app valid while its
+# project moves, then narrows the workload and default projects.
+for f in \
+  "$HERE/root-project.yaml" \
+  "$HERE/root-app.yaml" \
+  "$HERE/project.yaml" \
+  "$HERE/default-project.yaml"; do
   sed "s|__REPO_URL__|${REPO_URL}|g" "$f" | kubectl apply -f - >/dev/null
 done
 

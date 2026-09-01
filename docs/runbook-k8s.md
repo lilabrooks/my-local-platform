@@ -66,6 +66,30 @@ A public remote needs no deploy key when every Application and `REPO_URL` use
 its HTTPS URL. Change those tracked URLs when repository visibility changes;
 leaving an SSH URL in one child Application still requires SSH credentials.
 
+## Project boundaries
+
+`make argocd-install` installs 3 AppProjects. Each has one job:
+
+| Project | Application | Authority |
+|---|---|---|
+| `mlp-root` | `root` | create `Application` objects in `argocd` |
+| `mlp` | `echo`, `relay`, `sink`, `monitoring` | deploy into namespace `mlp` |
+| `default` | none | disabled |
+
+The root reads `k8s/apps/`, so it needs permission to register child
+Applications. It has no workload or cluster-resource permission. Each child
+uses `mlp`; that project permits namespaced resources in `mlp` and the
+cluster-scoped Namespace named `mlp` for `CreateNamespace=true`.
+
+Both installation scripts create `mlp-root`, move the root Application, narrow
+`mlp`, then disable `default`. This order also upgrades a cluster created with
+the old single-project configuration. `make k8s-validate` checks the projects,
+the script order, and every tracked child Application.
+
+[ADR 0009](adr/0009-separate-argocd-control-and-workload-projects.md) records
+the boundary, its remaining limit, and the condition that would require a
+Kubernetes admission policy.
+
 ## The UI
 
 ```bash
@@ -270,6 +294,11 @@ long`. Client-side apply cannot handle the ApplicationSet CRD. Use
 **App stuck `OutOfSync` after editing a manifest.** `selfHeal` reverts manual
 `kubectl` edits back to git by design. Change git, not the cluster.
 
+**App reports that its project, destination, or resource is not permitted.**
+The Application crossed one of the boundaries above. Root belongs to
+`mlp-root`; every file under `k8s/apps/` belongs to `mlp` and deploys to
+namespace `mlp`.
+
 **`Deployment ... spec.selector: field is immutable`.** Something added a label
 to the Deployment's selector. Selectors cannot change after creation — delete
 and recreate the Deployment, and use `includeSelectors: false` in the
@@ -291,7 +320,9 @@ make k8s-validate
 Renders the kustomizations and checks selector immutability, pod and Service
 labels, probes, local image policy, the delivery deadline and shutdown grace
 period, KEDA's replica ceiling against Kafka's partition count, and the shared
-dashboard contract. These are repository-specific tests, not only YAML syntax.
+dashboard contract. It also checks the ArgoCD projects, installation order, and
+every child Application's assignment. These are repository-specific tests, not
+only YAML syntax.
 
 Always run with `-count=1` (the make target does). These tests read manifests
 via `kubectl kustomize`, and Go's test cache does not track those files — plain
