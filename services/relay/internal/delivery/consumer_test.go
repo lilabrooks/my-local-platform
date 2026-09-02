@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,10 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
+	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
 
@@ -90,6 +94,36 @@ type fakeSubs struct {
 	fail error
 }
 
+type recordedAttempt struct {
+	eventID string
+	attempt history.Attempt
+}
+
+type fakeAttemptRecorder struct {
+	mu   sync.Mutex
+	got  []recordedAttempt
+	fail error
+}
+
+func (f *fakeAttemptRecorder) RecordAttempt(ctx context.Context, eventID string, attempt history.Attempt) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail != nil {
+		return f.fail
+	}
+	f.got = append(f.got, recordedAttempt{eventID: eventID, attempt: attempt})
+	return nil
+}
+
+func (f *fakeAttemptRecorder) attempts() []recordedAttempt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recordedAttempt(nil), f.got...)
+}
+
 func (f fakeSubs) ForTenant(context.Context, string) ([]subscriptions.Subscription, error) {
 	return f.subs, f.fail
 }
@@ -111,7 +145,7 @@ func newConsumer(t *testing.T, r Reader, dlq Producer, subs SubscriptionSource) 
 	if err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	d := NewDeliverer(s, 2*time.Second)
+	d := NewDeliverer(s, 2*time.Second, nil)
 	d.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return NewConsumer(r, dlq, subs, d, 30*time.Second, slog.New(slog.DiscardHandler))
 }
@@ -236,6 +270,131 @@ func TestDLQFailureBlocksTheCommit(t *testing.T) {
 	}
 	if got := r.commits(); got != 0 {
 		t.Errorf("committed %d times after a failed dead-letter write, want 0", got)
+	}
+}
+
+// A subscriber can receive a webhook before Postgres records the attempt. If
+// that write fails, leaving the Kafka offset uncommitted deliberately trades a
+// possible duplicate on redelivery for a complete audit trail.
+func TestAttemptHistoryFailureBlocksTheCommit(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	var callsMu sync.Mutex
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callsMu.Lock()
+		calls++
+		callsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ok.Close()
+
+	msg := recordMessage(t, testRecord())
+	r := &fakeReader{queue: []kafka.Message{msg}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: ok.URL, Secret: "s"}}})
+	recorder := &fakeAttemptRecorder{fail: errors.New("database unavailable")}
+	c.deliverer.recorder = recorder
+
+	if err := c.Run(context.Background()); err == nil {
+		t.Fatal("Run returned nil when attempt history could not be recorded")
+	}
+	if got := r.commits(); got != 0 {
+		t.Errorf("committed %d times after attempt history failed, want 0", got)
+	}
+	if got := len(dlq.letters(t)); got != 0 {
+		t.Errorf("wrote %d dead letters for a history failure, want 0", got)
+	}
+
+	// A new consumer fetches the uncommitted record again. The webhook is sent a
+	// second time with the same event id, and this time both history and the
+	// Kafka offset commit.
+	recorder.mu.Lock()
+	recorder.fail = nil
+	recorder.mu.Unlock()
+	r.mu.Lock()
+	r.queue = append(r.queue, msg)
+	r.mu.Unlock()
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run after database recovery: %v", err)
+	}
+	if got := r.commits(); got != 1 {
+		t.Errorf("committed %d times after recovery, want 1", got)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if calls != 2 {
+		t.Errorf("subscriber received %d requests, want 2 to prove duplicate-on-retry behavior", calls)
+	}
+	if got := len(recorder.attempts()); got != 1 {
+		t.Errorf("persisted %d attempts after recovery, want 1", got)
+	}
+}
+
+// An event can reach Kafka even when WriteMessages reports a cancelled or
+// ambiguous request. If its history anchor is absent, retrying cannot repair
+// the record; it must be parked once so the partition can advance.
+func TestMissingEventHistoryIsDeadLetteredAndCommitted(t *testing.T) {
+	deliveries := func(outcome string) float64 {
+		return testutil.ToFloat64(metrics.Deliveries.WithLabelValues(outcome))
+	}
+	deadLetters := func(reason string) float64 {
+		return testutil.ToFloat64(metrics.DeadLetters.WithLabelValues(reason))
+	}
+	beforeDelivered := deliveries("delivered")
+	beforeDeadLettered := deliveries("dead_lettered")
+	beforeHistoryMissing := deadLetters("history_missing")
+
+	var calls int
+	var callsMu sync.Mutex
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callsMu.Lock()
+		calls++
+		callsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ok.Close()
+
+	rec := testRecord()
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, rec)}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 9, URL: ok.URL, Secret: "s"}}})
+	c.deliverer.recorder = &fakeAttemptRecorder{fail: history.ErrEventNotFound}
+
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := r.commits(); got != 1 {
+		t.Errorf("committed %d times, want 1 after terminally parking missing history", got)
+	}
+	callsMu.Lock()
+	if calls != 1 {
+		t.Errorf("subscriber received %d requests, want 1", calls)
+	}
+	callsMu.Unlock()
+	letters := dlq.letters(t)
+	if len(letters) != 1 {
+		t.Fatalf("wrote %d dead letters, want 1", len(letters))
+	}
+	if letters[0].Record.ID != rec.ID || letters[0].SubscriptionID != 9 ||
+		!strings.Contains(letters[0].Reason, "event history missing") {
+		t.Errorf("dead letter = %+v, want event and subscription identity with missing-history reason", letters[0])
+	}
+	if letters[0].LastStatus != http.StatusOK {
+		t.Errorf("dead letter status = %d, want %d from the completed delivery", letters[0].LastStatus, http.StatusOK)
+	}
+	stats := c.Stats()
+	if stats["delivered"] != 1 || stats["dead_lettered"] != 0 {
+		t.Errorf("stats = %v, want one delivered webhook and no failed webhook", stats)
+	}
+	if got := deliveries("delivered") - beforeDelivered; got != 1 {
+		t.Errorf("delivered metric delta = %v, want 1", got)
+	}
+	if got := deliveries("dead_lettered") - beforeDeadLettered; got != 0 {
+		t.Errorf("dead-lettered delivery metric delta = %v, want 0", got)
+	}
+	if got := deadLetters("history_missing") - beforeHistoryMissing; got != 1 {
+		t.Errorf("history-missing DLQ metric delta = %v, want 1", got)
 	}
 }
 
@@ -394,6 +553,10 @@ func TestCancellationDrainTimeoutStopsCleanlyWithoutCommit(t *testing.T) {
 	dlq := &fakeDLQ{}
 	c := newConsumer(t, r, dlq, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: blocked.URL, Secret: "s"}}})
 	c.recordTimeout = 50 * time.Millisecond
+	writeErr := errors.New("postgres unavailable during drain")
+	c.deliverer.recorder = &fakeAttemptRecorder{fail: writeErr}
+	var logs bytes.Buffer
+	c.log = slog.New(slog.NewJSONHandler(&logs, nil))
 
 	done := make(chan error, 1)
 	go func() { done <- c.Run(ctx) }()
@@ -413,6 +576,9 @@ func TestCancellationDrainTimeoutStopsCleanlyWithoutCommit(t *testing.T) {
 	}
 	if got := r.commits(); got != 0 {
 		t.Errorf("committed %d times after the shutdown drain expired, want 0", got)
+	}
+	if !strings.Contains(logs.String(), writeErr.Error()) {
+		t.Errorf("shutdown log = %s, want detached history write failure", logs.String())
 	}
 }
 

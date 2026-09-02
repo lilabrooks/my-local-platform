@@ -273,10 +273,15 @@ depend on M3.
 The work that turns a convincing demo into a service whose guarantees hold up
 when someone reads the code carefully.
 
-- **Delivery attempts persisted** -- the audit trail answering "did you deliver
-  my webhook?", which is the question every real webhook product exists to
-  answer. `GET /v1/events/{id}/attempts`.
-- **Idempotency** -- dedupe on the key accepted at ingest.
+- **Delivery attempts persisted, built 2026-09-02.** The audit trail answers
+  "did you deliver my webhook?" through `GET /v1/events/{id}/attempts`.
+  `make smoke` posted one event to the real local Kafka broker, matched the
+  healthy and exhausted subscribers, and read back all 4 Postgres attempt rows.
+- **Idempotency** -- dedupe on the key accepted at ingest. Issue
+  [#89](https://github.com/lilabrooks/my-local-platform/issues/89) must
+  distinguish an event Kafka accepted from a retained row left by an ambiguous
+  publish error. A publish-state marker or transactional outbox are candidate
+  mechanisms; a retained row alone cannot become a successful dedupe response.
 - **Tracing** -- W3C trace context in Kafka headers, so ingest, consume and
   delivery join into one trace in Tempo. Closes the
   [ADR 0005](adr/0005-argocd-gitops.md) telemetry gap for the in-cluster case.

@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
@@ -39,7 +41,7 @@ func newTestDeliverer(t *testing.T, spec string) *Deliverer {
 	if err != nil {
 		t.Fatalf("parse schedule: %v", err)
 	}
-	d := NewDeliverer(s, 2*time.Second)
+	d := NewDeliverer(s, 2*time.Second, nil)
 	d.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return d
 }
@@ -83,7 +85,10 @@ func TestDeliverRetriesThenSucceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := newTestDeliverer(t, "1s,2s,4s").Deliver(context.Background(),
+	recorder := &fakeAttemptRecorder{}
+	deliverer := newTestDeliverer(t, "1s,2s,4s")
+	deliverer.recorder = recorder
+	out, err := deliverer.Deliver(context.Background(),
 		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
@@ -96,6 +101,18 @@ func TestDeliverRetriesThenSucceeds(t *testing.T) {
 	}
 	if out.Reason != "" {
 		t.Errorf("Reason = %q, want empty on success", out.Reason)
+	}
+	recorded := recorder.attempts()
+	if len(recorded) != 3 {
+		t.Fatalf("recorded %d attempts, want 3", len(recorded))
+	}
+	wantOutcomes := []string{history.OutcomeRetrying, history.OutcomeRetrying, history.OutcomeDelivered}
+	for i, want := range wantOutcomes {
+		if recorded[i].eventID != "evt_abc" || recorded[i].attempt.AttemptNumber != i+1 ||
+			recorded[i].attempt.Outcome != want {
+			t.Errorf("recorded attempt %d = %+v, want event evt_abc number %d outcome %s",
+				i, recorded[i], i+1, want)
+		}
 	}
 }
 
@@ -110,7 +127,10 @@ func TestDeliverExhaustsBudget(t *testing.T) {
 	defer srv.Close()
 
 	// 3 delays means 4 attempts.
-	out, err := newTestDeliverer(t, "1s,2s,4s").Deliver(context.Background(),
+	recorder := &fakeAttemptRecorder{}
+	deliverer := newTestDeliverer(t, "1s,2s,4s")
+	deliverer.recorder = recorder
+	out, err := deliverer.Deliver(context.Background(),
 		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
 	if err != nil {
 		t.Fatalf("Deliver returned an error for an exhausted budget; that is a normal outcome: %v", err)
@@ -126,6 +146,10 @@ func TestDeliverExhaustsBudget(t *testing.T) {
 	}
 	if !strings.Contains(out.Reason, "gave up") || !strings.Contains(out.Reason, "500") {
 		t.Errorf("Reason = %q, want it to say it gave up and name the status", out.Reason)
+	}
+	recorded := recorder.attempts()
+	if len(recorded) != 4 || recorded[3].attempt.Outcome != history.OutcomeExhausted {
+		t.Errorf("recorded attempts = %+v, want four with an exhausted final attempt", recorded)
 	}
 }
 
@@ -242,11 +266,69 @@ func TestDeliverStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestInterruptedAttemptIsRecordedWithDetachedContext(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	recorder := &fakeAttemptRecorder{}
+	deliverer := newTestDeliverer(t, "1s")
+	deliverer.recorder = recorder
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	_, err := deliverer.Deliver(ctx,
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Deliver error = %v, want context deadline exceeded", err)
+	}
+	recorded := recorder.attempts()
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d attempts, want 1", len(recorded))
+	}
+	if recorded[0].attempt.Outcome != history.OutcomeInterrupted ||
+		recorded[0].attempt.TransportError == "" {
+		t.Errorf("interrupted attempt = %+v, want transport error and interrupted outcome", recorded[0])
+	}
+}
+
+func TestInterruptedAttemptReportsDetachedHistoryWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	writeErr := errors.New("postgres unavailable")
+	deliverer := newTestDeliverer(t, "1s")
+	deliverer.recorder = &fakeAttemptRecorder{fail: writeErr}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	_, err := deliverer.Deliver(ctx,
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Deliver error = %v, want context deadline exceeded", err)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("Deliver error = %v, want detached history write failure", err)
+	}
+}
+
 // An unreachable subscriber is a failure like any other, not a panic.
 func TestDeliverHandlesConnectionRefused(t *testing.T) {
 	t.Parallel()
 
-	out, err := newTestDeliverer(t, "1s").Deliver(context.Background(),
+	recorder := &fakeAttemptRecorder{}
+	deliverer := newTestDeliverer(t, "1s")
+	deliverer.recorder = recorder
+	out, err := deliverer.Deliver(context.Background(),
 		subscriptions.Subscription{ID: 1, URL: "http://127.0.0.1:1/nothing", Secret: "s"}, testRecord())
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
@@ -256,6 +338,10 @@ func TestDeliverHandlesConnectionRefused(t *testing.T) {
 	}
 	if out.LastStatus != 0 {
 		t.Errorf("LastStatus = %d, want 0 when no response arrived", out.LastStatus)
+	}
+	recorded := recorder.attempts()
+	if len(recorded) != 2 || recorded[0].attempt.HTTPStatus != nil || recorded[0].attempt.TransportError == "" {
+		t.Errorf("recorded transport failures = %+v, want errors without HTTP status", recorded)
 	}
 }
 

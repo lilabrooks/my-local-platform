@@ -14,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 )
 
@@ -29,9 +30,16 @@ type Producer interface {
 	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
 }
 
+// EventStore persists accepted events and answers their delivery history.
+type EventStore interface {
+	CreateEvent(context.Context, event.Record) error
+	Attempts(context.Context, string) ([]history.Attempt, error)
+}
+
 // Server accepts events and produces them.
 type Server struct {
 	producer Producer
+	events   EventStore
 	topic    string
 	log      *slog.Logger
 	ready    atomic.Bool
@@ -40,11 +48,11 @@ type Server struct {
 
 // New returns a Server that is not yet ready; call MarkReady once the broker
 // connection has been established.
-func New(p Producer, topic string, log *slog.Logger) *Server {
+func New(p Producer, events EventStore, topic string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{producer: p, topic: topic, log: log}
+	return &Server{producer: p, events: events, topic: topic, log: log}
 }
 
 // MarkReady flips readiness. Kubernetes pulls the pod from its Service when
@@ -55,6 +63,7 @@ func (s *Server) MarkReady(ready bool) { s.ready.Store(ready) }
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/events", s.postEvent)
+	mux.HandleFunc("GET /v1/events/{id}/attempts", s.getAttempts)
 	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -147,6 +156,18 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not encode the event")
 		return
 	}
+	if s.events == nil {
+		s.log.Error("persist event", "error", "event store is not configured", "event_id", id)
+		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
+		writeError(w, http.StatusServiceUnavailable, "event history is unavailable, retry")
+		return
+	}
+	if err := s.events.CreateEvent(r.Context(), rec); err != nil {
+		s.log.Error("persist event", "error", err, "event_id", id, "tenant", rec.TenantID)
+		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
+		writeError(w, http.StatusServiceUnavailable, "could not durably accept the event, retry")
+		return
+	}
 
 	// No Topic on the message: the Writer carries it, and kafka-go rejects a
 	// message that sets it too ("Topic must not be specified for both Writer
@@ -156,9 +177,12 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		Key:   rec.Key(),
 		Value: value,
 	}); err != nil {
-		// The one outcome that must never happen is returning success for an
-		// event that was not durably written, so an unreachable broker is a
-		// 503 and the caller retries. Nothing is buffered in memory.
+		// WriteMessages can return after handing the record to kafka-go's
+		// background writer, so an error does not prove the record stayed off the
+		// broker. Keep the event row: a consumer that does see the record needs its
+		// history anchor, and the caller still receives 503 rather than acceptance.
+		// Relay could not confirm the durable write, so the caller gets 503 and
+		// may retry. The database row above is the only retained local state.
 		s.log.Error("produce", "error", err, "event_id", id, "tenant", rec.TenantID)
 		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
 		writeError(w, http.StatusServiceUnavailable, "could not durably accept the event, retry")
@@ -169,6 +193,33 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	metrics.IngestEvents.WithLabelValues("accepted").Inc()
 	s.log.Info("accepted", "event_id", id, "tenant", rec.TenantID, "type", rec.Type, "topic", s.topic)
 	writeJSON(w, http.StatusAccepted, postEventResponse{ID: id})
+}
+
+type attemptsResponse struct {
+	EventID  string            `json:"event_id"`
+	Attempts []history.Attempt `json:"attempts"`
+}
+
+func (s *Server) getAttempts(w http.ResponseWriter, r *http.Request) {
+	if s.events == nil {
+		writeError(w, http.StatusServiceUnavailable, "event history is unavailable")
+		return
+	}
+	id := r.PathValue("id")
+	attempts, err := s.events.Attempts(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, history.ErrEventNotFound) {
+			writeError(w, http.StatusNotFound, "event %q was not found", id)
+			return
+		}
+		s.log.Error("query attempts", "error", err, "event_id", id)
+		writeError(w, http.StatusServiceUnavailable, "event history is unavailable")
+		return
+	}
+	if attempts == nil {
+		attempts = make([]history.Attempt, 0)
+	}
+	writeJSON(w, http.StatusOK, attemptsResponse{EventID: id, Attempts: attempts})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

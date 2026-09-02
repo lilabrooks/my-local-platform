@@ -14,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
@@ -131,7 +132,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 				// uncommitted and exit before the orchestrator reaches SIGKILL.
 				c.log.Warn("shutdown drain expired, record will be redelivered",
 					"partition", msg.Partition, "offset", msg.Offset,
-					"record_timeout", c.recordTimeout)
+					"record_timeout", c.recordTimeout, "error", err)
 				return nil
 			}
 			// Every failure leaves the offset uncommitted, so the record comes
@@ -226,17 +227,65 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 	// succeeded. Silent data loss, and Deliver is one line from producing it:
 	// it returns d.sleep's error verbatim.
 	//
+	// A missing event row cannot repair itself on Kafka redelivery. Treat it as
+	// terminal after every other subscriber error has cleared, or one orphaned
+	// record crash-loops the consumer and blocks its partition forever.
+	historyMissing := make([]bool, len(errs))
+	retryErrors := make([]error, 0, len(errs))
+	for i, err := range errs {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, history.ErrEventNotFound) {
+			historyMissing[i] = true
+			continue
+		}
+		retryErrors = append(retryErrors, err)
+	}
 	// Joined rather than first-wins because each subscriber has its own budget
 	// and losing the others' failures is how this went wrong the first time.
 	// errors.Join is nil when every element is nil, and errors.Is still reaches
 	// a context.Canceled inside it, so Run's shutdown path is unchanged.
-	if err := errors.Join(errs...); err != nil {
+	if err := errors.Join(retryErrors...); err != nil {
 		return err
+	}
+	for i, missing := range historyMissing {
+		if !missing {
+			continue
+		}
+		out := outcomes[i]
+		reason := fmt.Sprintf("event history missing after attempt %d: %v", out.Attempts, errs[i])
+		c.log.Error("event history missing, dead-lettering",
+			"event_id", rec.ID, "tenant", rec.TenantID,
+			"url", out.Subscription.URL, "attempts", out.Attempts,
+			"status", out.LastStatus, "delivered", out.Delivered)
+		if err := c.deadLetter(ctx, DeadLetter{
+			Record:         rec,
+			SubscriptionID: out.Subscription.ID,
+			URL:            out.Subscription.URL,
+			Attempts:       out.Attempts,
+			LastStatus:     out.LastStatus,
+			Reason:         reason,
+			FailedAt:       time.Now().UTC(),
+		}); err != nil {
+			return fmt.Errorf("dead-letter missing history for %s: %w", rec.ID, err)
+		}
+		if out.Delivered {
+			c.delivered.Add(1)
+			metrics.Deliveries.WithLabelValues("delivered").Inc()
+		} else {
+			c.deadLettered.Add(1)
+			metrics.Deliveries.WithLabelValues("dead_lettered").Inc()
+		}
+		metrics.DeadLetters.WithLabelValues("history_missing").Inc()
 	}
 
 	// Only once every subscriber has reached a terminal state is the record
 	// finished. Dead-letter the failures before the caller commits.
-	for _, out := range outcomes {
+	for i, out := range outcomes {
+		if historyMissing[i] {
+			continue
+		}
 		if out.Delivered {
 			c.delivered.Add(1)
 			metrics.Deliveries.WithLabelValues("delivered").Inc()

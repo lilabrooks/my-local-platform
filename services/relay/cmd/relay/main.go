@@ -27,6 +27,7 @@ import (
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/delivery"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/ingest"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
@@ -103,6 +104,20 @@ func runIngest(log *slog.Logger) error {
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	addr := ":" + envOr("PORT", "8080")
 	metrics.BuildInfo.WithLabelValues(version, "ingest").Set(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, envOr("DATABASE_URL",
+		"postgres://platform:platform@localhost:5432/platform?sslmode=disable"))
+	if err != nil {
+		return fmt.Errorf("database pool: %w", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		// Event history must exist before Kafka publication, so an ingest pod
+		// without Postgres cannot serve either API route truthfully.
+		return fmt.Errorf("database unreachable: %w", err)
+	}
 
 	writer := &kafka.Writer{
 		Addr:  kafka.TCP(brokers()...),
@@ -119,15 +134,12 @@ func runIngest(log *slog.Logger) error {
 	}
 	defer func() { _ = writer.Close() }()
 
-	server := ingest.New(writer, topic, log)
+	server := ingest.New(writer, history.New(pool), topic, log)
 	// Safe to be ready immediately: kafka.Writer connects lazily, and an
 	// unreachable broker surfaces as a 503 per request rather than at startup.
 	server.MarkReady(true)
 
 	srv := &http.Server{Addr: addr, Handler: server.Routes(), ReadHeaderTimeout: 5 * time.Second}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	// Consumer group lag is published here rather than by the consumers, even
 	// though it is entirely about them.
 	//
@@ -239,7 +251,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 
 	consumer := delivery.NewConsumer(
 		reader, dlq, subscriptions.New(pool),
-		delivery.NewDeliverer(schedule, attemptTimeout), stallBudget, log,
+		delivery.NewDeliverer(schedule, attemptTimeout, history.New(pool)), stallBudget, log,
 	)
 
 	// Health endpoints run alongside the consume loop: a consumer has no

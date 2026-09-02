@@ -81,6 +81,47 @@ Memory cannot be changed on a running cluster with the docker driver:
 | Tempo | http://localhost:3200 | none |
 | Grafana | http://localhost:3000 | anonymous, viewer role |
 | relay dashboard | http://localhost:3000/d/relay-delivery | anonymous, viewer role |
+| relay ingest and event history | http://localhost:8082 | none |
+| relay-deliver health | http://localhost:8083 | none |
+| sink | http://localhost:8084 | none |
+
+## Relay event history
+
+Submit an event, then query the delivery attempts by the returned id:
+
+```bash
+event_id="$(curl -fsS -X POST http://localhost:8082/v1/events \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant_id":"acme","type":"example.created","data":{"n":1}}' \
+  | jq -r .id)"
+
+curl -fsS "http://localhost:8082/v1/events/${event_id}/attempts" | jq
+```
+
+`GET /v1/events/{id}/attempts` returns attempts ordered by start time. Each row
+names the subscription id and URL, its per-subscription attempt number, start
+and finish time, an HTTP status or transport error, and one of these outcomes:
+`retrying`, `delivered`, `exhausted`, or `interrupted`. A known event with no
+completed attempts returns `200` with `"attempts": []`; an unknown id returns
+`404`. The empty result can also follow a `503` from ingest when relay saved the
+event but could not confirm whether Kafka accepted it.
+
+An event whose Kafka record has no matching history row is parked in the DLQ
+with reason `history_missing` so it cannot block its partition. The delivery
+outcome still reflects what the subscriber did: a subscriber that returned 2xx
+is counted as delivered even though the missing audit anchor also requires a
+DLQ record.
+
+The M3 API has no tenant authentication. Anyone who can reach relay-ingest can
+query any event id they know, so this local surface does not establish tenant
+isolation.
+
+Attempt history is written before the consumer commits its Kafka offset. If the
+database write fails after the subscriber received the request, relay leaves
+the offset uncommitted. Kafka redelivery can send the webhook again, using the
+same `webhook-id`; subscribers must deduplicate that id. This preserves relay's
+at-least-once delivery contract and prevents an unrecorded attempt from being
+committed as finished.
 
 ## Metrics and the relay dashboard
 

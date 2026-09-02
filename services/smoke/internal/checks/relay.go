@@ -59,9 +59,16 @@ func Relay(cfg platform.Config) Check {
 		if err != nil {
 			return "", err
 		}
+		attempts, err := fetchAttemptHistory(ctx, cfg.RelayIngestURL, eventID)
+		if err != nil {
+			return "", err
+		}
+		if err := checkAttemptHistory(eventID, attempts); err != nil {
+			return "", err
+		}
 
-		return fmt.Sprintf("%s delivered to %s, dead-lettered %s after %d attempts",
-			eventID, delivered, dead.URL, dead.Attempts), nil
+		return fmt.Sprintf("%s delivered to %s, dead-lettered %s after %d attempts; %d attempts persisted",
+			eventID, delivered, dead.URL, dead.Attempts, len(attempts)), nil
 	}}
 }
 
@@ -104,6 +111,69 @@ func postEvent(ctx context.Context, ingestURL, marker string) (string, error) {
 		return "", fmt.Errorf("ingest returned 202 with no event id: %s", payload)
 	}
 	return accepted.ID, nil
+}
+
+type deliveryAttempt struct {
+	SubscriptionID  int64  `json:"subscription_id"`
+	SubscriptionURL string `json:"subscription_url"`
+	AttemptNumber   int    `json:"attempt_number"`
+	Outcome         string `json:"outcome"`
+}
+
+func fetchAttemptHistory(ctx context.Context, ingestURL, eventID string) ([]deliveryAttempt, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(ingestURL, "/")+"/v1/events/"+eventID+"/attempts", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build attempt-history request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query attempt history: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return nil, fmt.Errorf("attempt history returned %d, want 200: %s",
+			resp.StatusCode, bytes.TrimSpace(payload))
+	}
+	var got struct {
+		EventID  string            `json:"event_id"`
+		Attempts []deliveryAttempt `json:"attempts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		return nil, fmt.Errorf("decode attempt history: %w", err)
+	}
+	if got.EventID != eventID {
+		return nil, fmt.Errorf("attempt history event id %q, want %q", got.EventID, eventID)
+	}
+	return got.Attempts, nil
+}
+
+func checkAttemptHistory(eventID string, attempts []deliveryAttempt) error {
+	var delivered, exhausted bool
+	lastBySubscription := make(map[int64]int)
+	for _, attempt := range attempts {
+		if attempt.SubscriptionID <= 0 || attempt.SubscriptionURL == "" {
+			return fmt.Errorf("event %s has an attempt without subscriber identity: %+v", eventID, attempt)
+		}
+		if attempt.AttemptNumber <= lastBySubscription[attempt.SubscriptionID] {
+			return fmt.Errorf("event %s subscription %d attempt number %d follows %d",
+				eventID, attempt.SubscriptionID, attempt.AttemptNumber,
+				lastBySubscription[attempt.SubscriptionID])
+		}
+		lastBySubscription[attempt.SubscriptionID] = attempt.AttemptNumber
+		if strings.HasSuffix(attempt.SubscriptionURL, "/hooks/ok") && attempt.Outcome == "delivered" {
+			delivered = true
+		}
+		if strings.HasSuffix(attempt.SubscriptionURL, "/hooks/flaky") && attempt.Outcome == "exhausted" {
+			exhausted = true
+		}
+	}
+	if !delivered || !exhausted {
+		return fmt.Errorf("event %s history did not contain delivered /hooks/ok and exhausted /hooks/flaky attempts: %+v",
+			eventID, attempts)
+	}
+	return nil
 }
 
 type sinkDelivery struct {

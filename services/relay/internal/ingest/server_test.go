@@ -11,11 +11,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 )
 
@@ -23,6 +25,40 @@ type fakeProducer struct {
 	mu   sync.Mutex
 	got  []kafka.Message
 	fail error
+}
+
+type fakeEventStore struct {
+	mu         sync.Mutex
+	events     map[string]event.Record
+	attempts   map[string][]history.Attempt
+	failCreate error
+	failQuery  error
+}
+
+func (f *fakeEventStore) CreateEvent(_ context.Context, rec event.Record) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failCreate != nil {
+		return f.failCreate
+	}
+	if f.events == nil {
+		f.events = make(map[string]event.Record)
+	}
+	f.events[rec.ID] = rec
+	return nil
+}
+
+func (f *fakeEventStore) Attempts(_ context.Context, id string) ([]history.Attempt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failQuery != nil {
+		return nil, f.failQuery
+	}
+	if _, ok := f.events[id]; !ok {
+		return nil, history.ErrEventNotFound
+	}
+	got := f.attempts[id]
+	return append(make([]history.Attempt, 0, len(got)), got...), nil
 }
 
 func (f *fakeProducer) WriteMessages(_ context.Context, msgs ...kafka.Message) error {
@@ -51,7 +87,11 @@ func (f *fakeProducer) messages() []kafka.Message {
 }
 
 func newTestServer(p Producer) http.Handler {
-	s := New(p, "mlp.relay.deliveries", slog.New(slog.DiscardHandler))
+	return newTestServerWithEvents(p, &fakeEventStore{})
+}
+
+func newTestServerWithEvents(p Producer, events EventStore) http.Handler {
+	s := New(p, events, "mlp.relay.deliveries", slog.New(slog.DiscardHandler))
 	s.MarkReady(true)
 	return s.Routes()
 }
@@ -131,13 +171,15 @@ func TestTrailingWhitespaceIsAccepted(t *testing.T) {
 	}
 }
 
-// The one outcome that must never happen: a success for an event that was not
-// written. An unreachable broker is a 503, and nothing is buffered.
+// The one outcome that must never happen is success when Kafka reports failure.
+// The event row stays because the write may have reached Kafka before its
+// caller's context expired.
 func TestBrokerFailureIsNotSuccess(t *testing.T) {
 	t.Parallel()
 
 	p := &fakeProducer{fail: errors.New("broker unreachable")}
-	h := newTestServer(p)
+	events := &fakeEventStore{}
+	h := newTestServerWithEvents(p, events)
 
 	rr := post(t, h, `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`)
 	if rr.Code != http.StatusServiceUnavailable {
@@ -145,6 +187,94 @@ func TestBrokerFailureIsNotSuccess(t *testing.T) {
 	}
 	if strings.Contains(rr.Body.String(), "evt_") {
 		t.Errorf("a rejected event was given an id the caller might record: %s", rr.Body)
+	}
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	if len(events.events) != 1 {
+		t.Errorf("broker failure retained %d event rows, want 1 for an ambiguous Kafka write", len(events.events))
+	}
+}
+
+func TestEventHistoryFailureIsNotSuccess(t *testing.T) {
+	t.Parallel()
+
+	p := &fakeProducer{}
+	events := &fakeEventStore{failCreate: errors.New("database unavailable")}
+	rr := post(t, newTestServerWithEvents(p, events),
+		`{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+	if got := len(p.messages()); got != 0 {
+		t.Errorf("produced %d messages after event persistence failed, want 0", got)
+	}
+}
+
+func TestGetAttemptsDistinguishesUnknownAndEmptyHistory(t *testing.T) {
+	t.Parallel()
+
+	events := &fakeEventStore{}
+	h := newTestServerWithEvents(&fakeProducer{}, events)
+	accepted := post(t, h, `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`)
+	var created postEventResponse
+	if err := json.Unmarshal(accepted.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode accepted event: %v", err)
+	}
+
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		return rr
+	}
+
+	empty := get("/v1/events/" + created.ID + "/attempts")
+	if empty.Code != http.StatusOK {
+		t.Fatalf("known event status = %d, want 200: %s", empty.Code, empty.Body)
+	}
+	var got attemptsResponse
+	if err := json.Unmarshal(empty.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode empty history: %v", err)
+	}
+	if got.EventID != created.ID || got.Attempts == nil || len(got.Attempts) != 0 {
+		t.Errorf("empty history = %+v, want event %s and [] attempts", got, created.ID)
+	}
+
+	status := http.StatusOK
+	now := time.Now().UTC()
+	events.mu.Lock()
+	events.attempts = map[string][]history.Attempt{created.ID: {{
+		SubscriptionID:  7,
+		SubscriptionURL: "http://sink:8081/hooks/ok",
+		AttemptNumber:   1,
+		StartedAt:       now,
+		FinishedAt:      now.Add(time.Millisecond),
+		HTTPStatus:      &status,
+		Outcome:         history.OutcomeDelivered,
+	}}}
+	events.mu.Unlock()
+
+	withAttempt := get("/v1/events/" + created.ID + "/attempts")
+	if err := json.Unmarshal(withAttempt.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode attempt history: %v", err)
+	}
+	if len(got.Attempts) != 1 || got.Attempts[0].SubscriptionID != 7 ||
+		got.Attempts[0].Outcome != history.OutcomeDelivered {
+		t.Errorf("attempt history = %+v, want delivered subscription 7", got.Attempts)
+	}
+
+	unknown := get("/v1/events/evt_unknown/attempts")
+	if unknown.Code != http.StatusNotFound {
+		t.Errorf("unknown event status = %d, want 404", unknown.Code)
+	}
+
+	events.mu.Lock()
+	events.failQuery = errors.New("database unavailable")
+	events.mu.Unlock()
+	unavailable := get("/v1/events/" + created.ID + "/attempts")
+	if unavailable.Code != http.StatusServiceUnavailable {
+		t.Errorf("database failure status = %d, want 503", unavailable.Code)
 	}
 }
 
@@ -205,7 +335,7 @@ func TestOversizedBodyIsNotAParseError(t *testing.T) {
 func TestReadinessGatesTraffic(t *testing.T) {
 	t.Parallel()
 
-	s := New(&fakeProducer{}, "t", slog.New(slog.DiscardHandler))
+	s := New(&fakeProducer{}, &fakeEventStore{}, "t", slog.New(slog.DiscardHandler))
 	h := s.Routes()
 
 	// Not ready until told: a pod that reports ready before its broker
