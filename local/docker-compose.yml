@@ -331,8 +331,11 @@ services:
       # to itself.
       KAFKA_BOOTSTRAP: kafka:19092
       RELAY_TOPIC: mlp.relay.deliveries
+      DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
     depends_on:
       kafka:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   relay-deliver:

@@ -23,7 +23,7 @@ smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
   PASS  kafka           211ms  mlp.events partition 0 offset 6
   PASS  rabbitmq         14ms  queue mlp.smoke round trip
   PASS  postgres         17ms  row 6 on postgres 18.6
-  PASS  relay           685ms  evt_9b68cf19c73ed58a53d441f25a3bd5cb delivered to /hooks/ok, dead-lettered http://sink:8081/hooks/flaky after 3 attempts
+  PASS  relay           684ms  evt_36fe9a6f159b2789ae59a8bf0d2bf896 delivered to /hooks/ok, dead-lettered http://sink:8081/hooks/flaky after 3 attempts; 4 attempts persisted
 
 all components healthy
 ```

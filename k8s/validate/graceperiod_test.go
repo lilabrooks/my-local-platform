@@ -191,11 +191,14 @@ func gracePeriod(podSpec map[string]any) (time.Duration, error) {
 // performs after SIGTERM ends before Kubernetes may send SIGKILL.
 //
 // DefaultStallBudget is service policy. Consumer.Run enforces it as the complete
-// record deadline during normal work and shutdown drain. Raising that deadline
-// past the grace period would leave relay waiting when Kubernetes sends
-// SIGKILL, while the schedule-only assertion above could still pass.
+// record deadline during normal work and shutdown drain. An interrupted HTTP
+// attempt then gets one bounded history write on a fresh context. Raising their
+// combined budget past the grace period would leave relay waiting when
+// Kubernetes sends SIGKILL, while the schedule-only assertion above could still
+// pass.
 func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 	checked := 0
+	drainBudget := config.DefaultStallBudget + config.InterruptedAttemptWriteTimeout
 
 	for _, dir := range manifestDirs(t) {
 		for _, deploy := range kindsOf(render(t, dir), "Deployment") {
@@ -222,13 +225,14 @@ func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 				continue
 			}
 			checked++
-			if config.DefaultStallBudget >= grace {
-				t.Errorf("%s has terminationGracePeriodSeconds=%v but config.DefaultStallBudget is %v.\n"+
-					"The budget's stated basis is that it sits below the grace period, so a record "+
-					"that uses all of it is still drained rather than SIGKILLed. Raise the grace "+
-					"period above %v, or lower the budget.\n"+
+			if drainBudget >= grace {
+				t.Errorf("%s has terminationGracePeriodSeconds=%v but relay's drain budget is %v "+
+					"(%v record work + %v interrupted-attempt history write).\n"+
+					"A record that uses all of it must finish before SIGKILL. Raise the grace "+
+					"period above %v, or lower one of the budgets.\n"+
 					"See docs/adr/0006-kafka-over-sqs-for-delivery.md.",
-					name(deploy), grace, config.DefaultStallBudget, config.DefaultStallBudget)
+					name(deploy), grace, drainBudget, config.DefaultStallBudget,
+					config.InterruptedAttemptWriteTimeout, drainBudget)
 			}
 		}
 	}

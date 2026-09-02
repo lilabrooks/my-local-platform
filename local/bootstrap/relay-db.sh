@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 # Create relay's schema and seed local subscriptions. Idempotent.
-#
-# Nothing writes this table at runtime -- relay's delivery consumer only reads
-# it. Subscriptions are configuration in M1, not a managed resource.
 set -euo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-mlp-postgres}"
@@ -49,6 +46,53 @@ CREATE TABLE IF NOT EXISTS relay_subscriptions (
 -- The delivery consumer's only query is "active subscriptions for this tenant".
 CREATE INDEX IF NOT EXISTS relay_subscriptions_active_tenant
     ON relay_subscriptions (tenant_id) WHERE active;
+
+-- Ingest creates this row before publishing to Kafka. Delivery attempts can
+-- therefore reference the event even when a consumer fetches it immediately.
+-- A row is retained when Kafka publication reports an error because that error
+-- can be ambiguous: the broker may still have accepted the record.
+CREATE TABLE IF NOT EXISTS relay_events (
+    id              text        PRIMARY KEY,
+    tenant_id       text        NOT NULL,
+    event_type      text        NOT NULL,
+    data            jsonb       NOT NULL,
+    idempotency_key text,
+    occurred_at     timestamptz NOT NULL,
+    accepted_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS relay_events_tenant_accepted
+    ON relay_events (tenant_id, accepted_at DESC);
+
+-- A failed attempt-history write leaves the Kafka offset uncommitted. The
+-- subscriber may therefore see a duplicate on redelivery, which is relay's
+-- at-least-once contract, while an unrecorded delivery cannot be committed.
+CREATE TABLE IF NOT EXISTS relay_delivery_attempts (
+    id               bigserial   PRIMARY KEY,
+    event_id         text        NOT NULL REFERENCES relay_events (id) ON DELETE CASCADE,
+    subscription_id  bigint      NOT NULL,
+    subscription_url text        NOT NULL,
+    attempt_number   integer     NOT NULL CHECK (attempt_number > 0),
+    started_at       timestamptz NOT NULL,
+    finished_at      timestamptz NOT NULL,
+    http_status      integer,
+    transport_error  text,
+    outcome          text        NOT NULL,
+
+    CONSTRAINT relay_delivery_attempts_time_order
+        CHECK (finished_at >= started_at),
+    CONSTRAINT relay_delivery_attempts_result
+        CHECK ((http_status IS NULL) <> (transport_error IS NULL)),
+    CONSTRAINT relay_delivery_attempts_http_status
+        CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
+    CONSTRAINT relay_delivery_attempts_outcome
+        CHECK (outcome IN ('delivered', 'retrying', 'exhausted', 'interrupted')),
+    CONSTRAINT relay_delivery_attempts_sequence
+        UNIQUE (event_id, subscription_id, attempt_number)
+);
+
+CREATE INDEX IF NOT EXISTS relay_delivery_attempts_event_order
+    ON relay_delivery_attempts (event_id, started_at, id);
 
 -- Two subscribers for one tenant, so the partial-failure path is exercisable:
 -- one healthy, one pointed at a sink configured to fail. A single subscriber

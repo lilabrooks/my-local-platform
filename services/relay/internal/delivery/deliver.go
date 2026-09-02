@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
+	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 )
@@ -30,6 +32,12 @@ type Outcome struct {
 	Reason string
 }
 
+// AttemptRecorder makes an HTTP attempt durable before its Kafka record can be
+// committed. Returning an error forces Kafka redelivery.
+type AttemptRecorder interface {
+	RecordAttempt(context.Context, string, history.Attempt) error
+}
+
 // Deliverer sends one event to one subscriber, retrying on the configured
 // schedule until it succeeds or the budget is spent.
 type Deliverer struct {
@@ -37,7 +45,8 @@ type Deliverer struct {
 	schedule config.RetrySchedule
 	// timeout bounds a single attempt. The schedule and this together are what
 	// ValidateStallBudget checks against the stall budget.
-	timeout time.Duration
+	timeout  time.Duration
+	recorder AttemptRecorder
 	// sleep is time.Sleep in production and instant in tests, so a test of the
 	// retry logic does not actually wait out the schedule.
 	sleep func(context.Context, time.Duration) error
@@ -45,7 +54,7 @@ type Deliverer struct {
 
 // NewDeliverer builds a Deliverer. The schedule must already have passed
 // ValidateStallBudget.
-func NewDeliverer(schedule config.RetrySchedule, timeout time.Duration) *Deliverer {
+func NewDeliverer(schedule config.RetrySchedule, timeout time.Duration, recorder AttemptRecorder) *Deliverer {
 	return &Deliverer{
 		client: &http.Client{
 			// No shared timeout: each attempt gets its own context, so a
@@ -62,6 +71,7 @@ func NewDeliverer(schedule config.RetrySchedule, timeout time.Duration) *Deliver
 		},
 		schedule: schedule,
 		timeout:  timeout,
+		recorder: recorder,
 		sleep:    sleepCtx,
 	}
 }
@@ -120,29 +130,52 @@ func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription,
 		}
 
 		out.Attempts = attempt
+		startedAt := time.Now().UTC()
 		status, reqErr := d.attempt(ctx, sub, rec, body)
+		finishedAt := time.Now().UTC()
 		out.LastStatus = status
+		delay, willRetry := d.schedule.DelayFor(attempt)
+		attemptOutcome := history.OutcomeRetrying
 
 		switch {
 		case reqErr != nil && ctx.Err() != nil:
 			// The complete-record deadline expired, or shutdown exhausted its
 			// drain allowance. This is not a subscriber failure. (It is not a
 			// rebalance either: see the note on Deliver above.)
-			return out, ctx.Err()
+			out.Reason = fmt.Sprintf("attempt %d: %v", attempt, reqErr)
+			attemptOutcome = history.OutcomeInterrupted
 		case reqErr != nil:
 			out.Reason = fmt.Sprintf("attempt %d: %v", attempt, reqErr)
 		case status >= 200 && status < 300:
 			out.Delivered = true
 			out.Reason = ""
-			return out, nil
+			attemptOutcome = history.OutcomeDelivered
 		default:
 			// Anything not 2xx is a failure, including 3xx: a redirect is not
 			// an acknowledgement that the event was processed.
 			out.Reason = fmt.Sprintf("attempt %d: HTTP %d", attempt, status)
 		}
+		if !out.Delivered && !willRetry && ctx.Err() == nil {
+			attemptOutcome = history.OutcomeExhausted
+		}
 
-		delay, ok := d.schedule.DelayFor(attempt)
-		if !ok {
+		recordErr := d.recordAttempt(ctx, rec.ID, sub, attempt, startedAt, finishedAt,
+			status, reqErr, attemptOutcome)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Preserve the record deadline for shutdown handling and keep a detached
+			// write failure visible to the consumer log.
+			if recordErr != nil {
+				return out, errors.Join(ctxErr, recordErr)
+			}
+			return out, ctxErr
+		}
+		if recordErr != nil {
+			return out, recordErr
+		}
+		if out.Delivered {
+			return out, nil
+		}
+		if !willRetry {
 			break // budget spent
 		}
 		if err := d.sleep(ctx, delay); err != nil {
@@ -152,6 +185,45 @@ func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription,
 
 	out.Reason = fmt.Sprintf("gave up after %d attempts: %s", out.Attempts, out.Reason)
 	return out, nil
+}
+
+func (d *Deliverer) recordAttempt(
+	ctx context.Context,
+	eventID string,
+	sub subscriptions.Subscription,
+	attemptNumber int,
+	startedAt, finishedAt time.Time,
+	status int,
+	reqErr error,
+	outcome string,
+) error {
+	if d.recorder == nil {
+		return nil
+	}
+	recordCtx := ctx
+	if outcome == history.OutcomeInterrupted {
+		var cancel context.CancelFunc
+		recordCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), config.InterruptedAttemptWriteTimeout)
+		defer cancel()
+	}
+	record := history.Attempt{
+		SubscriptionID:  sub.ID,
+		SubscriptionURL: sub.URL,
+		AttemptNumber:   attemptNumber,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		Outcome:         outcome,
+	}
+	if reqErr != nil {
+		record.TransportError = reqErr.Error()
+	} else {
+		record.HTTPStatus = &status
+	}
+	if err := d.recorder.RecordAttempt(recordCtx, eventID, record); err != nil {
+		return fmt.Errorf("record attempt %d for event %s and subscription %d: %w",
+			attemptNumber, eventID, sub.ID, err)
+	}
+	return nil
 }
 
 // attempt makes one HTTP request and reports its status.

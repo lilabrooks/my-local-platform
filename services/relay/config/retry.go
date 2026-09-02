@@ -77,12 +77,14 @@ var presets = map[string][]time.Duration{
 //   - The Kubernetes demo schedule needs at most 25s for subscriber attempts.
 //     A 30s record deadline leaves 5s for lookup, dead-letter and commit work.
 //   - relay-deliver's 45s termination grace period leaves another 15s after the
-//     record deadline for process and container shutdown.
+//     record deadline. An interrupted attempt may use 5s of that for its final
+//     history write, leaving 10s for process and container shutdown.
 //
 // Consumer.Run enforces this as the deadline for complete record work and lets
 // a fetched record use it after SIGTERM. k8s/validate checks both sides of the
 // relationship: the configured delivery schedule fits below this deadline, and
-// the deadline fits below the pod's grace period.
+// the deadline plus the interrupted-attempt write budget fit below the pod's
+// grace period.
 //
 // This constant was previously named DefaultRebalanceTimeout, on the belief
 // that a consumer busy past kafka-go's RebalanceTimeout could not rejoin its
@@ -93,6 +95,12 @@ var presets = map[string][]time.Duration{
 // manifest's schedule is one relay would actually start on, using the same
 // number.
 const DefaultStallBudget = 30 * time.Second
+
+// InterruptedAttemptWriteTimeout bounds the history write that starts after a
+// record deadline expires. It is separate from DefaultStallBudget because the
+// attempt row needs a fresh context once the record context can no longer do
+// database work. k8s/validate includes both values in the pod drain budget.
+const InterruptedAttemptWriteTimeout = 5 * time.Second
 
 // ErrEmptySchedule is returned for a schedule with no delays in it. A zero
 // retry budget is more likely a typo than a decision; spell it "0s" to mean
