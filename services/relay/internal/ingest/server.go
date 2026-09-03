@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -18,11 +19,19 @@ import (
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 )
 
-// MaxBodyBytes bounds a request before it is parsed. Slightly above
-// event.MaxDataBytes so an oversized payload is reported as "data too large"
-// rather than as a truncated-JSON parse error, which sends the caller looking
-// in the wrong place.
-const MaxBodyBytes = event.MaxDataBytes + 8*1024
+const (
+	// MaxBodyBytes bounds a request before it is parsed. Slightly above
+	// event.MaxDataBytes so an oversized payload is reported as "data too large"
+	// rather than as a truncated-JSON parse error, which sends the caller looking
+	// in the wrong place.
+	MaxBodyBytes = event.MaxDataBytes + 8*1024
+
+	// acceptanceTimeout lets a valid request finish its Postgres and Kafka
+	// acceptance after the client disconnects. kafka.Writer bounds its broker
+	// write at 10 seconds; this leaves time to record the acknowledgement and
+	// release the row lock.
+	acceptanceTimeout = 15 * time.Second
+)
 
 // Producer is the part of kafka.Writer this package needs. An interface so the
 // handler is testable without a broker.
@@ -32,7 +41,7 @@ type Producer interface {
 
 // EventStore persists accepted events and answers their delivery history.
 type EventStore interface {
-	CreateEvent(context.Context, event.Record) error
+	AcceptEvent(context.Context, event.Record, history.Publisher) (history.Acceptance, error)
 	Attempts(context.Context, string) ([]history.Attempt, error)
 }
 
@@ -135,13 +144,17 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	idempotencyKey := req.IdempotencyKey
+	if strings.TrimSpace(idempotencyKey) == "" {
+		idempotencyKey = ""
+	}
 	rec := event.Record{
 		ID:             id,
 		TenantID:       req.TenantID,
 		Type:           req.Type,
 		Data:           req.Data,
 		OccurredAt:     time.Now().UTC(),
-		IdempotencyKey: req.IdempotencyKey,
+		IdempotencyKey: idempotencyKey,
 	}
 	if err := rec.Validate(); err != nil {
 		metrics.IngestEvents.WithLabelValues("invalid").Inc()
@@ -149,50 +162,52 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	value, err := json.Marshal(rec)
-	if err != nil {
-		s.log.Error("encode record", "error", err, "event_id", id)
-		metrics.IngestEvents.WithLabelValues("internal").Inc()
-		writeError(w, http.StatusInternalServerError, "could not encode the event")
-		return
-	}
 	if s.events == nil {
 		s.log.Error("persist event", "error", "event store is not configured", "event_id", id)
 		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
 		writeError(w, http.StatusServiceUnavailable, "event history is unavailable, retry")
 		return
 	}
-	if err := s.events.CreateEvent(r.Context(), rec); err != nil {
-		s.log.Error("persist event", "error", err, "event_id", id, "tenant", rec.TenantID)
+	acceptCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), acceptanceTimeout)
+	defer cancel()
+	accepted, err := s.events.AcceptEvent(acceptCtx, rec, func(ctx context.Context, chosen event.Record) error {
+		value, err := event.EncodeRecord(chosen)
+		if err != nil {
+			return fmt.Errorf("encode record: %w", err)
+		}
+		// No Topic on the message: the Writer carries it, and kafka-go rejects a
+		// message that sets it too. The database row is already committed here,
+		// so a fast consumer can attach attempt history before this call returns.
+		return s.producer.WriteMessages(ctx, kafka.Message{Key: chosen.Key(), Value: value})
+	})
+	if err != nil {
+		if errors.Is(err, history.ErrIdempotencyConflict) {
+			metrics.IngestEvents.WithLabelValues("conflict").Inc()
+			writeError(w, http.StatusConflict,
+				"idempotency key was already used with different type or data")
+			return
+		}
+		operation := "persist event"
+		if errors.Is(err, history.ErrPublishFailed) {
+			operation = "produce"
+		}
+		s.log.Error(operation, "error", err, "event_id", id, "tenant", rec.TenantID)
 		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
 		writeError(w, http.StatusServiceUnavailable, "could not durably accept the event, retry")
 		return
 	}
 
-	// No Topic on the message: the Writer carries it, and kafka-go rejects a
-	// message that sets it too ("Topic must not be specified for both Writer
-	// and Message"). Found by running against a real broker -- a fake producer
-	// happily accepts both.
-	if err := s.producer.WriteMessages(r.Context(), kafka.Message{
-		Key:   rec.Key(),
-		Value: value,
-	}); err != nil {
-		// WriteMessages can return after handing the record to kafka-go's
-		// background writer, so an error does not prove the record stayed off the
-		// broker. Keep the event row: a consumer that does see the record needs its
-		// history anchor, and the caller still receives 503 rather than acceptance.
-		// Relay could not confirm the durable write, so the caller gets 503 and
-		// may retry. The database row above is the only retained local state.
-		s.log.Error("produce", "error", err, "event_id", id, "tenant", rec.TenantID)
-		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
-		writeError(w, http.StatusServiceUnavailable, "could not durably accept the event, retry")
-		return
+	if accepted.Deduplicated {
+		metrics.IngestEvents.WithLabelValues("deduplicated").Inc()
+		s.log.Info("deduplicated", "event_id", accepted.Record.ID,
+			"tenant", accepted.Record.TenantID, "type", accepted.Record.Type)
+	} else {
+		s.accepted.Add(1)
+		metrics.IngestEvents.WithLabelValues("accepted").Inc()
+		s.log.Info("accepted", "event_id", accepted.Record.ID, "tenant", accepted.Record.TenantID,
+			"type", accepted.Record.Type, "topic", s.topic)
 	}
-
-	s.accepted.Add(1)
-	metrics.IngestEvents.WithLabelValues("accepted").Inc()
-	s.log.Info("accepted", "event_id", id, "tenant", rec.TenantID, "type", rec.Type, "topic", s.topic)
-	writeJSON(w, http.StatusAccepted, postEventResponse{ID: id})
+	writeJSON(w, http.StatusAccepted, postEventResponse{ID: accepted.Record.ID})
 }
 
 type attemptsResponse struct {

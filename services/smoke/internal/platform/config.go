@@ -22,6 +22,7 @@ type Config struct {
 	// relay check, so `make smoke` still passes on a stack brought up without
 	// that profile.
 	RelayIngestURL string
+	RelayTopic     string
 	RelayDLQTopic  string
 	SinkURL        string
 	RabbitURL      string
@@ -53,6 +54,7 @@ func Load() Config {
 		KafkaTopic:   env("MLP_KAFKA_TOPIC", "mlp.events"),
 
 		RelayIngestURL: envPreserveEmpty("RELAY_INGEST_URL", "http://localhost:8082"),
+		RelayTopic:     env("MLP_RELAY_TOPIC", "mlp.relay.deliveries"),
 		RelayDLQTopic:  env("MLP_RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq"),
 		SinkURL:        env("SINK_URL", "http://localhost:8084"),
 

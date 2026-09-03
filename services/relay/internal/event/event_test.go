@@ -1,6 +1,7 @@
 package event
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -104,8 +105,9 @@ func TestPayloadIsOnlyTypeAndData(t *testing.T) {
 
 	r := validRecord()
 	r.IdempotencyKey = "caller-key"
+	r.Data = json.RawMessage("{\n  \"amount\": 100\n}")
 
-	encoded, err := json.Marshal(r.Payload())
+	encoded, err := EncodePayload(r.Payload())
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
@@ -127,6 +129,9 @@ func TestPayloadIsOnlyTypeAndData(t *testing.T) {
 			t.Errorf("payload leaked internal field %q: %s", leaked, encoded)
 		}
 	}
+	if !bytes.Contains(encoded, append([]byte(`"data":`), r.Data...)) {
+		t.Errorf("payload changed data bytes: %q", encoded)
+	}
 }
 
 // The record must survive a round trip through the log unchanged, since the
@@ -136,8 +141,9 @@ func TestRecordRoundTrip(t *testing.T) {
 
 	want := validRecord()
 	want.IdempotencyKey = "abc123"
+	want.Data = json.RawMessage("{\n  \"b\": 2, \"a\": 1\n}")
 
-	encoded, err := json.Marshal(want)
+	encoded, err := EncodeRecord(want)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -151,6 +157,9 @@ func TestRecordRoundTrip(t *testing.T) {
 	}
 	if string(got.Data) != string(want.Data) {
 		t.Errorf("data = %s, want %s", got.Data, want.Data)
+	}
+	if !bytes.Contains(encoded, append([]byte(`"data":`), want.Data...)) {
+		t.Errorf("record changed data bytes: %q", encoded)
 	}
 	if !got.OccurredAt.Equal(want.OccurredAt) {
 		t.Errorf("occurred_at = %s, want %s", got.OccurredAt, want.OccurredAt)

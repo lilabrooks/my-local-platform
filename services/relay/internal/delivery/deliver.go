@@ -3,7 +3,6 @@ package delivery
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -111,7 +110,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // claim is corrected here rather than quietly dropped. See issue #69 and the
 // backlog entry for what is being lived with and what would change it.
 func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription, rec event.Record) (Outcome, error) {
-	body, err := json.Marshal(rec.Payload())
+	body, err := event.EncodePayload(rec.Payload())
 	if err != nil {
 		// A record that cannot be marshalled will never deliver, so retrying
 		// is pointless. Dead-letter it immediately.

@@ -23,7 +23,7 @@ smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
   PASS  kafka           211ms  mlp.events partition 0 offset 6
   PASS  rabbitmq         14ms  queue mlp.smoke round trip
   PASS  postgres         17ms  row 6 on postgres 18.6
-  PASS  relay           684ms  evt_36fe9a6f159b2789ae59a8bf0d2bf896 delivered to /hooks/ok, dead-lettered http://sink:8081/hooks/flaky after 3 attempts; 4 attempts persisted
+  PASS  relay           718ms  evt_17a6be2526665f2606e42a9add11a497 returned by 2 concurrent requests for one idempotency key, delivered to /hooks/ok, dead-lettered http://sink:8081/hooks/flaky after 3 attempts; one Kafka record, one healthy delivery, one event row and 4 attempts persisted
 
 all components healthy
 ```

@@ -131,6 +131,9 @@ func runIngest(log *slog.Logger) error {
 		// never fills -- the same default that cost the smoke check a flat
 		// second per run. 10ms still batches under load.
 		BatchTimeout: 10 * time.Millisecond,
+		// Keep the broker wait below ingest's 15-second acceptance budget so
+		// Postgres can record the result and release its row lock in time.
+		WriteTimeout: 10 * time.Second,
 	}
 	defer func() { _ = writer.Close() }()
 
