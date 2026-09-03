@@ -52,17 +52,48 @@ CREATE INDEX IF NOT EXISTS relay_subscriptions_active_tenant
 -- A row is retained when Kafka publication reports an error because that error
 -- can be ambiguous: the broker may still have accepted the record.
 CREATE TABLE IF NOT EXISTS relay_events (
-    id              text        PRIMARY KEY,
-    tenant_id       text        NOT NULL,
-    event_type      text        NOT NULL,
-    data            jsonb       NOT NULL,
-    idempotency_key text,
-    occurred_at     timestamptz NOT NULL,
-    accepted_at     timestamptz NOT NULL DEFAULT now()
+    id                     text        PRIMARY KEY,
+    tenant_id              text        NOT NULL,
+    event_type             text        NOT NULL,
+    data                   jsonb       NOT NULL,
+    data_raw               text        NOT NULL,
+    idempotency_key        text,
+    idempotency_claimed_at timestamptz,
+    occurred_at            timestamptz NOT NULL,
+    accepted_at            timestamptz NOT NULL DEFAULT now(),
+    published_at           timestamptz
 );
+
+-- Existing jsonb values have already lost their original lexical form. Keep
+-- that representation as the best available raw value; new writes preserve the
+-- request bytes separately while data remains jsonb for semantic comparison.
+ALTER TABLE relay_events
+    ADD COLUMN IF NOT EXISTS data_raw text;
+UPDATE relay_events SET data_raw = data::text WHERE data_raw IS NULL;
+ALTER TABLE relay_events ALTER COLUMN data_raw SET NOT NULL;
+
+-- Rows from before this migration may contain duplicate or ambiguous keys
+-- because idempotency_key used to be inert metadata. They remain unclaimed so
+-- the migration neither deletes that history nor treats an old row as a new
+-- tenant-facing guarantee.
+ALTER TABLE relay_events
+    ADD COLUMN IF NOT EXISTS idempotency_claimed_at timestamptz;
+ALTER TABLE relay_events
+    ADD COLUMN IF NOT EXISTS published_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS relay_events_tenant_accepted
     ON relay_events (tenant_id, accepted_at DESC);
+
+-- Remove the predicate used by the unpublished development draft, if it was
+-- applied locally. It included historical keys in the new uniqueness contract.
+DROP INDEX IF EXISTS relay_events_tenant_idempotency;
+
+-- Unclaimed historical keys and blank new keys are intentionally unlimited.
+-- A claimed key names one request per tenant and is the row lock that
+-- serializes concurrent submissions.
+CREATE UNIQUE INDEX IF NOT EXISTS relay_events_tenant_idempotency_claimed
+    ON relay_events (tenant_id, idempotency_key)
+    WHERE idempotency_claimed_at IS NOT NULL;
 
 -- A failed attempt-history write leaves the Kafka offset uncommitted. The
 -- subscriber may therefore see a duplicate on redelivery, which is relay's
@@ -93,6 +124,18 @@ CREATE TABLE IF NOT EXISTS relay_delivery_attempts (
 
 CREATE INDEX IF NOT EXISTS relay_delivery_attempts_event_order
     ON relay_delivery_attempts (event_id, started_at, id);
+
+-- An existing attempt proves that a consumer read the event from Kafka. Rows
+-- without that evidence stay unknown rather than being backfilled as published;
+-- issue #87 deliberately retained rows after ambiguous producer failures.
+UPDATE relay_events AS event
+SET published_at = event.accepted_at
+WHERE event.published_at IS NULL
+  AND EXISTS (
+      SELECT 1
+      FROM relay_delivery_attempts AS attempt
+      WHERE attempt.event_id = event.id
+  );
 
 -- Two subscribers for one tenant, so the partial-failure path is exercisable:
 -- one healthy, one pointed at a sink configured to fail. A single subscriber

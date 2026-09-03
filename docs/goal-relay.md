@@ -1,6 +1,6 @@
 # Goal: `relay`
 
-Date: 2026-08-24 · Last audited: 2026-08-31
+Date: 2026-08-24 · Last audited: 2026-09-03
 Status: **Built.** The target behaviour below was delivered by M1 and M2, and
 the demo it describes runs as `make relay-demo`. Kept as written rather than
 rewritten in the past tense: it is the thing the work was measured against, and
@@ -121,6 +121,25 @@ it at scale, worked through the same architectures in order, and ended up
 replacing the queue entirely. ADR 0006 records their numbers and the point at
 which `relay`'s version stops working -- which is well above anything this
 project will reach, and worth demonstrating on purpose rather than avoiding.
+
+## Ingest idempotency contract
+
+A non-empty `idempotency_key` is scoped to one tenant. Repeating the same key,
+event type and JSON data returns `202` with the original relay event id and
+writes no new Kafka record. Reusing the tenant and key with different type or
+data returns `409 Conflict`. Another tenant may use the same key independently.
+Missing, empty and whitespace-only keys create a new event on every request.
+
+Relay commits the event row before writing to Kafka and records `published_at`
+only after the producer reports success. Concurrent requests lock that row, so
+one request publishes while the others wait and then reuse its result. A
+producer error returns `503` and leaves the row pending. Repeating the same
+request retries publication with the stored event id.
+
+Kafka acknowledgements can fail ambiguously. Recovery may therefore put the
+same event id on Kafka twice if the first write reached the broker before the
+error. Subscriber delivery remains at least once, and the stable `webhook-id`
+is the deduplication key.
 
 ## The delivery contract
 

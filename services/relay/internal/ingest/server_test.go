@@ -1,13 +1,16 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -27,25 +30,80 @@ type fakeProducer struct {
 	fail error
 }
 
+type contextProbeProducer struct {
+	started chan context.Context
+	release chan struct{}
+}
+
+func (p *contextProbeProducer) WriteMessages(ctx context.Context, _ ...kafka.Message) error {
+	p.started <- ctx
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type fakeEventStore struct {
 	mu         sync.Mutex
 	events     map[string]event.Record
+	byKey      map[string]string
+	published  map[string]bool
 	attempts   map[string][]history.Attempt
-	failCreate error
+	failAccept error
 	failQuery  error
 }
 
-func (f *fakeEventStore) CreateEvent(_ context.Context, rec event.Record) error {
+func (f *fakeEventStore) AcceptEvent(
+	ctx context.Context,
+	rec event.Record,
+	publish history.Publisher,
+) (history.Acceptance, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failCreate != nil {
-		return f.failCreate
+	if f.failAccept != nil {
+		return history.Acceptance{}, f.failAccept
 	}
 	if f.events == nil {
 		f.events = make(map[string]event.Record)
 	}
-	f.events[rec.ID] = rec
-	return nil
+	if f.byKey == nil {
+		f.byKey = make(map[string]string)
+	}
+	if f.published == nil {
+		f.published = make(map[string]bool)
+	}
+
+	chosen := rec
+	if rec.IdempotencyKey != "" {
+		key := rec.TenantID + "\x00" + rec.IdempotencyKey
+		if existingID, ok := f.byKey[key]; ok {
+			chosen = f.events[existingID]
+			if chosen.Type != rec.Type || !sameJSON(chosen.Data, rec.Data) {
+				return history.Acceptance{}, history.ErrIdempotencyConflict
+			}
+		} else {
+			f.byKey[key] = rec.ID
+			f.events[rec.ID] = rec
+		}
+	} else {
+		f.events[rec.ID] = rec
+	}
+
+	if f.published[chosen.ID] {
+		return history.Acceptance{Record: chosen, Deduplicated: true}, nil
+	}
+	if err := publish(ctx, chosen); err != nil {
+		return history.Acceptance{}, fmt.Errorf("%w: %w", history.ErrPublishFailed, err)
+	}
+	f.published[chosen.ID] = true
+	return history.Acceptance{Record: chosen}, nil
+}
+
+func sameJSON(a, b json.RawMessage) bool {
+	var av, bv any
+	return json.Unmarshal(a, &av) == nil && json.Unmarshal(b, &bv) == nil && reflect.DeepEqual(av, bv)
 }
 
 func (f *fakeEventStore) Attempts(_ context.Context, id string) ([]history.Attempt, error) {
@@ -105,13 +163,29 @@ func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder 
 	return rr
 }
 
+func acceptedID(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202. body: %s", rr.Code, rr.Body)
+	}
+	var resp postEventResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID == "" {
+		t.Fatal("accepted response has no event id")
+	}
+	return resp.ID
+}
+
 func TestAcceptsAndProduces(t *testing.T) {
 	t.Parallel()
 
 	p := &fakeProducer{}
 	h := newTestServer(p)
+	rawData := "{\n  \"amount\": 100, \"currency\": \"usd\"\n}"
 
-	rr := post(t, h, `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`)
+	rr := post(t, h, `{"tenant_id":"acme","type":"invoice.paid","data":`+rawData+`}`)
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202. body: %s", rr.Code, rr.Body)
 	}
@@ -128,6 +202,9 @@ func TestAcceptsAndProduces(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("produced %d messages, want 1", len(msgs))
 	}
+	if !bytes.Contains(msgs[0].Value, append([]byte(`"data":`), rawData...)) {
+		t.Errorf("Kafka record changed data bytes: %q", msgs[0].Value)
+	}
 	// The partition key must be the tenant, or per-tenant ordering is lost.
 	if got, want := string(msgs[0].Key), "acme"; got != want {
 		t.Errorf("partition key = %q, want %q", got, want)
@@ -142,6 +219,114 @@ func TestAcceptsAndProduces(t *testing.T) {
 	}
 	if rec.OccurredAt.IsZero() {
 		t.Error("record has no occurred_at")
+	}
+}
+
+func TestIdenticalIdempotentRequestsReturnOneEvent(t *testing.T) {
+	t.Parallel()
+
+	p := &fakeProducer{}
+	h := newTestServer(p)
+	body := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"payment-42"}`
+
+	first := acceptedID(t, post(t, h, body))
+	second := acceptedID(t, post(t, h, body))
+	if second != first {
+		t.Errorf("second event id = %q, want original %q", second, first)
+	}
+	if got := len(p.messages()); got != 1 {
+		t.Errorf("produced %d Kafka messages, want 1", got)
+	}
+}
+
+func TestConcurrentIdempotentRequestsPublishOnce(t *testing.T) {
+	t.Parallel()
+
+	p := &fakeProducer{}
+	h := newTestServer(p)
+	body := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"concurrent-42"}`
+	responses := make([]*httptest.ResponseRecorder, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range responses {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			responses[i] = post(t, h, body)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	first := acceptedID(t, responses[0])
+	second := acceptedID(t, responses[1])
+	if second != first {
+		t.Errorf("concurrent ids = %q and %q, want the same id", first, second)
+	}
+	if got := len(p.messages()); got != 1 {
+		t.Errorf("produced %d Kafka messages, want 1", got)
+	}
+}
+
+func TestIdempotencyConflictProducesNothing(t *testing.T) {
+	t.Parallel()
+
+	p := &fakeProducer{}
+	h := newTestServer(p)
+	first := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"payment-42"}`
+	conflict := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":200},"idempotency_key":"payment-42"}`
+
+	_ = acceptedID(t, post(t, h, first))
+	rr := post(t, h, conflict)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("conflict status = %d, want 409. body: %s", rr.Code, rr.Body)
+	}
+	if got := len(p.messages()); got != 1 {
+		t.Errorf("produced %d Kafka messages after conflict, want 1 total", got)
+	}
+}
+
+func TestIdempotencyKeyIsScopedToTenant(t *testing.T) {
+	t.Parallel()
+
+	p := &fakeProducer{}
+	h := newTestServer(p)
+	acme := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"payment-42"}`
+	globex := `{"tenant_id":"globex","type":"invoice.paid","data":{"amount":100},"idempotency_key":"payment-42"}`
+
+	first := acceptedID(t, post(t, h, acme))
+	second := acceptedID(t, post(t, h, globex))
+	if second == first {
+		t.Errorf("different tenants received the same event id %q", first)
+	}
+	if got := len(p.messages()); got != 2 {
+		t.Errorf("produced %d Kafka messages, want 2", got)
+	}
+}
+
+func TestBlankIdempotencyKeysCreateNewEvents(t *testing.T) {
+	t.Parallel()
+
+	for name, field := range map[string]string{
+		"missing":    "",
+		"empty":      `,"idempotency_key":""`,
+		"whitespace": `,"idempotency_key":"  "`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := &fakeProducer{}
+			h := newTestServer(p)
+			body := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}` + field + `}`
+			first := acceptedID(t, post(t, h, body))
+			second := acceptedID(t, post(t, h, body))
+			if second == first {
+				t.Errorf("blank key reused event id %q", first)
+			}
+			if got := len(p.messages()); got != 2 {
+				t.Errorf("produced %d Kafka messages, want 2", got)
+			}
+		})
 	}
 }
 
@@ -180,8 +365,9 @@ func TestBrokerFailureIsNotSuccess(t *testing.T) {
 	p := &fakeProducer{fail: errors.New("broker unreachable")}
 	events := &fakeEventStore{}
 	h := newTestServerWithEvents(p, events)
+	body := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"payment-42"}`
 
-	rr := post(t, h, `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`)
+	rr := post(t, h, body)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rr.Code)
 	}
@@ -189,9 +375,74 @@ func TestBrokerFailureIsNotSuccess(t *testing.T) {
 		t.Errorf("a rejected event was given an id the caller might record: %s", rr.Body)
 	}
 	events.mu.Lock()
-	defer events.mu.Unlock()
 	if len(events.events) != 1 {
 		t.Errorf("broker failure retained %d event rows, want 1 for an ambiguous Kafka write", len(events.events))
+	}
+	var retainedID string
+	for retainedID = range events.events {
+	}
+	if events.published[retainedID] {
+		t.Error("broker failure marked the retained idempotency claim as published")
+	}
+	events.mu.Unlock()
+
+	p.mu.Lock()
+	p.fail = nil
+	p.mu.Unlock()
+	recoveredID := acceptedID(t, post(t, h, body))
+	if recoveredID != retainedID {
+		t.Errorf("recovery event id = %q, want retained id %q", recoveredID, retainedID)
+	}
+	deduplicatedID := acceptedID(t, post(t, h, body))
+	if deduplicatedID != retainedID {
+		t.Errorf("deduplicated event id = %q, want retained id %q", deduplicatedID, retainedID)
+	}
+	if got := len(p.messages()); got != 1 {
+		t.Errorf("successful recovery and repeat produced %d messages, want 1", got)
+	}
+}
+
+func TestAcceptanceSurvivesClientCancellation(t *testing.T) {
+	p := &contextProbeProducer{
+		started: make(chan context.Context, 1),
+		release: make(chan struct{}),
+	}
+	h := newTestServer(p)
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	req := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(
+		`{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"disconnect-42"}`,
+	)).WithContext(requestContext)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	var acceptanceContext context.Context
+	select {
+	case acceptanceContext = <-p.started:
+	case <-time.After(time.Second):
+		t.Fatal("producer was not called")
+	}
+	deadline, ok := acceptanceContext.Deadline()
+	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > acceptanceTimeout {
+		t.Fatalf("acceptance context deadline = %v, want a live deadline within %s", deadline, acceptanceTimeout)
+	}
+
+	cancelRequest()
+	if err := acceptanceContext.Err(); err != nil {
+		t.Fatalf("client cancellation reached in-flight acceptance: %v", err)
+	}
+	close(p.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after Kafka acknowledgement")
+	}
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 after detached acceptance completed: %s", rr.Code, rr.Body)
 	}
 }
 
@@ -199,7 +450,7 @@ func TestEventHistoryFailureIsNotSuccess(t *testing.T) {
 	t.Parallel()
 
 	p := &fakeProducer{}
-	events := &fakeEventStore{failCreate: errors.New("database unavailable")}
+	events := &fakeEventStore{failAccept: errors.New("database unavailable")}
 	rr := post(t, newTestServerWithEvents(p, events),
 		`{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`)
 

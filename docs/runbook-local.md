@@ -85,6 +85,47 @@ Memory cannot be changed on a running cluster with the docker driver:
 | relay-deliver health | http://localhost:8083 | none |
 | sink | http://localhost:8084 | none |
 
+## Relay ingest idempotency
+
+Send the same tenant, key, type and data twice to retrieve one event id without
+writing a second Kafka record:
+
+```bash
+body='{"tenant_id":"acme","type":"example.created","data":{"n":1},"idempotency_key":"example-42"}'
+
+first_id="$(curl -fsS -X POST http://localhost:8082/v1/events \
+  -H 'Content-Type: application/json' -d "$body" | jq -r .id)"
+second_id="$(curl -fsS -X POST http://localhost:8082/v1/events \
+  -H 'Content-Type: application/json' -d "$body" | jq -r .id)"
+
+test "$first_id" = "$second_id"
+```
+
+Keys are tenant-scoped. The same key under another tenant names an independent
+event. Reusing a tenant and key with different type or data returns `409
+Conflict`; missing, empty and whitespace-only keys create a new event each
+time.
+
+The event row exists before Kafka publication and gains `published_at` after
+the producer reports success. A producer error returns `503` and leaves the row
+pending. Repeating the same request retries the stored event id. An ambiguous
+Kafka error can still produce a duplicate record during recovery, so
+subscribers continue to deduplicate by `webhook-id`.
+
+List claimed requests that still need a successful Kafka acknowledgement:
+
+```bash
+docker exec mlp-postgres psql -U platform -d platform -c \
+  "SELECT id, tenant_id, idempotency_key, accepted_at
+   FROM relay_events
+   WHERE idempotency_claimed_at IS NOT NULL AND published_at IS NULL
+   ORDER BY accepted_at"
+```
+
+These rows recover when the caller repeats the same tenant, key, type and data.
+The query excludes rows from before the idempotency migration because their
+keys were metadata and carried no uniqueness promise.
+
 ## Relay event history
 
 Submit an event, then query the delivery attempts by the returned id:

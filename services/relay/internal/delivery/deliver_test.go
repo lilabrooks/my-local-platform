@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -50,14 +51,18 @@ func TestDeliverSucceedsFirstTry(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		body, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
+	record := testRecord()
+	record.Data = json.RawMessage("{\n  \"b\": 2, \"a\": 1\n}")
 	out, err := newTestDeliverer(t, "1s,2s").Deliver(context.Background(),
-		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, record)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -69,6 +74,9 @@ func TestDeliverSucceedsFirstTry(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("subscriber called %d times, want 1", got)
+	}
+	if !bytes.Contains(body, append([]byte(`"data":`), record.Data...)) {
+		t.Errorf("subscriber body changed data bytes: %q", body)
 	}
 }
 

@@ -1,6 +1,6 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-01
+Date: 2026-08-24 · Last audited: 2026-09-03
 Status: **M0, M1 and M2 are built and their milestones closed.** Two M3
 verification items were completed early; its remaining hardening work and M4
 remain proposed. M3 and M4 are alternatives rather than a sequence -- see the
@@ -277,11 +277,13 @@ when someone reads the code carefully.
   "did you deliver my webhook?" through `GET /v1/events/{id}/attempts`.
   `make smoke` posted one event to the real local Kafka broker, matched the
   healthy and exhausted subscribers, and read back all 4 Postgres attempt rows.
-- **Idempotency** -- dedupe on the key accepted at ingest. Issue
-  [#89](https://github.com/lilabrooks/my-local-platform/issues/89) must
-  distinguish an event Kafka accepted from a retained row left by an ambiguous
-  publish error. A publish-state marker or transactional outbox are candidate
-  mechanisms; a retained row alone cannot become a successful dedupe response.
+- **Idempotency, built 2026-09-03.** A non-empty tenant-and-key pair names one
+  request. Identical repeats return the original event id; conflicting reuse
+  returns `409`. A committed event row and row lock serialize concurrent
+  requests, while `published_at` keeps a failed Kafka write from reading as a
+  successful claim. `make smoke` sent 2 concurrent requests, received the same
+  id twice, and found one Kafka record, one published event row, one healthy
+  delivery, and 4 attempt rows.
 - **Tracing** -- W3C trace context in Kafka headers, so ingest, consume and
   delivery join into one trace in Tempo. Closes the
   [ADR 0005](adr/0005-argocd-gitops.md) telemetry gap for the in-cluster case.

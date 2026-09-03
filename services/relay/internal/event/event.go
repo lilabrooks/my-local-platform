@@ -61,6 +61,73 @@ func (r Record) Payload() Payload {
 	return Payload{Type: r.Type, Data: r.Data}
 }
 
+// EncodeRecord returns relay's Kafka value while preserving Data byte for
+// byte. encoding/json compacts RawMessage values during a surrounding marshal,
+// which would change whitespace and object-key spelling before the record
+// reached Kafka.
+func EncodeRecord(r Record) ([]byte, error) {
+	if !json.Valid(r.Data) {
+		return nil, errors.New("encode record: data is not valid JSON")
+	}
+	id, err := json.Marshal(r.ID)
+	if err != nil {
+		return nil, fmt.Errorf("encode record id: %w", err)
+	}
+	tenantID, err := json.Marshal(r.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("encode record tenant: %w", err)
+	}
+	eventType, err := json.Marshal(r.Type)
+	if err != nil {
+		return nil, fmt.Errorf("encode record type: %w", err)
+	}
+	occurredAt, err := json.Marshal(r.OccurredAt)
+	if err != nil {
+		return nil, fmt.Errorf("encode record occurred_at: %w", err)
+	}
+
+	out := make([]byte, 0, len(r.Data)+len(id)+len(tenantID)+len(eventType)+len(occurredAt)+96)
+	out = append(out, `{"id":`...)
+	out = append(out, id...)
+	out = append(out, `,"tenant_id":`...)
+	out = append(out, tenantID...)
+	out = append(out, `,"type":`...)
+	out = append(out, eventType...)
+	out = append(out, `,"data":`...)
+	out = append(out, r.Data...)
+	out = append(out, `,"occurred_at":`...)
+	out = append(out, occurredAt...)
+	if r.IdempotencyKey != "" {
+		key, err := json.Marshal(r.IdempotencyKey)
+		if err != nil {
+			return nil, fmt.Errorf("encode record idempotency key: %w", err)
+		}
+		out = append(out, `,"idempotency_key":`...)
+		out = append(out, key...)
+	}
+	out = append(out, '}')
+	return out, nil
+}
+
+// EncodePayload returns a subscriber request body while preserving Data byte
+// for byte.
+func EncodePayload(p Payload) ([]byte, error) {
+	if !json.Valid(p.Data) {
+		return nil, errors.New("encode payload: data is not valid JSON")
+	}
+	eventType, err := json.Marshal(p.Type)
+	if err != nil {
+		return nil, fmt.Errorf("encode payload type: %w", err)
+	}
+	out := make([]byte, 0, len(p.Data)+len(eventType)+18)
+	out = append(out, `{"type":`...)
+	out = append(out, eventType...)
+	out = append(out, `,"data":`...)
+	out = append(out, p.Data...)
+	out = append(out, '}')
+	return out, nil
+}
+
 // NewID returns a fresh event id. Random rather than sequential: an id that
 // leaks how many events a tenant has sent is an information leak, and relay has
 // no need for ordering to be derivable from the id.

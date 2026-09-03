@@ -17,6 +17,9 @@ func TestLoadUsesDefaultsWhenUnset(t *testing.T) {
 	if cfg.KafkaBrokers != "localhost:9092" {
 		t.Errorf("KafkaBrokers = %q, want localhost:9092", cfg.KafkaBrokers)
 	}
+	if cfg.RelayTopic != "mlp.relay.deliveries" {
+		t.Errorf("RelayTopic = %q, want mlp.relay.deliveries", cfg.RelayTopic)
+	}
 }
 
 func TestLoadPrefersEnvironment(t *testing.T) {

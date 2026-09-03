@@ -22,9 +22,22 @@ const (
 )
 
 var (
-	ErrNoPool        = errors.New("history: no database pool")
-	ErrEventNotFound = errors.New("history: event not found")
+	ErrNoPool              = errors.New("history: no database pool")
+	ErrEventNotFound       = errors.New("history: event not found")
+	ErrIdempotencyConflict = errors.New("history: idempotency key conflicts with another request")
+	ErrPublishFailed       = errors.New("history: event publication failed")
 )
+
+// Acceptance is the durable event chosen for an ingest request. Deduplicated
+// means an earlier request already published it, so the caller must return its
+// id without writing another Kafka record.
+type Acceptance struct {
+	Record       event.Record
+	Deduplicated bool
+}
+
+// Publisher writes the chosen event to relay's delivery log.
+type Publisher func(context.Context, event.Record) error
 
 // Attempt is one completed HTTP request to one subscription. AttemptNumber is
 // assigned by Store.RecordAttempt across every processing of an event, so a
@@ -43,26 +56,155 @@ type Attempt struct {
 // Store owns relay's durable event and attempt history. The caller owns the
 // pool lifetime.
 type Store struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	acceptanceSlots chan struct{}
 }
 
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func New(pool *pgxpool.Pool) *Store {
+	if pool == nil {
+		return &Store{}
+	}
+	// A Kafka write holds one transaction connection. Leave one configured
+	// pool connection available for attempt-history reads and other operations
+	// while the broker is slow or unavailable.
+	slots := int(pool.Config().MaxConns) - 1
+	if slots < 1 {
+		slots = 1
+	}
+	return &Store{pool: pool, acceptanceSlots: make(chan struct{}, slots)}
+}
 
-// CreateEvent persists an event before ingest publishes it to Kafka. That
-// ordering ensures a fast consumer can always attach an attempt to its event.
-func (s *Store) CreateEvent(ctx context.Context, rec event.Record) error {
+// AcceptEvent persists an event before publishing it, then serializes requests
+// sharing a tenant and idempotency key on that row. The row is committed before
+// publish so a fast Kafka consumer can attach its attempt history immediately.
+// published_at changes only after Publisher returns nil, which keeps an
+// ambiguous or failed publish from becoming a successful deduplication result.
+func (s *Store) AcceptEvent(ctx context.Context, rec event.Record, publish Publisher) (Acceptance, error) {
 	if s == nil || s.pool == nil {
-		return ErrNoPool
+		return Acceptance{}, ErrNoPool
 	}
-	_, err := s.pool.Exec(ctx, `
+	if publish == nil {
+		return Acceptance{}, errors.New("history: no event publisher")
+	}
+	if err := s.acquireAcceptanceSlot(ctx); err != nil {
+		return Acceptance{}, err
+	}
+	defer func() { <-s.acceptanceSlots }()
+	if strings.TrimSpace(rec.IdempotencyKey) == "" {
+		rec.IdempotencyKey = ""
+	}
+
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO relay_events
-			(id, tenant_id, event_type, data, idempotency_key, occurred_at)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6)`,
-		rec.ID, rec.TenantID, rec.Type, rec.Data, rec.IdempotencyKey, rec.OccurredAt)
+			(id, tenant_id, event_type, data, data_raw, idempotency_key,
+			 idempotency_claimed_at, occurred_at, published_at)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''),
+			CASE WHEN NULLIF($6, '') IS NULL THEN NULL ELSE now() END, $7, NULL)
+		ON CONFLICT DO NOTHING`,
+		rec.ID, rec.TenantID, rec.Type, rec.Data, string(rec.Data),
+		rec.IdempotencyKey, rec.OccurredAt)
 	if err != nil {
-		return fmt.Errorf("insert event %s: %w", rec.ID, err)
+		return Acceptance{}, fmt.Errorf("reserve event %s: %w", rec.ID, err)
 	}
-	return nil
+	if rec.IdempotencyKey == "" && tag.RowsAffected() != 1 {
+		return Acceptance{}, fmt.Errorf("reserve event %s: generated id already exists", rec.ID)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Acceptance{}, fmt.Errorf("begin event acceptance transaction: %w", err)
+	}
+	defer rollback(tx)
+
+	accepted, published, matches, err := lockAcceptedEvent(ctx, tx, rec)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if !matches {
+		if rec.IdempotencyKey != "" {
+			return Acceptance{}, fmt.Errorf("%w: tenant %q key %q",
+				ErrIdempotencyConflict, rec.TenantID, rec.IdempotencyKey)
+		}
+		return Acceptance{}, fmt.Errorf("event id %s collided with a different request", rec.ID)
+	}
+	if published {
+		if err := tx.Commit(ctx); err != nil {
+			return Acceptance{}, fmt.Errorf("finish deduplicated event %s: %w", accepted.ID, err)
+		}
+		return Acceptance{Record: accepted, Deduplicated: true}, nil
+	}
+
+	if err := publish(ctx, accepted); err != nil {
+		return Acceptance{}, fmt.Errorf("%w for event %s: %w", ErrPublishFailed, accepted.ID, err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE relay_events SET published_at = COALESCE(published_at, now()) WHERE id = $1`,
+		accepted.ID,
+	); err != nil {
+		return Acceptance{}, fmt.Errorf("mark event %s published: %w", accepted.ID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Acceptance{}, fmt.Errorf("commit event %s publication: %w", accepted.ID, err)
+	}
+	return Acceptance{Record: accepted}, nil
+}
+
+func (s *Store) acquireAcceptanceSlot(ctx context.Context) error {
+	select {
+	case s.acceptanceSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for event acceptance capacity: %w", ctx.Err())
+	}
+}
+
+func lockAcceptedEvent(ctx context.Context, tx pgx.Tx, candidate event.Record) (event.Record, bool, bool, error) {
+	var (
+		accepted  event.Record
+		dataRaw   string
+		published bool
+		matches   bool
+		err       error
+	)
+	if candidate.IdempotencyKey == "" {
+		err = tx.QueryRow(ctx, `
+			SELECT id, tenant_id, event_type, data_raw, COALESCE(idempotency_key, ''), occurred_at,
+			       published_at IS NOT NULL,
+			       tenant_id = $2 AND event_type = $3 AND data = $4::jsonb
+			FROM relay_events
+			WHERE id = $1
+			FOR UPDATE`,
+			candidate.ID, candidate.TenantID, candidate.Type, candidate.Data,
+		).Scan(
+			&accepted.ID, &accepted.TenantID, &accepted.Type, &dataRaw,
+			&accepted.IdempotencyKey, &accepted.OccurredAt, &published, &matches,
+		)
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT id, tenant_id, event_type, data_raw, COALESCE(idempotency_key, ''), occurred_at,
+			       published_at IS NOT NULL,
+			       event_type = $3 AND data = $4::jsonb
+			FROM relay_events
+			WHERE tenant_id = $1 AND idempotency_key = $2
+			  AND idempotency_claimed_at IS NOT NULL
+			FOR UPDATE`,
+			candidate.TenantID, candidate.IdempotencyKey, candidate.Type, candidate.Data,
+		).Scan(
+			&accepted.ID, &accepted.TenantID, &accepted.Type, &dataRaw,
+			&accepted.IdempotencyKey, &accepted.OccurredAt, &published, &matches,
+		)
+	}
+	if err != nil {
+		return event.Record{}, false, false, fmt.Errorf("lock accepted event: %w", err)
+	}
+	accepted.Data = []byte(dataRaw)
+	return accepted, published, matches, nil
+}
+
+func rollback(tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = tx.Rollback(ctx)
 }
 
 // RecordAttempt appends an attempt under a lock on its event row. The lock gives
