@@ -1,10 +1,11 @@
 # Roadmap: `relay`, the first application
 
 Date: 2026-08-24 · Last audited: 2026-09-03
-Status: **M0, M1 and M2 are built and their milestones closed.** Two M3
-verification items were completed early; its remaining hardening work and M4
-remain proposed. M3 and M4 are alternatives rather than a sequence -- see the
-decision point below. The header used to read "Proposed -- no code written".
+Status: **M0, M1 and M2 are built and their milestones closed. M3 is active.**
+On 2026-09-01, the owner selected M3 followed by M4. M4 waits for
+[#90](https://github.com/lilabrooks/my-local-platform/issues/90) to prove the
+complete local application before AWS work starts. Earlier versions called M3
+and M4 optional alternatives; that status ended with the owner decision.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -21,9 +22,12 @@ appear, which makes the autoscaling story a demo rather than a demonstration.
 
 ## Sequencing principle: reach the demo, then decide
 
-The path to something demonstrable is **M0 to M1 to M2**, and the demo is the
-KEDA scaling loop described in [goal-relay.md](goal-relay.md#the-demo).
-Everything after M2 is an enhancement to be chosen, not a plan to be executed.
+The path to something demonstrable was **M0 to M1 to M2**, and the demo is the
+KEDA scaling loop described in [goal-relay.md](goal-relay.md#the-demo). M2 was
+the planned decision point; work after it required an owner choice.
+
+The owner made that choice on 2026-09-01: finish M3 locally, then use its
+whole-application proof as the gate for M4.
 
 This means one deliberate inversion: the observability work is split. The parts
 the demo needs -- the lag metric and one Grafana panel -- move forward into M2.
@@ -254,24 +258,43 @@ predictions.
 
 ## Decision point
 
-M2 is a complete, demonstrable thing. Stop here and decide whether to enhance,
-extend, or leave it. M3 and M4 are alternatives, not a sequence -- M4 does not
-depend on M3.
+M2 produced the complete autoscaling demonstration and opened the choice this
+roadmap was written to reach. On 2026-09-01, the owner chose both remaining
+stages in sequence.
 
-| If the goal is | Do |
-|---|---|
-| A service that withstands scrutiny of its semantics | M3 |
-| The differentiated MSK-on-EKS story | M4 |
-| Neither, for now | Nothing. M2 stands on its own |
+M3 removes application uncertainty with the local brokers, database,
+subscriber, and observability stack. Its whole-application proof is the
+release gate for M4. M4 then runs that rehearsed application briefly on EKS,
+MSK, and RDS, where the AWS control plane, IAM transport, and teardown path can
+be measured. This order keeps application debugging out of the paid AWS
+session.
+
+| Stage | Why it was selected | Release condition |
+|---|---|---|
+| M3 | Establish the relay's semantics and operator evidence locally. | [#90](https://github.com/lilabrooks/my-local-platform/issues/90) passes as one application. |
+| M4 | Test the same application against the live AWS surfaces local infrastructure cannot reproduce. | #90 closes, then M4 follows its dependency chain. |
 
 ---
 
-## M3 -- Harden (optional)
+## M3 -- Local relay readiness
 
-**Free. Two to three days for the remaining work.**
+**Active and free.**
 
 The work that turns a convincing demo into a service whose guarantees hold up
 when someone reads the code carefully.
+
+The active scope is truthful consumer readiness and assignment evidence
+([#21](https://github.com/lilabrooks/my-local-platform/issues/21)), diagnosable
+poison-record dead letters
+([#25](https://github.com/lilabrooks/my-local-platform/issues/25)), end-to-end
+tracing ([#86](https://github.com/lilabrooks/my-local-platform/issues/86)),
+delivery history ([#87](https://github.com/lilabrooks/my-local-platform/issues/87)),
+ingest idempotency
+([#89](https://github.com/lilabrooks/my-local-platform/issues/89)), and the
+roadmap reconciliation
+([#98](https://github.com/lilabrooks/my-local-platform/issues/98)). The completed
+and remaining pieces culminate in the whole-application local proof
+([#90](https://github.com/lilabrooks/my-local-platform/issues/90)).
 
 - **Delivery attempts persisted, built 2026-09-02.** The audit trail answers
   "did you deliver my webhook?" through `GET /v1/events/{id}/attempts`.
@@ -302,24 +325,38 @@ when someone reads the code carefully.
   [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#revisit-when) becomes work
   when concurrently degraded `(tenant, subscriber)` pairs approach the
   partition count.
-- **Long-retry parking** -- what the `standard` retry preset needs before M1's
-  startup validation will accept it. A consumer cannot sleep 16 hours between
-  attempts without being evicted from its group, so the record has to be parked
-  and the offset committed: tiered retry topics, or a due-at row in Postgres
-  with a scheduler. ADR 0006 records both and why neither is MVP work.
-
-  **Mechanism correction, 2026-08-31:** kafka-go keeps heartbeating and rejoins
-  independently of handler duration, so the consumer is not evicted for
-  sleeping. Parking remains the proposed M3 shape because an in-process wait
-  stalls every partition assigned to that member and cannot fit relay's 30s
-  record and shutdown budget. The corrected basis and measurements are in
-  [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-how-long-one-member-may-stall).
 
 ---
 
-## M4 -- The ephemeral AWS pass (optional)
+## M4 -- Ephemeral live AWS validation
 
-**~$1/hour. One measured session. Ends in `terraform destroy`.**
+**Waiting on M3. The paid session is estimated at ~$1/hour and ends in
+`terraform destroy`.**
+
+M4 starts only after [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
+closes. Its governed sequence is:
+
+1. Settle the topology, identity, cost, evidence, and teardown contract in
+   [#91](https://github.com/lilabrooks/my-local-platform/issues/91).
+2. Add the locally testable MSK IAM transport in
+   [#92](https://github.com/lilabrooks/my-local-platform/issues/92).
+3. Add the opt-in Terraform runtime, with every hourly resource disabled by
+   default, in
+   [#93](https://github.com/lilabrooks/my-local-platform/issues/93).
+4. Render the AWS relay deployment and evidence stack in
+   [#94](https://github.com/lilabrooks/my-local-platform/issues/94).
+5. Rehearse the deployment, demonstration, evidence capture, abort path, and
+   cleanup locally in
+   [#95](https://github.com/lilabrooks/my-local-platform/issues/95).
+6. With separate owner authority, stage the cheap AWS tier, immutable images,
+   budget protection, and reviewed plan in
+   [#96](https://github.com/lilabrooks/my-local-platform/issues/96).
+7. With a new owner authorization for the expensive apply, run the brief live
+   validation and destroy it in
+   [#97](https://github.com/lilabrooks/my-local-platform/issues/97).
+
+Approval for #96 does not authorize #97. The low-cost staging mutation and the
+hourly EKS, MSK, and RDS session are separate decisions.
 
 The one thing the local stack structurally cannot teach: MSK Serverless supports
 **IAM authentication only** -- no SASL/SCRAM -- so this is SASL_SSL with
@@ -379,6 +416,15 @@ an ADR records the commands and the measured result.
 
 ## Later, if ever
 
+- **Long-retry parking** stays outside M3 and M4 under
+  [#88's observable trigger](https://github.com/lilabrooks/my-local-platform/issues/88):
+  a request to enable retry delays whose total worst-case record work exceeds
+  `config.DefaultStallBudget`. Tiered retry topics and a due-at Postgres
+  scheduler remain the two recorded options. kafka-go keeps heartbeating during
+  handler work, but an in-process wait stalls every partition assigned to that
+  member and cannot fit relay's 30-second record and shutdown budget. The
+  corrected mechanism and measurements are in
+  [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#retry-duration-is-bounded-by-how-long-one-member-may-stall).
 - **SNS to SQS versus Kafka.** The Terraform already builds an SNS topic, an SQS
   queue and a DLQ (`main.tf:111-163`) -- the same fan-out in the AWS-native
   idiom. Running relay against both and writing up where each breaks down is
@@ -421,6 +467,7 @@ belongs rather than being restated here:
 | Lag-based autoscaling beats an HPA on CPU | [ADR 0007](adr/0007-keda-lag-autoscaling.md#verification), measured 2026-08-27 |
 | In-cluster Prometheus and Grafana for the demo | [ADR 0008](adr/0008-in-cluster-observability-for-the-demo.md#verification), measured 2026-08-27 |
 
-**M3 and M4 remain unverified in exactly the original sense**, including every
-cost figure for MSK and EKS. Re-check those against current pricing before M4;
-both schedules change.
+**M3's whole-application result and all of M4 remain unverified.** The completed M3
+leaf items name their evidence above, but #90 has not run the full local proof.
+Re-check every MSK and EKS cost figure against current pricing before M4; both
+schedules change.

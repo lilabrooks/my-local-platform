@@ -39,9 +39,13 @@ checked evidence in the issue body.
 | [M0: clear the runway](https://github.com/lilabrooks/my-local-platform/milestone/1) | Closed | Fix the smoke path, create relay topics, and settle the Kafka client. |
 | [M1: the relay delivers](https://github.com/lilabrooks/my-local-platform/milestone/2) | Closed | Deliver one accepted event and dead-letter a refusing subscriber. |
 | [M2: KEDA scaling on lag](https://github.com/lilabrooks/my-local-platform/milestone/3) | Closed | Scale relay-deliver on broker lag, drain the backlog, and scale down. |
+| [M3: local relay readiness](https://github.com/lilabrooks/my-local-platform/milestone/4) | Active | Finish the local semantic hardening and prove relay as one application. |
+| [M4: ephemeral live AWS validation](https://github.com/lilabrooks/my-local-platform/milestone/5) | Waiting on M3 | Rehearse locally, validate briefly on EKS, MSK, and RDS, then destroy the environment. |
 
-M3 and M4 remain optional, unscheduled choices in the
-[relay roadmap](docs/roadmap-relay.md). See the
+The owner selected M3 followed by M4 on 2026-09-01. M4 stays blocked until
+M3's [whole-application local proof](https://github.com/lilabrooks/my-local-platform/issues/90)
+closes. The [relay roadmap](docs/roadmap-relay.md) records the sequence and its
+cost boundary. See the
 [open issues](https://github.com/lilabrooks/my-local-platform/issues) for the
 work queue and
 [#84](https://github.com/lilabrooks/my-local-platform/issues/84) for the backlog
@@ -127,9 +131,9 @@ Nine choices shape this repository, each recorded with the evidence behind it:
 
 The Kafka one covers `relay`, the first application — see
 **[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
-It is built through M2: `make up-apps` starts it, `make smoke` exercises the
-whole pipeline end to end, and `make relay-demo` runs the autoscaling demo
-against the cluster.
+M0 through M2 are built, and M3 local-readiness work is active. `make up-apps`
+starts it, `make smoke` exercises the whole pipeline end to end, and
+`make relay-demo` runs the autoscaling demo against the cluster.
 
 ## The smoke service
 
@@ -275,16 +279,16 @@ The GitOps loop is verified end to end: a commit pushed to GitHub changed the
 running replica count ~12 seconds later, with no `kubectl`. The last main run
 that received GitHub-hosted runners passed all thirteen jobs.
 
-**`relay` is built through M2 and its demo runs.** `make relay-demo` drives six
-steps in 190 seconds against minikube: an event delivered, the subscriber slowed,
-KEDA scaling the consumer group from one pod to twelve on lag, the backlog
+**`relay` has completed M0 through M2; M3 is active.** `make relay-demo` drives
+six steps in 190 seconds against minikube: an event delivered, the subscriber
+slowed, KEDA scaling the consumer group from one pod to twelve on lag, the backlog
 drained, a failing subscriber dead-lettered while a healthy one is unaffected,
 and the whole window replayed from the log. The measurements behind that are in
 [ADR 0007](docs/adr/0007-keda-lag-autoscaling.md), including why an HPA on CPU
 cannot work here.
 
-One gap remains, stated plainly: **the expensive Terraform tier has never been
-applied.** The cheap tier has — applied to a real account, verified with the
+The AWS gap remains: **the expensive Terraform tier has never been applied.**
+The cheap tier has — applied to a real account, verified with the
 smoke checks against live S3 and SNS/SQS, then destroyed. EKS and RDS are
 plan-only, so nothing is proven against a live cluster or database.
 
