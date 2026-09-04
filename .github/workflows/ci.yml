@@ -160,6 +160,10 @@ jobs:
       # The observability profile is deliberately left out: the smoke service
       # treats tracing as best effort, so its absence must not fail the run.
       # If this step fails, that contract is broken.
+      #
+      # MLP_SMOKE_REQUIRE_TRACES is spelled out rather than left to its default
+      # so this step says what it is skipping. The next step is the one that
+      # asserts the trace, with Tempo actually running.
       - name: Run smoke checks
         working-directory: services/smoke
         env:
@@ -167,6 +171,29 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
           AWS_ACCESS_KEY_ID: test
           AWS_SECRET_ACCESS_KEY: test
+          MLP_SMOKE_REQUIRE_TRACES: "0"
+        run: go run ./cmd/smoke
+
+      # Issue #86's completion evidence: one event, one Tempo trace, holding the
+      # ingest, produce, consume and per-attempt spans. It needs the collector
+      # and Tempo, so it gets its own step with the obs profile up rather than
+      # weakening the best-effort contract the step above proves. Relay was
+      # started before the collector on purpose -- the OTLP exporter connects
+      # lazily and retries, so an app that outlives a missing collector is part
+      # of what this checks.
+      - name: Start the observability stack
+        run: |
+          docker compose --env-file .env.example -f local/docker-compose.yml \
+            --profile obs up -d --wait --wait-timeout 300
+
+      - name: Verify one trace spans ingest, Kafka and every delivery attempt
+        working-directory: services/smoke
+        env:
+          AWS_ENDPOINT_URL: http://localhost:4566
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          MLP_SMOKE_REQUIRE_TRACES: "1"
         run: go run ./cmd/smoke
 
       # ADR 0006 chose Kafka over SNS-to-SQS because a queue cannot resend what
@@ -182,9 +209,10 @@ jobs:
       - name: Verify per-tenant delivery ordering
         run: ./scripts/verify-ordering.sh
 
-      # relay-deliver has 45s of termination grace because SIGTERM stops fetches
-      # and lets the current record finish under its 30s record deadline. This
-      # makes the relationship behavioral rather than manifest arithmetic.
+      # relay-deliver has 60s of termination grace because SIGTERM stops fetches
+      # and lets the current record finish under its 30s record deadline, then
+      # runs four more bounded shutdown steps. This makes the relationship
+      # behavioral rather than manifest arithmetic.
       - name: Verify graceful shutdown drains and commits the current record
         run: ./scripts/verify-graceful-drain.sh
 

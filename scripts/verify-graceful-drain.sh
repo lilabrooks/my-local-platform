@@ -104,9 +104,13 @@ done
 [ "${before:-0}" = "1" ] || fail "expected exactly one healthy delivery before SIGTERM, found ${before:-0}"
 [ "${held:-0}" -ge 1 ] || fail "nothing parked on $BLOCKED_PATH; there is no in-flight record to drain"
 
-say "sending SIGTERM and allowing the configured 45s container stop timeout"
+# 60s to match the pod's terminationGracePeriodSeconds, which k8s/validate
+# holds above config.DeliverDrainBudget (48s). Compose sets no
+# stop_grace_period, so this flag is what makes the container path match the
+# cluster one.
+say "sending SIGTERM and allowing the configured 60s container stop timeout"
 started=$(date +%s)
-docker stop --time 45 "$CTR" >/dev/null || fail "docker stop failed"
+docker stop --time 60 "$CTR" >/dev/null || fail "docker stop failed"
 elapsed=$(($(date +%s) - started))
 exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$CTR")
 [ "$exit_code" = "0" ] || fail "relay-deliver exited $exit_code, want 0; the drain did not finish cleanly"

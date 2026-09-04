@@ -9,11 +9,18 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
 	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
+	"github.com/lilabrooks/my-local-platform/relay/internal/telemetry"
 )
 
 // Outcome is how one subscriber's delivery ended.
@@ -130,7 +137,15 @@ func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription,
 
 		out.Attempts = attempt
 		startedAt := time.Now().UTC()
-		status, reqErr := d.attempt(ctx, sub, rec, body)
+		attemptCtx, attemptSpan := otel.Tracer("relay/delivery").Start(ctx, "relay.webhook.attempt",
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				attribute.String("relay.event.id", rec.ID),
+				attribute.Int64("relay.subscription.id", sub.ID),
+				attribute.Int("relay.delivery.attempt", attempt),
+			),
+		)
+		status, reqErr := d.attempt(attemptCtx, sub, rec, body)
 		finishedAt := time.Now().UTC()
 		out.LastStatus = status
 		delay, willRetry := d.schedule.DelayFor(attempt)
@@ -157,9 +172,45 @@ func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription,
 		if !out.Delivered && !willRetry && ctx.Err() == nil {
 			attemptOutcome = history.OutcomeExhausted
 		}
+		attemptSpan.SetAttributes(attribute.String("relay.delivery.outcome", attemptOutcome))
+		if status != 0 {
+			attemptSpan.SetAttributes(attribute.Int("http.response.status_code", status))
+		}
+		if willRetry && !out.Delivered {
+			attemptSpan.AddEvent("relay.retry.scheduled", trace.WithAttributes(
+				attribute.Int64("relay.retry.delay_ms", delay.Milliseconds()),
+			))
+		}
 
-		recordErr := d.recordAttempt(ctx, rec.ID, sub, attempt, startedAt, finishedAt,
+		recordErr := d.recordAttempt(attemptCtx, rec.ID, sub, attempt, startedAt, finishedAt,
 			status, reqErr, attemptOutcome)
+		if recordErr != nil {
+			// Its own event, because the status below may be describing the
+			// delivery instead. This one is why the offset will not advance.
+			attemptSpan.AddEvent("relay.history.write_failed", trace.WithAttributes(
+				attribute.String("error.type", telemetry.ErrorType(recordErr)),
+			))
+		}
+
+		// Status last, and Ok only when nothing failed. The SDK lets Ok
+		// override Error and never the reverse (sdk/trace: SetStatus returns
+		// early when status.Code > code), so marking a delivered attempt Ok
+		// before the history write would swallow that write's failure -- which
+		// is the failure that blocks the Kafka commit.
+		switch {
+		case reqErr != nil:
+			// Not span.RecordError: http.Client returns *url.Error, whose
+			// message embeds the subscriber URL with its path and query
+			// string. The full text goes to the attempt-history row above.
+			telemetry.RecordError(attemptSpan, reqErr, "webhook request failed")
+		case !out.Delivered:
+			attemptSpan.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
+		case recordErr != nil:
+			telemetry.RecordError(attemptSpan, recordErr, "record attempt history")
+		default:
+			attemptSpan.SetStatus(codes.Ok, "")
+		}
+		attemptSpan.End()
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// Preserve the record deadline for shutdown handling and keep a detached
 			// write failure visible to the consumer log.
@@ -244,6 +295,7 @@ func (d *Deliverer) attempt(ctx context.Context, sub subscriptions.Subscription,
 	req.Header.Set(HeaderID, rec.ID)
 	req.Header.Set(HeaderTimestamp, Timestamp(now))
 	req.Header.Set(HeaderSignature, Sign([]byte(sub.Secret), rec.ID, now, body))
+	otel.GetTextMapPropagator().Inject(attemptCtx, propagation.HeaderCarrier(req.Header))
 
 	// Timed around the round trip including the drain below, because a
 	// subscriber that answers headers promptly and then dribbles the body is

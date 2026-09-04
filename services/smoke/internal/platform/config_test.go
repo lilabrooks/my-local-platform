@@ -120,3 +120,32 @@ func TestOnlyExactlyOneOptsIn(t *testing.T) {
 		}
 	}
 }
+
+// The Tempo assertion is off unless asked for. CI's main smoke job and the
+// documented `make up-apps` path both run without the obs profile, and a check
+// that fails for a missing dependency rather than a missing trace would break
+// both. `make smoke-traces` is what turns it on.
+func TestRequireTracesIsOffUnlessExplicitlyEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		set   bool
+		want  bool
+	}{
+		{set: false, want: false},
+		{value: "", set: true, want: false},
+		{value: "0", set: true, want: false},
+		{value: "true", set: true, want: false},
+		{value: "1", set: true, want: true},
+	} {
+		name := "unset"
+		if tc.set {
+			name = "MLP_SMOKE_REQUIRE_TRACES=" + tc.value
+			t.Setenv("MLP_SMOKE_REQUIRE_TRACES", tc.value)
+		} else {
+			os.Unsetenv("MLP_SMOKE_REQUIRE_TRACES")
+		}
+		if got := Load().RequireTraces; got != tc.want {
+			t.Errorf("%s: RequireTraces = %v, want %v", name, got, tc.want)
+		}
+	}
+}

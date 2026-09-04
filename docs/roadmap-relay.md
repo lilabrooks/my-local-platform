@@ -284,9 +284,13 @@ when someone reads the code carefully.
   successful claim. `make smoke` sent 2 concurrent requests, received the same
   id twice, and found one Kafka record, one published event row, one healthy
   delivery, and 4 attempt rows.
-- **Tracing** -- W3C trace context in Kafka headers, so ingest, consume and
-  delivery join into one trace in Tempo. Closes the
-  [ADR 0005](adr/0005-argocd-gitops.md) telemetry gap for the in-cluster case.
+- **Tracing, built 2026-09-03.** W3C trace context crosses HTTP, Kafka, and each
+  subscriber request. `make smoke-traces` follows one event through
+  `relay.ingest`, `kafka.produce`, `relay.consume`, and one
+  `relay.webhook.attempt` span per persisted attempt in a single Tempo trace,
+  and fails if any of them is missing. Local only: nothing under `k8s/` gives
+  relay an OTLP endpoint, so the [ADR 0005](adr/0005-argocd-gitops.md) telemetry
+  gap for the in-cluster case is still open and belongs to M4 with EKS and MSK.
 - **Per-tenant ordering test -- built 2026-08-30.** The original M3 item was to
   prove same-tenant events land on one partition and are delivered in order.
   `make relay-verify-ordering` now runs that check on every push; the result and

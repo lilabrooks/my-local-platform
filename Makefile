@@ -122,15 +122,33 @@ urls: ## Print the local endpoints
 # Smoke service
 # ---------------------------------------------------------------------------
 
+# Extra environment for the smoke run. Empty here; smoke-traces sets it.
+SMOKE_ENV =
+
 .PHONY: smoke
 smoke: ## Run the end-to-end smoke check against the local stack
-	$(COMPOSE_ENV) --chdir services/smoke \
+	$(SMOKE_ENV) $(COMPOSE_ENV) --chdir services/smoke \
 		AWS_ENDPOINT_URL AWS_DEFAULT_REGION MLP_USE_REAL_AWS \
 		MLP_BUCKET MLP_TOPIC MLP_QUEUE MLP_SES_SENDER \
 		KAFKA_BOOTSTRAP MLP_KAFKA_TOPIC MLP_RELAY_TOPIC MLP_RELAY_DLQ_TOPIC \
 		RELAY_INGEST_URL SINK_URL RABBITMQ_URL DATABASE_URL \
-		OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME \
+		OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME TEMPO_URL \
 		-- go run ./cmd/smoke
+
+.PHONY: smoke-traces
+smoke-traces: ## Run smoke AND require the relay trace in Tempo (needs the obs profile)
+	# `make smoke` treats tracing as best effort, because relay lives in the
+	# `apps` compose profile and Tempo in `obs` -- CI and the documented
+	# `make up-apps` path both run without it. This target is the one that
+	# asserts the trace, so a run that proves the end-to-end path names itself
+	# rather than depending on which containers happened to be up.
+	#
+	# Passed as a plain environment assignment rather than through
+	# with-compose-env.py's key list: that script pops every listed key from the
+	# environment and refills it from the dotenv file, which is what makes the
+	# dotenv authoritative for stack addresses -- and what would drop this.
+	# Needs `make up` (or `make up-obs`).
+	$(MAKE) smoke SMOKE_ENV='MLP_SMOKE_REQUIRE_TRACES=1'
 
 .PHONY: relay-replay
 relay-replay: ## Redeliver relay events from the last SINCE (default 1h; or SINCE=earliest)

@@ -332,6 +332,9 @@ services:
       KAFKA_BOOTSTRAP: kafka:19092
       RELAY_TOPIC: mlp.relay.deliveries
       DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
+      OTEL_SERVICE_NAME: relay-ingest
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DEPLOYMENT_ENVIRONMENT: local
     depends_on:
       kafka:
         condition: service_healthy
@@ -364,6 +367,9 @@ services:
       RELAY_TOPIC: mlp.relay.deliveries
       RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
       DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
+      OTEL_SERVICE_NAME: relay-deliver
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DEPLOYMENT_ENVIRONMENT: local
       # Not the `demo` preset: that is 15s to reach the dead-letter queue,
       # which every `make smoke` run would then wait out. This is the same
       # shape, compressed, so the DLQ path is exercised in about a second.

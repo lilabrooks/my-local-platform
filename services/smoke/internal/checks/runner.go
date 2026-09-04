@@ -9,6 +9,12 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/lilabrooks/my-local-platform/smoke/internal/platform"
 )
 
 // Check is one component probe.
@@ -65,4 +71,45 @@ func Report(results []Result) bool {
 	}
 	fmt.Println()
 	return allOK
+}
+
+// Instrument wraps each check in a span so one run shows up as a single trace
+// in Grafana Tempo (and in Datadog when that exporter is enabled).
+//
+// The span carries the check's name, its duration, and -- on failure -- a fixed
+// description plus a bounded classification. It deliberately carries NOTHING
+// derived from the check's own strings.
+//
+// That restraint is the whole point of this function, and it is why the wrapper
+// lives here rather than inline in cmd/smoke: a check's detail and its error are
+// built from whatever it saw. The relay check's success detail names the
+// dead-lettered subscriber URL; its failures can carry HTTP response bodies and
+// decoded event records. A live Tempo trace on 2026-09-03 contained
+// `dead-lettered http://sink:8081/hooks/flaky` on a check.detail attribute,
+// which is how this was found. Spans leave the host; stdout does not, and
+// Report already prints every detail there in full.
+//
+// This is the same policy relay applies in its own telemetry package. Both are
+// enforced by a recorder test rather than by comment.
+func Instrument(tracer trace.Tracer, list []Check) []Check {
+	if tracer == nil {
+		return list
+	}
+	out := make([]Check, len(list))
+	copy(out, list)
+	for i, c := range out {
+		name, run := c.Name, c.Run
+		out[i].Run = func(ctx context.Context) (string, error) {
+			ctx, span := tracer.Start(ctx, "check."+name)
+			defer span.End()
+			detail, err := run(ctx)
+			if err != nil {
+				// Not span.RecordError: its exception.message is err.Error().
+				span.SetAttributes(attribute.String("error.type", platform.ErrorType(err)))
+				span.SetStatus(codes.Error, "check failed")
+			}
+			return detail, err
+		}
+	}
+	return out
 }

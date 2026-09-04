@@ -74,8 +74,16 @@ spec:
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
-      # On SIGTERM relay stops fetching and drains its current record for at most
-      # DefaultStallBudget (30s). This 45s grace leaves 15s for process and
-      # container shutdown after that deadline. k8s/validate also checks that
-      # the ConfigMap's 25s delivery schedule fits inside the record deadline.
-      terminationGracePeriodSeconds: 45
+      # On SIGTERM relay stops fetching and drains its current record for at
+      # most DefaultStallBudget (30s), then runs four bounded cleanup steps in
+      # order: an interrupted attempt's history write (5s), the health server's
+      # shutdown (5s), the Kafka reader, DLQ writer and database pool closing
+      # (5s shared), and the trace exporter's final flush (3s). 48s in total,
+      # which is config.DeliverDrainBudget; k8s/validate asserts it against this
+      # number, and also checks that the ConfigMap's 25s delivery schedule fits
+      # inside the record deadline.
+      #
+      # The 12s above that budget is not decoration. It covers what relay cannot
+      # put a deadline on -- process exit, container teardown -- and the closes
+      # relay abandons rather than waits for when their shared budget runs out.
+      terminationGracePeriodSeconds: 60

@@ -76,9 +76,9 @@ var presets = map[string][]time.Duration{
 //     member owns -- all twelve on the compose topology.
 //   - The Kubernetes demo schedule needs at most 25s for subscriber attempts.
 //     A 30s record deadline leaves 5s for lookup, dead-letter and commit work.
-//   - relay-deliver's 45s termination grace period leaves another 15s after the
-//     record deadline. An interrupted attempt may use 5s of that for its final
-//     history write, leaving 10s for process and container shutdown.
+//   - relay-deliver's termination grace period has to contain this deadline and
+//     every shutdown step that follows it. DeliverDrainBudget adds those up;
+//     k8s/validate asserts the sum against the manifest.
 //
 // Consumer.Run enforces this as the deadline for complete record work and lets
 // a fetched record use it after SIGTERM. k8s/validate checks both sides of the
@@ -101,6 +101,84 @@ const DefaultStallBudget = 30 * time.Second
 // attempt row needs a fresh context once the record context can no longer do
 // database work. k8s/validate includes both values in the pod drain budget.
 const InterruptedAttemptWriteTimeout = 5 * time.Second
+
+// The remaining shutdown bounds, in the order they run after the record drain.
+//
+// Every one of them is a constant here rather than a literal at its defer site
+// for the reason DefaultStallBudget is: DeliverDrainBudget and
+// IngestDrainBudget sum them, k8s/validate asserts those sums against each
+// manifest's terminationGracePeriodSeconds, and a term the validator cannot see
+// is a term that can grow past the grace period without failing anything.
+//
+// That is not hypothetical. Two review rounds on 2026-09-03 each found a term
+// missing from this sum -- first the trace flush, then the broker and pool
+// closes -- while the budget it was compared against read as exact.
+//
+// ResourceCloseTimeout is the one that bounds work which does not bound itself.
+// kafka-go's Reader.Close leaves the consumer group, its Writer.Close flushes
+// buffered messages, and pgxpool.Close waits for every connection to come back;
+// none of the three takes a context, and all three can block on a broker or
+// database that has stopped answering. relay gives them one shared budget and
+// abandons them after it.
+//
+// TraceFlushTimeout is deliberately the shortest. The collector is on the same
+// host or node, so a healthy flush of one batch is milliseconds; when the
+// collector is NOT reachable the whole timeout is spent waiting on a connection
+// that will not open, which is dead time inside a drain with a SIGKILL at the
+// end of it. Measured 2026-09-03: an unreachable collector costs the full
+// timeout, every time.
+const (
+	HealthShutdownTimeout = 5 * time.Second
+	ResourceCloseTimeout  = 5 * time.Second
+	TraceFlushTimeout     = 3 * time.Second
+)
+
+// relay-ingest drains differently: it has inbound traffic to stop rather than a
+// record to finish. IngestReadinessGrace is how long it keeps serving after
+// failing readiness, so a load balancer notices before connections are refused;
+// IngestServerShutdownTimeout then bounds the wait for in-flight requests.
+//
+// IngestAcceptanceTimeout is what makes the second number what it is.
+// Server.postEvent detaches from the request context and keeps this long to
+// finish its Postgres and Kafka work, so a client that disconnects mid-request
+// cannot leave an event half-accepted. A shutdown that stopped waiting sooner
+// would close the pool and the Kafka writer underneath exactly the handler that
+// detachment exists to protect -- so IngestServerShutdownTimeout has to cover
+// it, with margin for writing the response.
+//
+// It lives here rather than in internal/ingest so the relationship is one
+// package's arithmetic instead of two constants in different files that have to
+// be remembered together. It was 15s against a 10s shutdown until 2026-09-03.
+const (
+	IngestReadinessGrace        = 3 * time.Second
+	IngestAcceptanceTimeout     = 15 * time.Second
+	IngestServerShutdownTimeout = IngestAcceptanceTimeout + 5*time.Second
+)
+
+// DeliverDrainBudget is the longest a relay-deliver process can take to exit
+// after SIGTERM, as the sum of every deadline it configures.
+//
+// Ordered: the in-flight record finishes under DefaultStallBudget, an
+// interrupted attempt writes its history row, the health server stops, the
+// broker connections and database pool close, and the trace exporter flushes.
+// A pod's terminationGracePeriodSeconds must exceed this or Kubernetes can
+// SIGKILL a consumer mid-drain, which loses the commit the drain exists to
+// make.
+//
+// It bounds the deadlines relay sets. It cannot bound a syscall that never
+// returns, so the manifest's slack above this number is not decoration.
+func DeliverDrainBudget() time.Duration {
+	return DefaultStallBudget + InterruptedAttemptWriteTimeout +
+		HealthShutdownTimeout + ResourceCloseTimeout + TraceFlushTimeout
+}
+
+// IngestDrainBudget is the same sum for relay-ingest, which has no record
+// deadline: it stops advertising readiness, drains in-flight HTTP requests,
+// closes the Kafka writer and pool, and flushes traces.
+func IngestDrainBudget() time.Duration {
+	return IngestReadinessGrace + IngestServerShutdownTimeout +
+		ResourceCloseTimeout + TraceFlushTimeout
+}
 
 // ErrEmptySchedule is returned for a schedule with no delays in it. A zero
 // retry budget is more likely a typo than a decision; spell it "0s" to mean

@@ -254,12 +254,18 @@ actually runs:
   dead-letter production and offset commit.
 - **Bounded shutdown drain.** On SIGTERM the consumer fails readiness and stops
   fetching, then lets its current record finish under the same 30s deadline.
-  `terminationGracePeriodSeconds` is 45s, leaving 15s after that deadline for
-  process and container shutdown. `k8s/validate` checks both inequalities.
+  Four more bounded steps follow it -- an interrupted attempt's history write,
+  the health server's shutdown, the broker and pool closes, and the trace
+  flush -- summing to `config.DeliverDrainBudget`, 48s.
+  `terminationGracePeriodSeconds` is 60s. `k8s/validate` checks both
+  inequalities against that sum rather than against the record deadline alone;
+  it was 45s and 35s until 2026-09-03, when review found two shutdown steps
+  missing from the sum, one of which had no deadline at all.
 
 The 30s value is an explicit policy judgment. No measured delivery SLO exists
 yet. Its checkable basis is narrower: the 25s deployed schedule fits inside it,
-the 45s termination grace period contains it, and the head-of-line experiment
+the 60s termination grace period contains it and every shutdown step after it,
+and the head-of-line experiment
 below shows the cost this cap controls. It is independent of Kafka group
 correctness.
 
@@ -415,7 +421,22 @@ post-restart same-tenant probe delivered
 original healthy delivery count: 1 -> 1
 ```
 
-That is the behavior the 45s Kubernetes grace period contains. The record gets
+**Reverified 2026-09-03**, after tracing added a final OTLP flush to the drain
+and the grace period rose from 45s to 60s. Same script, now `docker stop --time
+60`:
+
+```text
+relay-deliver exited cleanly after 7s with one healthy delivery
+PASS SIGTERM drained and committed the in-flight record without duplicating it (1 -> 1)
+```
+
+One second more than the 2026-08-31 run, against a bounded budget that grew by
+13s. The flush is fast when the collector is reachable, which it is here: CI now
+starts the observability profile before this script runs. An unreachable
+collector would spend the whole `TraceFlushTimeout` instead, which is why that
+constant is the smallest of the five.
+
+That is the behavior the 60s Kubernetes grace period contains. The record gets
 at most `DefaultStallBudget` (30s) for lookup, delivery, dead-lettering, and
 commit. If that deadline expires, the process exits before SIGKILL and leaves
 the offset uncommitted for redelivery. Unit tests cover both the successful
