@@ -12,11 +12,16 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
 	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
+	"github.com/lilabrooks/my-local-platform/relay/internal/telemetry"
 )
 
 // Reader is the part of kafka.Reader the consumer needs. An interface so the
@@ -153,17 +158,36 @@ func (c *Consumer) Run(ctx context.Context) error {
 // context.WithoutCancel lets this record finish after SIGTERM. The timeout keeps
 // that drain inside the pod's termination grace period.
 func (c *Consumer) processRecord(parent context.Context, msg kafka.Message) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.recordTimeout)
+	base := context.WithoutCancel(parent)
+	base = otel.GetTextMapPropagator().Extract(base, telemetry.NewKafkaHeaderCarrier(&msg.Headers))
+	ctx, cancel := context.WithTimeout(base, c.recordTimeout)
 	defer cancel()
+	ctx, span := otel.Tracer("relay/delivery").Start(ctx, "relay.consume",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.Int("messaging.kafka.partition", msg.Partition),
+			attribute.Int64("messaging.kafka.offset", msg.Offset),
+		),
+	)
+	defer span.End()
 
 	start := time.Now()
 	if err := c.handle(ctx, msg); err != nil {
+		telemetry.RecordError(span, err, "handle record")
 		return fmt.Errorf("handle partition %d offset %d: %w", msg.Partition, msg.Offset, err)
 	}
 
 	if err := c.reader.CommitMessages(ctx, msg); err != nil {
+		telemetry.RecordError(span, err, "commit offset")
 		return fmt.Errorf("commit partition %d offset %d: %w", msg.Partition, msg.Offset, err)
 	}
+	// The committed offset is an event, not a status. handle can park an
+	// undecodable record on the dead-letter queue and still return nil, and it
+	// marks that span Error; setting Ok here would erase it, because the
+	// OpenTelemetry SDK lets Ok override Error and never the reverse
+	// (sdk/trace: SetStatus returns early when status.Code > code). Unset is
+	// the right status for "finished, nothing to report".
+	span.AddEvent("kafka.offset.committed")
 	c.handled.Add(1)
 	// Counted after the commit, so the metric means "finished with", the same
 	// thing the committed offset means. Counting at fetch time would include
@@ -175,6 +199,7 @@ func (c *Consumer) processRecord(parent context.Context, msg kafka.Message) erro
 
 // handle processes one record. Returning nil means the offset may be committed.
 func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
+	span := trace.SpanFromContext(ctx)
 	var rec event.Record
 	if err := json.Unmarshal(msg.Value, &rec); err != nil {
 		// A record that will never parse cannot be fixed by redelivering it.
@@ -182,14 +207,38 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 		c.log.Error("undecodable record, dead-lettering",
 			"error", err, "partition", msg.Partition, "offset", msg.Offset)
 		metrics.DeadLetters.WithLabelValues("undecodable").Inc()
-		return c.deadLetter(ctx, DeadLetter{
+		if err := c.deadLetter(ctx, DeadLetter{
 			Reason:   fmt.Sprintf("undecodable record at partition %d offset %d: %v", msg.Partition, msg.Offset, err),
 			FailedAt: time.Now().UTC(),
-		})
+		}); err != nil {
+			return err
+		}
+		// This path parks an event and then returns nil so the offset advances.
+		// Without an event and a status here the trace is indistinguishable
+		// from a clean delivery -- and the record has no id to search by, so
+		// the span is the only place the loss is visible at all.
+		span.AddEvent("relay.dead_lettered", trace.WithAttributes(
+			attribute.String("relay.dead_letter.reason", "undecodable"),
+			attribute.Int("messaging.kafka.partition", msg.Partition),
+			attribute.Int64("messaging.kafka.offset", msg.Offset),
+		))
+		span.SetStatus(codes.Error, "undecodable record dead-lettered")
+		return nil
 	}
+	span.SetAttributes(
+		attribute.String("relay.event.id", rec.ID),
+		attribute.String("relay.tenant.id", rec.TenantID),
+		attribute.String("relay.event.type", rec.Type),
+	)
 
 	subs, err := c.subs.ForTenant(ctx, rec.TenantID)
 	if err != nil {
+		// The tenant is already an attribute; the event says which lookup, and
+		// the classification says what kind of failure. processRecord sets the
+		// span's error status from the error this returns.
+		span.AddEvent("relay.subscription_lookup_failed", trace.WithAttributes(
+			attribute.String("error.type", telemetry.ErrorType(err)),
+		))
 		// A database blip is not the event's fault. Leave the offset alone so
 		// the record is redelivered rather than lost.
 		return fmt.Errorf("look up subscriptions for %q: %w", rec.TenantID, err)
@@ -270,6 +319,10 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 		}); err != nil {
 			return fmt.Errorf("dead-letter missing history for %s: %w", rec.ID, err)
 		}
+		span.AddEvent("relay.dead_lettered", trace.WithAttributes(
+			attribute.Int64("relay.subscription.id", out.Subscription.ID),
+			attribute.String("relay.dead_letter.reason", "history_missing"),
+		))
 		if out.Delivered {
 			c.delivered.Add(1)
 			metrics.Deliveries.WithLabelValues("delivered").Inc()
@@ -309,6 +362,10 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 			// silently dropped event is not.
 			return fmt.Errorf("dead-letter %s: %w", rec.ID, err)
 		}
+		span.AddEvent("relay.dead_lettered", trace.WithAttributes(
+			attribute.Int64("relay.subscription.id", out.Subscription.ID),
+			attribute.String("relay.dead_letter.reason", "delivery_exhausted"),
+		))
 		c.deadLettered.Add(1)
 		metrics.Deliveries.WithLabelValues("dead_lettered").Inc()
 		metrics.DeadLetters.WithLabelValues("exhausted").Inc()

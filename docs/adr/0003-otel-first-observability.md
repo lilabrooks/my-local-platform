@@ -62,6 +62,56 @@ curl -sS "http://localhost:3200/api/search?tags=service.name%3Dsmoke&start=$((NO
 # -> traces with root span "smoke.run"
 ```
 
+The relay path was checked on 2026-09-03 with relay already running and the
+observability profile restarted afterward, using the same command as CI:
+
+```bash
+docker compose --env-file .env.example -f local/docker-compose.yml \
+  --profile obs up -d --wait --wait-timeout 300
+make smoke-traces
+```
+
+The observability containers had been stopped after `make up`, so this sequence
+exercised relay's exporter reconnecting after the collector became available.
+The trace-id query in `docs/runbook-local.md` then confirmed the result. Event
+`evt_346fc744d63aa3ac23ea11d068f99232` produced one Tempo trace containing
+`relay.ingest`, `kafka.produce`, `relay.consume`, and four
+`relay.webhook.attempt` spans — one successful request to the healthy
+subscriber, and three to the failing one before it was dead-lettered — all under
+trace `4ca8d2381dc5be5e0d6660db478f11f0`.
+
+`make smoke-traces` is what asserts this, rather than `make smoke`. Tempo is in
+the `obs` compose profile and relay is in `apps`, so the plain smoke run — and
+CI's first smoke step, which excludes `obs` deliberately to prove tracing is
+best effort — would otherwise fail for a missing dependency rather than a
+missing trace. The assertion is a count, not a name check: one `relay.webhook.attempt`
+span per row in the event's persisted attempt history, so per-attempt spans
+collapsing into one fails the check.
+
+**What a span may carry is a boundary, not a blanket ban on caller input.**
+Spans deliberately do carry `relay.tenant.id`, `relay.event.type` and the
+caller's incoming `tracestate` — all caller-supplied, all identifiers, and all
+useless to omit: a trace you cannot filter by tenant is a trace nobody queries
+twice. What they must never carry is the event payload, a signing secret, a
+subscriber URL, or an error message.
+
+The last two are the ones this work got wrong. `http.Client` returns a
+`*url.Error` whose text embeds the subscriber URL with its path and query
+string, and an idempotency conflict names the caller's key; both reached spans
+as `exception.message` until relay stopped calling `span.RecordError` and began
+recording an `error.type` classification with a fixed status description
+instead. The smoke service broke the same rule from the other side, putting a
+check's success detail on a `check.detail` attribute — a 2026-09-03 trace
+contained `dead-lettered http://sink:8081/hooks/flaky` there. Instrumenting
+relay and forgetting the service that watches relay moves a leak rather than
+closing it.
+
+Both boundaries are enforced by recorder tests rather than by comment:
+`telemetry.TestRecordErrorKeepsErrorMessagesOffTheSpan` and
+`checks.TestInstrumentKeepsCheckStringsOffSpans`. Neither can prove the absence
+of a leak in a span they do not construct, which is how the smoke one survived
+the round that fixed relay's.
+
 Two things about Tempo 3.x that look like data loss and are not:
 
 - **Search needs an explicit time range.** Without `start`/`end` it returns

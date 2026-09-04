@@ -126,14 +126,21 @@ func TestDeliveryScheduleFitsInsideRecordDeadlineAndGracePeriod(t *testing.T) {
 
 // isDeliveryConsumer reports whether a container runs relay in deliver mode.
 func isDeliveryConsumer(container map[string]any) bool {
+	return relayMode(container) == "deliver"
+}
+
+// relayMode reports a container's RELAY_MODE, or "" when it is not relay.
+func relayMode(container map[string]any) string {
 	env, _ := container["env"].([]any)
 	for _, e := range env {
 		entry, _ := e.(map[string]any)
-		if entry["name"] == "RELAY_MODE" && entry["value"] == "deliver" {
-			return true
+		if entry["name"] != "RELAY_MODE" {
+			continue
 		}
+		mode, _ := entry["value"].(string)
+		return mode
 	}
-	return false
+	return ""
 }
 
 // resolveEnv flattens a container's inline env and its envFrom configMapRefs
@@ -196,9 +203,34 @@ func gracePeriod(podSpec map[string]any) (time.Duration, error) {
 // combined budget past the grace period would leave relay waiting when
 // Kubernetes sends SIGKILL, while the schedule-only assertion above could still
 // pass.
+//
+// Every ordered cleanup step counts, not just the record work, and both relay
+// modes have one. config.DeliverDrainBudget and config.IngestDrainBudget are
+// the sums; this test's job is to hold each manifest above the sum for the mode
+// it runs.
+//
+// Two review rounds on 2026-09-03 each found a term missing from those sums --
+// first the OTLP flush, then the Kafka and pool closes, which had no deadline
+// at all. Both were invisible here while the number this test compared against
+// read as exact. That is the failure mode: a term the validator cannot see is a
+// term that can grow past the grace period without failing anything.
+//
+// What it does NOT prove: that relay exits inside its budget. It proves the
+// deadlines relay CONFIGURES sum to less than the grace period. Work without a
+// deadline cannot be bounded by arithmetic -- closeBounded abandons it instead,
+// which is why each manifest also carries slack above its budget.
 func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
-	checked := 0
-	drainBudget := config.DefaultStallBudget + config.InterruptedAttemptWriteTimeout
+	modes := map[string]struct {
+		budget time.Duration
+		terms  string
+	}{
+		"deliver": {config.DeliverDrainBudget(),
+			"record work, interrupted-attempt history write, health-server shutdown, " +
+				"broker and pool closes, trace flush"},
+		"ingest": {config.IngestDrainBudget(),
+			"readiness grace, HTTP server shutdown, broker and pool closes, trace flush"},
+	}
+	checked := map[string]int{}
 
 	for _, dir := range manifestDirs(t) {
 		for _, deploy := range kindsOf(render(t, dir), "Deployment") {
@@ -206,16 +238,17 @@ func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 			if spec == nil {
 				continue
 			}
+			mode := ""
 			containers, _ := spec["containers"].([]any)
-			isConsumer := false
 			for _, c := range containers {
 				container, _ := c.(map[string]any)
-				if isDeliveryConsumer(container) {
-					isConsumer = true
+				if found := relayMode(container); found != "" {
+					mode = found
 					break
 				}
 			}
-			if !isConsumer {
+			want, known := modes[mode]
+			if !known {
 				continue
 			}
 
@@ -224,21 +257,22 @@ func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 				t.Errorf("%s: %v", name(deploy), err)
 				continue
 			}
-			checked++
-			if drainBudget >= grace {
-				t.Errorf("%s has terminationGracePeriodSeconds=%v but relay's drain budget is %v "+
-					"(%v record work + %v interrupted-attempt history write).\n"+
-					"A record that uses all of it must finish before SIGKILL. Raise the grace "+
-					"period above %v, or lower one of the budgets.\n"+
+			checked[mode]++
+			if want.budget >= grace {
+				t.Errorf("%s (RELAY_MODE=%s) has terminationGracePeriodSeconds=%v but its drain "+
+					"budget is %v -- the sum of %s.\n"+
+					"Work that uses all of it must finish before SIGKILL. Raise the grace period "+
+					"above %v, or lower one of the budgets in relay's config package.\n"+
 					"See docs/adr/0006-kafka-over-sqs-for-delivery.md.",
-					name(deploy), grace, drainBudget, config.DefaultStallBudget,
-					config.InterruptedAttemptWriteTimeout, drainBudget)
+					name(deploy), mode, grace, want.budget, want.terms, want.budget)
 			}
 		}
 	}
 
-	if checked == 0 {
-		t.Fatal("no RELAY_MODE=deliver container found in any manifest directory; " +
-			"the discovery this test shares with the budget assertion has broken")
+	for mode := range modes {
+		if checked[mode] == 0 {
+			t.Errorf("no RELAY_MODE=%s container found in any manifest directory; "+
+				"the discovery this test shares with the budget assertion has broken", mode)
+		}
 	}
 }

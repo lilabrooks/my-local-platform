@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
@@ -31,6 +37,48 @@ func testRecord() event.Record {
 		Type:       "invoice.paid",
 		Data:       json.RawMessage(`{"amount":100}`),
 		OccurredAt: time.Now().UTC(),
+	}
+}
+
+func TestDeliverPropagatesTraceContextWithWebhookHeaders(t *testing.T) {
+	previous := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+
+	var gotTraceParent, gotTraceState, gotWebhookID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceParent = r.Header.Get("traceparent")
+		gotTraceState = r.Header.Get("tracestate")
+		gotWebhookID = r.Header.Get(HeaderID)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	state, err := trace.ParseTraceState("vendor=value")
+	if err != nil {
+		t.Fatalf("parse tracestate: %v", err)
+	}
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: trace.FlagsSampled,
+		TraceState: state,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), parent)
+	out, err := newTestDeliverer(t, "1s").Deliver(ctx,
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+	if err != nil || !out.Delivered {
+		t.Fatalf("Deliver = %+v, %v; want success", out, err)
+	}
+	if !strings.Contains(gotTraceParent, parent.TraceID().String()) {
+		t.Fatalf("traceparent = %q, want trace id %s", gotTraceParent, parent.TraceID())
+	}
+	if gotTraceState != "vendor=value" {
+		t.Fatalf("tracestate = %q, want vendor=value", gotTraceState)
+	}
+	if gotWebhookID != "evt_abc" {
+		t.Fatalf("webhook-id = %q, want evt_abc", gotWebhookID)
 	}
 }
 
@@ -401,5 +449,44 @@ func TestDeliverCountsAttemptsByStatusClass(t *testing.T) {
 	}
 	if got := attempts("error") - beforeErr; got != 2 {
 		t.Errorf("error-class attempts moved by %v, want 2", got)
+	}
+}
+
+// A delivered attempt whose history write then fails must not report Ok. The
+// SDK lets Ok override Error and never the reverse, so setting the delivery's
+// Ok before the write would erase the failure -- and that failure is the one
+// that stops the Kafka offset advancing, so it is the one worth seeing.
+func TestHistoryWriteFailureIsVisibleOnADeliveredAttemptSpan(t *testing.T) {
+	recorder := spanRecorder(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := newTestDeliverer(t, "1s")
+	d.recorder = &fakeAttemptRecorder{fail: errors.New("postgres is unreachable")}
+	out, err := d.Deliver(context.Background(),
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+	if err == nil {
+		t.Fatal("Deliver = nil error, want the history-write failure that blocks the commit")
+	}
+	if !out.Delivered {
+		t.Fatalf("Deliver out = %+v, want Delivered: the subscriber returned 200", out)
+	}
+
+	spans := spansNamed(recorder, "relay.webhook.attempt")
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d attempt spans, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error {
+		t.Errorf("attempt span status = %v (%q), want Error", spans[0].Status().Code, spans[0].Status().Description)
+	}
+	if !slices.Contains(eventNames(spans[0]), "relay.history.write_failed") {
+		t.Errorf("attempt span events = %v, want relay.history.write_failed", eventNames(spans[0]))
+	}
+	exported := fmt.Sprintf("%v %v %v", spans[0].Status(), spans[0].Attributes(), spans[0].Events())
+	if strings.Contains(exported, "postgres is unreachable") {
+		t.Errorf("span exports the database error message: %s", exported)
 	}
 }

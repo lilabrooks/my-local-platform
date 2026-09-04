@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
@@ -699,5 +705,181 @@ func TestUndecodableRecordIsParkedAndCommitted(t *testing.T) {
 	}
 	if got := r.commits(); got != 1 {
 		t.Errorf("committed %d times, want 1 -- a poison record must not block the partition", got)
+	}
+}
+
+// spanRecorder installs a real TracerProvider globally, which is what the
+// consumer reaches through otel.Tracer. Not parallel-safe: the provider is
+// process-global, so these tests do not call t.Parallel.
+func spanRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		_ = provider.Shutdown(context.Background())
+	})
+	return recorder
+}
+
+func spansNamed(recorder *tracetest.SpanRecorder, name string) []sdktrace.ReadOnlySpan {
+	out := make([]sdktrace.ReadOnlySpan, 0, 4)
+	for _, span := range recorder.Ended() {
+		if span.Name() == name {
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+func eventNames(span sdktrace.ReadOnlySpan) []string {
+	names := make([]string, 0, len(span.Events()))
+	for _, e := range span.Events() {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+func eventAttr(span sdktrace.ReadOnlySpan, eventName, key string) string {
+	for _, e := range span.Events() {
+		if e.Name != eventName {
+			continue
+		}
+		for _, attr := range e.Attributes {
+			if string(attr.Key) == key {
+				return attr.Value.String()
+			}
+		}
+	}
+	return ""
+}
+
+// An undecodable record is parked and the offset advances, so without an event
+// and an error status the trace is indistinguishable from a clean delivery --
+// and the record has no id to search by, which makes the span the only place
+// the loss shows up at all.
+func TestUndecodableRecordIsVisibleOnTheConsumeSpan(t *testing.T) {
+	recorder := spanRecorder(t)
+
+	r := &fakeReader{queue: []kafka.Message{{Partition: 1, Offset: 9, Value: []byte(`{not json`)}}}
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{})
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	spans := spansNamed(recorder, "relay.consume")
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d relay.consume spans, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Status().Code != codes.Error {
+		t.Errorf("consume span status = %v (%q), want Error -- the record was dead-lettered. "+
+			"processRecord must not set codes.Ok afterwards: the SDK lets Ok override Error "+
+			"and never the reverse, so an Ok here erases this.",
+			span.Status().Code, span.Status().Description)
+	}
+	if got := eventAttr(span, "relay.dead_lettered", "relay.dead_letter.reason"); got != "undecodable" {
+		t.Errorf("dead-letter reason on the span = %q, want undecodable; events = %v",
+			got, eventNames(span))
+	}
+}
+
+// The clean path still records the commit, and must not be marked failed.
+func TestSuccessfulRecordLeavesTheConsumeSpanUnfailed(t *testing.T) {
+	recorder := spanRecorder(t)
+
+	ok := alwaysOK(t)
+	defer ok.Close()
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{subs: []subscriptions.Subscription{{ID: 1, URL: ok.URL, Secret: "s"}}})
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	spans := spansNamed(recorder, "relay.consume")
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d relay.consume spans, want 1", len(spans))
+	}
+	if code := spans[0].Status().Code; code == codes.Error {
+		t.Errorf("consume span status = Error (%q), want Unset or Ok", spans[0].Status().Description)
+	}
+	if !slices.Contains(eventNames(spans[0]), "kafka.offset.committed") {
+		t.Errorf("consume span events = %v, want kafka.offset.committed", eventNames(spans[0]))
+	}
+}
+
+// Exhausting the budget produces one span per attempt, each failed, with the
+// retry delay on the span that scheduled it -- and a dead-letter event on the
+// consume span.
+func TestFailedDeliveryRecordsPerAttemptSpansAndADeadLetterEvent(t *testing.T) {
+	recorder := spanRecorder(t)
+
+	bad := alwaysFails(t)
+	defer bad.Close()
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{subs: []subscriptions.Subscription{{ID: 7, URL: bad.URL, Secret: "s"}}})
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	attempts := spansNamed(recorder, "relay.webhook.attempt")
+	if len(attempts) != 2 {
+		t.Fatalf("recorded %d attempt spans, want 2 (one per attempt in the 1s schedule)", len(attempts))
+	}
+	for i, span := range attempts {
+		if span.Status().Code != codes.Error {
+			t.Errorf("attempt span %d status = %v, want Error after HTTP 500", i+1, span.Status().Code)
+		}
+	}
+	if !slices.Contains(eventNames(attempts[0]), "relay.retry.scheduled") {
+		t.Errorf("first attempt span events = %v, want relay.retry.scheduled", eventNames(attempts[0]))
+	}
+	if slices.Contains(eventNames(attempts[1]), "relay.retry.scheduled") {
+		t.Errorf("last attempt span carries relay.retry.scheduled, but its budget was spent")
+	}
+
+	consume := spansNamed(recorder, "relay.consume")
+	if len(consume) != 1 {
+		t.Fatalf("recorded %d relay.consume spans, want 1", len(consume))
+	}
+	if got := eventAttr(consume[0], "relay.dead_lettered", "relay.dead_letter.reason"); got != "delivery_exhausted" {
+		t.Errorf("dead-letter reason = %q, want delivery_exhausted; events = %v",
+			got, eventNames(consume[0]))
+	}
+}
+
+// http.Client returns *url.Error, whose message embeds the subscriber URL with
+// its path and query string. Only the password is redacted. That string must
+// reach the log and the attempt-history row, never the span.
+func TestTransportFailureKeepsTheSubscriberURLOffTheSpan(t *testing.T) {
+	recorder := spanRecorder(t)
+
+	// A closed listener: connecting fails, so Do returns *url.Error.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL + "/hooks/secret-path?token=s3cret"
+	dead.Close()
+
+	r := &fakeReader{queue: []kafka.Message{recordMessage(t, testRecord())}}
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{subs: []subscriptions.Subscription{{ID: 7, URL: deadURL, Secret: "s"}}})
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	attempts := spansNamed(recorder, "relay.webhook.attempt")
+	if len(attempts) == 0 {
+		t.Fatal("no attempt span was recorded")
+	}
+	for i, span := range attempts {
+		if span.Status().Code != codes.Error {
+			t.Errorf("attempt span %d status = %v, want Error", i+1, span.Status().Code)
+		}
+		exported := fmt.Sprintf("%v %v %v", span.Status(), span.Attributes(), span.Events())
+		for _, secret := range []string{"secret-path", "s3cret"} {
+			if strings.Contains(exported, secret) {
+				t.Errorf("attempt span %d exports %q from the transport error: %s", i+1, secret, exported)
+			}
+		}
 	}
 }

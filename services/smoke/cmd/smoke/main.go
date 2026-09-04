@@ -13,9 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-
 	"github.com/lilabrooks/my-local-platform/smoke/internal/checks"
 	"github.com/lilabrooks/my-local-platform/smoke/internal/platform"
 )
@@ -54,25 +51,9 @@ func main() {
 		checks.Relay(cfg),
 	}
 
-	// Wrap each check in a span so a run shows up as one trace in Grafana
-	// Tempo (and in Datadog when that exporter is enabled).
-	if tracer != nil {
-		for i, c := range list {
-			name, run := c.Name, c.Run
-			list[i].Run = func(ctx context.Context) (string, error) {
-				ctx, span := tracer.Start(ctx, "check."+name)
-				defer span.End()
-				detail, err := run(ctx)
-				if err != nil {
-					span.SetStatus(codes.Error, err.Error())
-					span.RecordError(err)
-				} else {
-					span.SetAttributes(attribute.String("check.detail", detail))
-				}
-				return detail, err
-			}
-		}
-	}
+	// One span per check, so a run is one trace. What a span may carry, and
+	// why it carries so little, is in checks.Instrument.
+	list = checks.Instrument(tracer, list)
 
 	var results []checks.Result
 	if tracer != nil {

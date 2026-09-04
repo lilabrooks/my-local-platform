@@ -31,6 +31,7 @@ import (
 	"github.com/lilabrooks/my-local-platform/relay/internal/ingest"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
+	"github.com/lilabrooks/my-local-platform/relay/internal/telemetry"
 )
 
 // Set at build time: -ldflags "-X main.version=..."
@@ -42,8 +43,9 @@ var version = "dev"
 
 // stallBudget is the longest one record may occupy this consumer. Service
 // policy: head-of-line delay across every partition the member owns, and the
-// pod's 45s termination grace period. Defined in config so k8s/validate checks
-// manifests against the same value.
+// pod's termination grace period, which must also contain every shutdown step
+// that follows the drain -- see config.DeliverDrainBudget. Defined in config so
+// k8s/validate checks manifests against the same values.
 const stallBudget = config.DefaultStallBudget
 
 // rebalanceTimeout is the Kafka protocol field of that name -- how long the
@@ -64,6 +66,9 @@ func main() {
 
 func run(log *slog.Logger) error {
 	mode := envOr("RELAY_MODE", "ingest")
+	if mode != "ingest" && mode != "deliver" {
+		return fmt.Errorf("RELAY_MODE %q is not one of: ingest, deliver", mode)
+	}
 
 	// Validated in every mode, not just deliver. Both Deployments read the
 	// same ConfigMap, so a typo should stop the rollout rather than pass in
@@ -88,17 +93,71 @@ func run(log *slog.Logger) error {
 		"worst_case_per_record", schedule.WorstCase(attemptTimeout),
 		"stall_budget", stallBudget)
 
+	shutdownTracing, err := telemetry.Init(
+		context.Background(),
+		envOr("OTEL_SERVICE_NAME", "relay-"+mode),
+		envOr("DEPLOYMENT_ENVIRONMENT", "local"),
+		envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+	)
+	if err != nil {
+		return fmt.Errorf("initialize tracing: %w", err)
+	}
+	// Runs last of every shutdown step, so its bound is the final term in the
+	// drain budget k8s/validate checks against terminationGracePeriodSeconds.
+	// An unreachable collector spends all of it; see config.TraceFlushTimeout.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), config.TraceFlushTimeout)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			log.Error("flush traces", "error", err)
+		}
+	}()
+
 	switch mode {
 	case "ingest":
 		return runIngest(log)
 	case "deliver":
 		return runDeliver(log, schedule, attemptTimeout)
-	default:
-		return fmt.Errorf("RELAY_MODE %q is not one of: ingest, deliver", mode)
 	}
+	return nil
 }
 
 func brokers() []string { return strings.Split(envOr("KAFKA_BOOTSTRAP", "localhost:9092"), ",") }
+
+// closeBounded runs closers in reverse registration order -- the order defer
+// would have used -- and gives up after config.ResourceCloseTimeout.
+//
+// None of what it closes accepts a context. kafka-go's Reader.Close leaves the
+// consumer group, its Writer.Close flushes buffered messages, and
+// pgxpool.Close waits for every connection to be returned; each can block
+// indefinitely on a broker or database that has stopped answering. They run
+// between the health server's shutdown and the trace flush, so an unbounded
+// wait here is an unbounded wait inside the pod's termination grace period --
+// which is the thing the drain budget exists to rule out, and which a plain
+// `defer x.Close()` per resource quietly reintroduced.
+//
+// On timeout the goroutine is abandoned rather than waited for. The process is
+// exiting; a goroutine parked on a dead socket outlives it by microseconds, and
+// the alternative is the SIGKILL this is avoiding.
+func closeBounded(log *slog.Logger, closers []func() error) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := len(closers) - 1; i >= 0; i-- {
+			if err := closers[i](); err != nil {
+				log.Warn("shutdown close failed", "error", err)
+			}
+		}
+	}()
+	timer := time.NewTimer(config.ResourceCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Warn("shutdown closes did not finish inside their budget",
+			"budget", config.ResourceCloseTimeout)
+	}
+}
 
 func runIngest(log *slog.Logger) error {
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
@@ -112,7 +171,11 @@ func runIngest(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("database pool: %w", err)
 	}
-	defer pool.Close()
+	// One bounded close for every resource, registered before the HTTP
+	// server's own shutdown so defer's LIFO order runs it after that. See
+	// closeBounded: these calls take no context and can block forever.
+	closers := []func() error{func() error { pool.Close(); return nil }}
+	defer func() { closeBounded(log, closers) }()
 	if err := pool.Ping(ctx); err != nil {
 		// Event history must exist before Kafka publication, so an ingest pod
 		// without Postgres cannot serve either API route truthfully.
@@ -135,7 +198,7 @@ func runIngest(log *slog.Logger) error {
 		// Postgres can record the result and release its row lock in time.
 		WriteTimeout: 10 * time.Second,
 	}
-	defer func() { _ = writer.Close() }()
+	closers = append(closers, writer.Close)
 
 	server := ingest.New(writer, history.New(pool), topic, log)
 	// Safe to be ready immediately: kafka.Writer connects lazily, and an
@@ -170,23 +233,64 @@ func runIngest(log *slog.Logger) error {
 		log,
 	).Run(ctx)
 
-	go func() {
-		<-ctx.Done()
+	log.Info("listening", "addr", addr, "topic", topic, "brokers", brokers(), "mode", "ingest")
+	err = serveUntilShutdown(ctx, log, srv, func() {
 		log.Info("shutdown signal received, failing readiness")
 		server.MarkReady(false)
-		time.Sleep(3 * time.Second)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Error("graceful shutdown failed", "error", err)
-		}
-	}()
-
-	log.Info("listening", "addr", addr, "topic", topic, "brokers", brokers(), "mode", "ingest")
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server: %w", err)
+		time.Sleep(config.IngestReadinessGrace)
+	})
+	if err != nil {
+		return err
 	}
 	log.Info("stopped")
+	return nil
+}
+
+// serveUntilShutdown serves srv and returns only once its graceful shutdown has
+// FINISHED -- not when ListenAndServe returns.
+//
+// Those are different moments, and treating them as one is a bug this code had.
+// Shutdown closes the listener first, which makes ListenAndServe return
+// ErrServerClosed immediately, and only then waits for in-flight handlers.
+// Returning on that signal runs the caller's deferred closes -- the Kafka
+// writer, the database pool -- underneath handlers still using them.
+//
+// relay-ingest makes the consequence concrete rather than theoretical.
+// Server.postEvent deliberately detaches from the request context and keeps
+// config.IngestAcceptanceTimeout to finish persisting and publishing, so that a
+// client hanging up cannot leave an event half-accepted. Closing the pool out
+// from under that handler orphans the event anyway, which is the exact outcome
+// the detachment was written to prevent.
+//
+// drain runs after the signal and before the listener closes: it is where
+// readiness is failed and the load balancer given time to notice.
+func serveUntilShutdown(ctx context.Context, log *slog.Logger, srv *http.Server, drain func()) error {
+	served := make(chan error, 1)
+	go func() { served <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-served:
+		// The listener failed on its own -- a taken port, most likely. There
+		// is nothing to drain.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("server: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
+
+	drain()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.IngestServerShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		// A handler outlived the budget. Log it rather than swallow it: the
+		// caller's deferred closes are about to run regardless, because the
+		// pod's grace period ends shortly after this and waiting longer only
+		// trades a cut-off request for a SIGKILL.
+		log.Error("graceful shutdown did not finish; in-flight requests may be cut off",
+			"error", err, "budget", config.IngestServerShutdownTimeout)
+	}
+	<-served // ErrServerClosed, already sent when the listener closed
 	return nil
 }
 
@@ -204,7 +308,11 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 	if err != nil {
 		return fmt.Errorf("database pool: %w", err)
 	}
-	defer pool.Close()
+	// One bounded close for every resource, registered before the health
+	// server's own shutdown so defer's LIFO order runs it after that. See
+	// closeBounded: these calls take no context and can block forever.
+	closers := []func() error{func() error { pool.Close(); return nil }}
+	defer func() { closeBounded(log, closers) }()
 	if err := pool.Ping(ctx); err != nil {
 		// Unlike the writer, the subscription store is needed for every
 		// record, so a database that is not there at startup is fatal rather
@@ -240,7 +348,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 		// skipped on first deploy.
 		StartOffset: kafka.FirstOffset,
 	})
-	defer func() { _ = reader.Close() }()
+	closers = append(closers, reader.Close)
 
 	dlq := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers()...),
@@ -250,7 +358,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 		AllowAutoTopicCreation: false,
 		BatchTimeout:           10 * time.Millisecond,
 	}
-	defer func() { _ = dlq.Close() }()
+	closers = append(closers, dlq.Close)
 
 	consumer := delivery.NewConsumer(
 		reader, dlq, subscriptions.New(pool),
@@ -266,7 +374,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 		}
 	}()
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), config.HealthShutdownTimeout)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()

@@ -13,10 +13,17 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/lilabrooks/my-local-platform/relay/config"
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
 	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
+	"github.com/lilabrooks/my-local-platform/relay/internal/telemetry"
 )
 
 const (
@@ -30,7 +37,11 @@ const (
 	// acceptance after the client disconnects. kafka.Writer bounds its broker
 	// write at 10 seconds; this leaves time to record the acknowledgement and
 	// release the row lock.
-	acceptanceTimeout = 15 * time.Second
+	//
+	// Defined in config because relay-ingest's graceful shutdown has to wait
+	// at least this long before closing the pool and the writer -- otherwise
+	// shutdown destroys the very work this timeout exists to complete.
+	acceptanceTimeout = config.IngestAcceptanceTimeout
 )
 
 // Producer is the part of kafka.Writer this package needs. An interface so the
@@ -102,6 +113,16 @@ type postEventResponse struct {
 }
 
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	ctx, span := otel.Tracer("relay/ingest").Start(ctx, "relay.ingest",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("http.request.method", r.Method),
+			attribute.String("url.path", r.URL.Path),
+		),
+	)
+	defer span.End()
+
 	body := http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields() // a misspelled field is a caller bug, not a default
@@ -157,31 +178,60 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: idempotencyKey,
 	}
 	if err := rec.Validate(); err != nil {
+		telemetry.RecordError(span, err, "invalid event")
 		metrics.IngestEvents.WithLabelValues("invalid").Inc()
 		writeError(w, http.StatusBadRequest, "%v", err)
 		return
 	}
+	// The candidate id, overwritten below with the id acceptance actually
+	// chose. Set here so a span for a request that never reaches acceptance
+	// still names something.
+	span.SetAttributes(
+		attribute.String("relay.event.id", rec.ID),
+		attribute.String("relay.tenant.id", rec.TenantID),
+		attribute.String("relay.event.type", rec.Type),
+	)
 
 	if s.events == nil {
+		err := errors.New("event store is not configured")
+		telemetry.RecordError(span, err, "event history unavailable")
 		s.log.Error("persist event", "error", "event store is not configured", "event_id", id)
 		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
 		writeError(w, http.StatusServiceUnavailable, "event history is unavailable, retry")
 		return
 	}
-	acceptCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), acceptanceTimeout)
+	acceptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acceptanceTimeout)
 	defer cancel()
 	accepted, err := s.events.AcceptEvent(acceptCtx, rec, func(ctx context.Context, chosen event.Record) error {
+		ctx, produceSpan := otel.Tracer("relay/ingest").Start(ctx, "kafka.produce",
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("relay.event.id", chosen.ID),
+				attribute.String("messaging.destination.name", s.topic),
+			),
+		)
+		defer produceSpan.End()
 		value, err := event.EncodeRecord(chosen)
 		if err != nil {
+			telemetry.RecordError(produceSpan, err, "encode event")
 			return fmt.Errorf("encode record: %w", err)
 		}
 		// No Topic on the message: the Writer carries it, and kafka-go rejects a
 		// message that sets it too. The database row is already committed here,
 		// so a fast consumer can attach attempt history before this call returns.
-		return s.producer.WriteMessages(ctx, kafka.Message{Key: chosen.Key(), Value: value})
+		msg := kafka.Message{Key: chosen.Key(), Value: value}
+		otel.GetTextMapPropagator().Inject(ctx, telemetry.NewKafkaHeaderCarrier(&msg.Headers))
+		if err := s.producer.WriteMessages(ctx, msg); err != nil {
+			telemetry.RecordError(produceSpan, err, "publish event")
+			return err
+		}
+		produceSpan.SetStatus(codes.Ok, "")
+		return nil
 	})
 	if err != nil {
 		if errors.Is(err, history.ErrIdempotencyConflict) {
+			// Never the error itself: it names the caller's idempotency key.
+			telemetry.RecordError(span, err, "idempotency conflict")
 			metrics.IngestEvents.WithLabelValues("conflict").Inc()
 			writeError(w, http.StatusConflict,
 				"idempotency key was already used with different type or data")
@@ -191,11 +241,23 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, history.ErrPublishFailed) {
 			operation = "produce"
 		}
+		telemetry.RecordError(span, err, operation)
 		s.log.Error(operation, "error", err, "event_id", id, "tenant", rec.TenantID)
 		metrics.IngestEvents.WithLabelValues("unavailable").Inc()
 		writeError(w, http.StatusServiceUnavailable, "could not durably accept the event, retry")
 		return
 	}
+	// Overwrite the candidate id. Acceptance returns the event that already
+	// holds this tenant-and-key pair, so a deduplicated request's chosen id is
+	// the FIRST request's, not the one generated above -- which is also the id
+	// the 202, the Kafka record and every delivery span carry. Tagging the span
+	// with the candidate would put an id in the trace that names no event, and
+	// would not answer the runbook's query for the id the caller was given.
+	span.SetAttributes(
+		attribute.String("relay.event.id", accepted.Record.ID),
+		attribute.Bool("relay.event.deduplicated", accepted.Deduplicated),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	if accepted.Deduplicated {
 		metrics.IngestEvents.WithLabelValues("deduplicated").Inc()

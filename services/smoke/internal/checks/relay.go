@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/lilabrooks/my-local-platform/smoke/internal/platform"
 )
@@ -109,9 +113,22 @@ func Relay(cfg platform.Config) Check {
 		if healthyDeliveries != 1 {
 			return "", fmt.Errorf("event %s reached /hooks/ok %d times, want 1", eventID, healthyDeliveries)
 		}
+		traceEvidence := "Tempo assertion off (set MLP_SMOKE_REQUIRE_TRACES=1, or run `make smoke-traces`, with the obs profile up)"
+		if cfg.RequireTraces {
+			traceID := trace.SpanContextFromContext(ctx).TraceID()
+			if !traceID.IsValid() {
+				return "", fmt.Errorf("MLP_SMOKE_REQUIRE_TRACES is set but this run has no trace id: " +
+					"the OTLP exporter did not start, so no relay span can be looked up")
+			}
+			if err := awaitRelayTrace(ctx, cfg.TempoURL, traceID.String(), eventID, attempts); err != nil {
+				return "", err
+			}
+			traceEvidence = fmt.Sprintf(
+				"Tempo trace %s joins ingest, Kafka, consume and one span per persisted attempt", traceID)
+		}
 
-		return fmt.Sprintf("%s returned by 2 concurrent requests for one idempotency key, delivered to %s, dead-lettered %s after %d attempts; one Kafka record, one healthy delivery, one event row and %d attempts persisted",
-			eventID, delivered, dead.URL, dead.Attempts, len(attempts)), nil
+		return fmt.Sprintf("%s returned by 2 concurrent requests for one idempotency key, delivered to %s, dead-lettered %s after %d attempts; one Kafka record, one healthy delivery, one event row and %d attempts persisted; %s",
+			eventID, delivered, dead.URL, dead.Attempts, len(attempts), traceEvidence), nil
 	}}
 }
 
@@ -133,6 +150,7 @@ func postEvent(ctx context.Context, ingestURL, marker, idempotencyKey string) (s
 		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -155,6 +173,193 @@ func postEvent(ctx context.Context, ingestURL, marker, idempotencyKey string) (s
 		return "", fmt.Errorf("ingest returned 202 with no event id: %s", payload)
 	}
 	return accepted.ID, nil
+}
+
+// tempoSpan is the subset of Tempo's OTLP-JSON trace response this check
+// reads. Integers arrive as decimal strings in OTLP JSON, hence intValue being
+// a string rather than a number.
+type tempoSpan struct {
+	Name       string `json:"name"`
+	Attributes []struct {
+		Key   string `json:"key"`
+		Value struct {
+			StringValue string `json:"stringValue"`
+			IntValue    string `json:"intValue"`
+		} `json:"value"`
+	} `json:"attributes"`
+}
+
+type tempoTrace struct {
+	Batches []struct {
+		ScopeSpans []struct {
+			Spans []tempoSpan `json:"spans"`
+		} `json:"scopeSpans"`
+	} `json:"batches"`
+}
+
+// attemptKey identifies one webhook attempt the way both the persisted history
+// row and its span do.
+type attemptKey struct {
+	SubscriptionID int64
+	AttemptNumber  int
+}
+
+// relayTraceSpans is what one Tempo response says about this event.
+type relayTraceSpans struct {
+	counts   map[string]int
+	attempts map[attemptKey]int
+}
+
+func (s relayTraceSpans) String() string {
+	return fmt.Sprintf("ingest=%d produce=%d consume=%d attempt spans=%v",
+		s.counts["relay.ingest"], s.counts["kafka.produce"], s.counts["relay.consume"], s.attempts)
+}
+
+// awaitRelayTrace polls until one Tempo trace holds the whole relay path for
+// this event, or the check's deadline expires.
+//
+// The event id is what ties the spans together, and the trace id is the smoke
+// run's own: relay.consume is created in a different process and can only carry
+// this trace id if it came across in the Kafka headers, so finding it here is
+// the proof that the header hop works.
+//
+// wantAttempts is the persisted attempt history. Asserting the exact set of
+// (subscription, attempt number) pairs rather than "at least one attempt span"
+// is what makes this fail if per-attempt spans ever collapse into one -- which
+// is the regression an "every delivery attempt" criterion most needs to catch,
+// and the one a name-presence check cannot see.
+func awaitRelayTrace(ctx context.Context, tempoURL, traceID, eventID string, wantAttempts []deliveryAttempt) error {
+	want := make(map[attemptKey]int, len(wantAttempts))
+	for _, attempt := range wantAttempts {
+		want[attemptKey{attempt.SubscriptionID, attempt.AttemptNumber}]++
+	}
+	if len(want) == 0 {
+		return fmt.Errorf("event %s persisted no delivery attempts, so there is nothing to match spans against", eventID)
+	}
+
+	var last relayTraceSpans
+	var lastErr error
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		got, err := fetchRelayTrace(ctx, tempoURL, traceID, eventID)
+		lastErr = err
+		if err == nil {
+			last = got
+			if missing := missingRelaySpans(got, want); missing == "" {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("tempo trace %s for event %s was never readable (last error: %v): %w",
+					traceID, eventID, lastErr, ctx.Err())
+			}
+			return fmt.Errorf("tempo trace %s is incomplete for event %s: %s; saw %s: %w",
+				traceID, eventID, missingRelaySpans(last, want), last, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// missingRelaySpans reports what the trace still lacks, or "" when it is
+// complete.
+func missingRelaySpans(got relayTraceSpans, want map[attemptKey]int) string {
+	for _, name := range []string{"relay.ingest", "kafka.produce", "relay.consume"} {
+		if got.counts[name] == 0 {
+			return "no " + name + " span"
+		}
+	}
+	for key, n := range want {
+		if got.attempts[key] != n {
+			return fmt.Sprintf("subscription %d attempt %d has %d spans, want %d",
+				key.SubscriptionID, key.AttemptNumber, got.attempts[key], n)
+		}
+	}
+	for key := range got.attempts {
+		if _, ok := want[key]; !ok {
+			return fmt.Sprintf("subscription %d attempt %d has a span but no persisted history row",
+				key.SubscriptionID, key.AttemptNumber)
+		}
+	}
+	return ""
+}
+
+func fetchRelayTrace(ctx context.Context, tempoURL, traceID, eventID string) (relayTraceSpans, error) {
+	out := relayTraceSpans{counts: map[string]int{}, attempts: map[attemptKey]int{}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(tempoURL, "/")+"/api/traces/"+traceID, nil)
+	if err != nil {
+		return out, fmt.Errorf("build Tempo trace request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return out, fmt.Errorf("query Tempo trace: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8192))
+		return out, fmt.Errorf("tempo trace query returned %d", resp.StatusCode)
+	}
+	var result tempoTrace
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return out, fmt.Errorf("decode Tempo trace: %w", err)
+	}
+
+	for _, batch := range result.Batches {
+		for _, scope := range batch.ScopeSpans {
+			for _, span := range scope.Spans {
+				if !relaySpanHasEvent(span, eventID) {
+					continue
+				}
+				out.counts[span.Name]++
+				if span.Name != "relay.webhook.attempt" {
+					continue
+				}
+				subscription, okSub := span.intAttr("relay.subscription.id")
+				attempt, okAttempt := span.intAttr("relay.delivery.attempt")
+				if !okSub || !okAttempt {
+					continue
+				}
+				out.attempts[attemptKey{subscription, int(attempt)}]++
+			}
+		}
+	}
+	return out, nil
+}
+
+func relaySpanHasEvent(span tempoSpan, eventID string) bool {
+	switch span.Name {
+	case "relay.ingest", "kafka.produce", "relay.consume", "relay.webhook.attempt":
+	default:
+		return false
+	}
+	value, ok := span.stringAttr("relay.event.id")
+	return ok && value == eventID
+}
+
+func (s tempoSpan) stringAttr(key string) (string, bool) {
+	for _, attr := range s.Attributes {
+		if attr.Key == key {
+			return attr.Value.StringValue, true
+		}
+	}
+	return "", false
+}
+
+func (s tempoSpan) intAttr(key string) (int64, bool) {
+	for _, attr := range s.Attributes {
+		if attr.Key != key {
+			continue
+		}
+		n, err := strconv.ParseInt(attr.Value.IntValue, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 func checkDurableIdempotencyClaim(

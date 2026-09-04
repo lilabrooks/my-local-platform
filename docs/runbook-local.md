@@ -215,6 +215,71 @@ dashboard has to name one, and an unpinned uid is generated per install — the
 panels would work on the machine they were authored on and come up "Datasource
 not found" everywhere else.
 
+## Following one relay event in Tempo
+
+Tempo is in the `obs` profile and relay is in `apps`, so `make smoke` treats the
+trace as best effort and says so in its result line. The target that asserts it
+is:
+
+```bash
+make up && make smoke-traces
+```
+
+That sets `MLP_SMOKE_REQUIRE_TRACES=1`, which makes the relay check fail unless
+one Tempo trace holds the ingest, produce and consume spans plus one
+`relay.webhook.attempt` span for every attempt in the persisted history. Plain
+`make smoke` — and CI's main smoke job, which runs without `obs` on purpose —
+leaves that assertion off rather than failing when there is no Tempo to ask.
+
+The relay smoke result prints both the event id and its 32-character Tempo
+trace id. Use those exact values to read the trace directly:
+
+```bash
+EVENT_ID=evt_replace_me
+TRACE_ID=replace_with_the_smoke_trace_id
+curl -fsS "http://localhost:3200/api/traces/${TRACE_ID}" |
+  jq -r --arg event_id "$EVENT_ID" '
+    .batches[].scopeSpans[].spans[]
+    | select(any(.attributes[]?;
+        .key == "relay.event.id" and .value.stringValue == $event_id))
+    | .name'
+```
+
+A completed event prints `relay.ingest`, `kafka.produce`, `relay.consume`, and
+one `relay.webhook.attempt` line per delivery attempt. Failed attempts carry an
+error status, retries carry `relay.retry.scheduled`, and the consumer span
+records dead-lettering — including the undecodable-record case, which has no
+event id to search by and so is only visible on the span.
+
+**A failure's span says what kind of failure, never what the error said.**
+Attributes are event and subscription ids, HTTP status, partition, offset, and
+an `error.type` classification (`timeout`, `connection_refused`, `dns`,
+`http_request`, `canceled`, `error`); the status description is a fixed phrase
+such as `webhook request failed`. No span carries an error message, because two
+of relay's carry data that must not leave the service: `http.Client` returns a
+`*url.Error` naming the subscriber URL with its path and query string, and an
+idempotency conflict names the caller's key. Those strings stay in the service
+log and, for a delivery attempt, in the attempt-history row — reachable through
+`GET /v1/events/{id}/attempts`, which is where to look when the classification
+is not enough. `telemetry.RecordError` is what enforces this; nothing in relay
+calls `span.RecordError` directly.
+
+Traces do carry `relay.tenant.id`, `relay.event.type` and the caller's incoming
+`tracestate`, which are caller-supplied on purpose — a trace you cannot filter
+by tenant is one nobody queries twice. What they never carry is the event
+payload, the signing secret, a subscriber URL, or an error message. relay
+propagates `traceparent` and `tracestate` only, not W3C baggage, which would
+make it a forwarder for arbitrary caller-supplied pairs into every signed
+subscriber request.
+
+**The same rule covers the smoke service's own `check.*` spans**, which sit
+above relay's in the trace. They carry the check name, its duration, and on
+failure a fixed `check failed` status with an `error.type` — never the check's
+detail string or its error. That detail names subscriber URLs and its errors can
+carry HTTP response bodies, and it used to reach a `check.detail` attribute: a
+2026-09-03 trace contained `dead-lettered http://sink:8081/hooks/flaky` there.
+Read details on stdout, where `checks.Report` prints every one of them in full.
+
 ## floci and the Docker socket
 
 The base compose file does **not** give floci the Docker socket. That mount

@@ -2,8 +2,12 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -53,4 +57,44 @@ func InitTracing(ctx context.Context, cfg Config) (trace.Tracer, func(context.Co
 	))
 
 	return tp.Tracer(cfg.ServiceName), tp.Shutdown, nil
+}
+
+// ErrorType classifies err into a token that carries nothing from the error's
+// message. Unrecognised errors report "error" rather than anything derived from
+// their contents, because an unrecognised error is exactly the one whose text
+// has not been reviewed.
+//
+// Smoke check errors are built with fmt.Errorf from whatever the check saw:
+// subscriber URLs, HTTP response bodies, decoded records. None of that belongs
+// on a span. The full text goes to stdout, which is where a person reads it.
+//
+// This mirrors relay's telemetry.ErrorType. The duplication is deliberate --
+// they are separate Go modules, and relay's lives in an internal package.
+func ErrorType(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection_refused"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection_reset"
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return "http_request"
+	}
+	return "error"
 }

@@ -18,6 +18,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/lilabrooks/my-local-platform/relay/internal/event"
 	"github.com/lilabrooks/my-local-platform/relay/internal/history"
@@ -147,6 +153,55 @@ func (f *fakeProducer) messages() []kafka.Message {
 func newTestServer(p Producer) http.Handler {
 	return newTestServerWithEvents(p, &fakeEventStore{})
 }
+
+func TestPostEventPropagatesIncomingTraceContextToKafka(t *testing.T) {
+	previous := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+
+	producer := &fakeProducer{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(
+		`{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100}}`,
+	))
+	req.Header.Set("traceparent", "00-0102030405060708090a0b0c0d0e0f10-0102030405060708-01")
+	req.Header.Set("tracestate", "vendor=value")
+	res := httptest.NewRecorder()
+	newTestServer(producer).ServeHTTP(res, req)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", res.Code, res.Body.String())
+	}
+
+	messages := producer.messages()
+	if len(messages) != 1 {
+		t.Fatalf("produced %d messages, want 1", len(messages))
+	}
+	carrier := telemetryCarrier{headers: &messages[0].Headers}
+	ctx := propagation.TraceContext{}.Extract(context.Background(), carrier)
+	got := trace.SpanContextFromContext(ctx)
+	if got.TraceID().String() != "0102030405060708090a0b0c0d0e0f10" {
+		t.Fatalf("Kafka trace id = %s, want incoming trace id", got.TraceID())
+	}
+	if got.TraceState().String() != "vendor=value" {
+		t.Fatalf("Kafka tracestate = %q, want vendor=value", got.TraceState())
+	}
+}
+
+type telemetryCarrier struct {
+	headers *[]kafka.Header
+}
+
+func (c telemetryCarrier) Get(key string) string {
+	for _, header := range *c.headers {
+		if strings.EqualFold(header.Key, key) {
+			return string(header.Value)
+		}
+	}
+	return ""
+}
+
+func (c telemetryCarrier) Set(string, string) {}
+
+func (c telemetryCarrier) Keys() []string { return nil }
 
 func newTestServerWithEvents(p Producer, events EventStore) http.Handler {
 	s := New(p, events, "mlp.relay.deliveries", slog.New(slog.DiscardHandler))
@@ -669,5 +724,135 @@ func TestMetricsEndpointCountsOutcomes(t *testing.T) {
 	// reach this through the same Service as everything else.
 	if !strings.Contains(rec.Body.String(), "relay_ingest_events_total") {
 		t.Error("GET /metrics did not expose relay_ingest_events_total")
+	}
+}
+
+// spanRecorder installs a real TracerProvider globally and returns the spans a
+// test produced. The global provider is what postEvent reaches through
+// otel.Tracer, so this is the only way to see what relay actually exports.
+func spanRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		_ = provider.Shutdown(context.Background())
+	})
+	return recorder
+}
+
+func spanNamed(t *testing.T, recorder *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	var found sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		if span.Name() == name {
+			found = span
+		}
+	}
+	if found == nil {
+		t.Fatalf("no %s span was recorded", name)
+	}
+	return found
+}
+
+func spanAttr(span sdktrace.ReadOnlySpan, key string) string {
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == key {
+			return attr.Value.String()
+		}
+	}
+	return ""
+}
+
+func postJSON(handler http.Handler, body string, header http.Header) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(body))
+	for key, values := range header {
+		req.Header[key] = values
+	}
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	return res
+}
+
+// A deduplicated request is handed the FIRST request's id, and that is the id
+// the Kafka record and every delivery span carry. Tagging its ingest span with
+// the id generated-and-discarded on this request would put an id in the trace
+// that names no event, and the runbook's per-event query would miss the span
+// for the request the caller actually made.
+func TestPostEventSpanCarriesTheAcceptedEventIDNotTheDiscardedCandidate(t *testing.T) {
+	recorder := spanRecorder(t)
+	handler := newTestServerWithEvents(&fakeProducer{}, &fakeEventStore{})
+	body := `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":100},"idempotency_key":"k1"}`
+
+	first := postJSON(handler, body, nil)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202: %s", first.Code, first.Body.String())
+	}
+	var accepted postEventResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &accepted); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+
+	second := postJSON(handler, body, nil)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second status = %d, want 202: %s", second.Code, second.Body.String())
+	}
+	var deduplicated postEventResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &deduplicated); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if deduplicated.ID != accepted.ID {
+		t.Fatalf("second request returned %s, want the first id %s", deduplicated.ID, accepted.ID)
+	}
+
+	ingestSpans := make([]sdktrace.ReadOnlySpan, 0, 2)
+	for _, span := range recorder.Ended() {
+		if span.Name() == "relay.ingest" {
+			ingestSpans = append(ingestSpans, span)
+		}
+	}
+	if len(ingestSpans) != 2 {
+		t.Fatalf("recorded %d relay.ingest spans, want 2", len(ingestSpans))
+	}
+	for i, span := range ingestSpans {
+		if got := spanAttr(span, "relay.event.id"); got != accepted.ID {
+			t.Errorf("relay.ingest span %d has relay.event.id %q, want the accepted id %q",
+				i+1, got, accepted.ID)
+		}
+	}
+	if got := spanAttr(ingestSpans[1], "relay.event.deduplicated"); got != "true" {
+		t.Errorf("deduplicated span reports relay.event.deduplicated=%q, want true", got)
+	}
+}
+
+// The conflict error names the caller's idempotency key, which can be an order
+// id or a customer reference. It belongs in the log and the 409 body, not in a
+// span that ships to a trace backend.
+func TestPostEventConflictSpanDoesNotCarryTheIdempotencyKey(t *testing.T) {
+	recorder := spanRecorder(t)
+	handler := newTestServerWithEvents(&fakeProducer{}, &fakeEventStore{})
+	const key = "customer-42-order-99"
+
+	first := postJSON(handler, `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":1},"idempotency_key":"`+key+`"}`, nil)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202: %s", first.Code, first.Body.String())
+	}
+	conflict := postJSON(handler, `{"tenant_id":"acme","type":"invoice.paid","data":{"amount":2},"idempotency_key":"`+key+`"}`, nil)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("second status = %d, want 409: %s", conflict.Code, conflict.Body.String())
+	}
+
+	span := spanNamed(t, recorder, "relay.ingest")
+	if span.Status().Code != codes.Error {
+		t.Errorf("conflict span status = %v, want Error", span.Status().Code)
+	}
+	if len(span.Events()) != 0 {
+		t.Errorf("conflict span carries %d events, want none", len(span.Events()))
+	}
+	exported := fmt.Sprintf("%v %v %v", span.Status(), span.Attributes(), span.Events())
+	if strings.Contains(exported, key) {
+		t.Errorf("span exports the idempotency key %q: %s", key, exported)
 	}
 }

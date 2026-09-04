@@ -28,6 +28,8 @@ type Config struct {
 	RabbitURL      string
 	DatabaseURL    string
 	OTLPEndpoint   string
+	TempoURL       string
+	RequireTraces  bool
 	ServiceName    string
 }
 
@@ -61,7 +63,17 @@ func Load() Config {
 		RabbitURL:    env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		DatabaseURL:  env("DATABASE_URL", "postgres://platform:platform@localhost:5432/platform?sslmode=disable"),
 		OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-		ServiceName:  env("OTEL_SERVICE_NAME", "smoke"),
+		TempoURL:     env("TEMPO_URL", "http://localhost:3200"),
+		// Off by default, and by configuration rather than by probing whether
+		// Tempo answers. Tempo lives in the `obs` compose profile while relay
+		// lives in `apps`, so the documented `make up-apps && make smoke` path
+		// and CI's smoke job both run without it -- and CI runs that way on
+		// purpose, to prove tracing is best effort. A reachability probe would
+		// satisfy those callers but would also turn a slow Tempo start into a
+		// silent skip on the run that is supposed to assert the trace. An
+		// explicit flag cannot skip quietly: `make smoke-traces` sets it.
+		RequireTraces: env("MLP_SMOKE_REQUIRE_TRACES", "0") == "1",
+		ServiceName:   env("OTEL_SERVICE_NAME", "smoke"),
 	}
 }
 
