@@ -30,6 +30,13 @@ func Init(ctx context.Context, serviceName, environment, endpoint string) (func(
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
+		// CI starts the collector after relay to exercise best-effort tracing.
+		// Docker DNS can return a transient lookup failure while the collector
+		// joins the network. gRPC's default connection timeout then leaves the
+		// first trace batch waiting long enough to expire before it re-resolves
+		// the service name. One second gives this startup sequence several
+		// re-resolution attempts inside the batch export window.
+		otlptracegrpc.WithReconnectionPeriod(time.Second),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("otlp exporter: %w", err)
