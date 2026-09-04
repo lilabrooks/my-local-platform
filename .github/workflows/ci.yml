@@ -109,24 +109,53 @@ jobs:
           go-version-file: services/smoke/go.mod
           cache-dependency-path: services/smoke/go.sum
 
+      # Compose's default builder cache dies with the hosted runner. Bake uses
+      # a container-backed BuildKit builder so the expensive Go build stages can
+      # be restored from GitHub's cache on later runs.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # The docker-container builder has its own image store, so a host-level
+      # docker pull would not protect the build below. Warm the base in BuildKit
+      # itself and retry only that fetch; compile failures still fail once.
+      - name: Warm BuildKit base images, with retries
+        run: |
+          set -u
+          bases=$(awk '/^FROM/ && $2 != "scratch" {print $2}' \
+            services/relay/Dockerfile services/sink/Dockerfile | sort -u)
+          [ -n "$bases" ] || { echo "no base image found in the Dockerfiles" >&2; exit 1; }
+          for base in $bases; do
+            warmed=
+            for attempt in 1 2 3; do
+              if printf 'FROM %s\n' "$base" | \
+                docker buildx build --file - --output type=cacheonly services/relay; then
+                warmed=1
+                break
+              fi
+              echo "::warning::warming $base failed (attempt $attempt/3)"
+              sleep $((attempt * 10))
+            done
+            [ -n "$warmed" ] || { echo "could not warm $base after 3 attempts" >&2; exit 1; }
+          done
+
       # Order matters. relay-deliver joins a consumer group at startup, and a
       # group that joins before its topic exists is assigned no partitions.
       # relay sets WatchPartitionChanges so it recovers anyway, but starting
       # the infrastructure and its data before the services that consume them
       # is the honest ordering -- and it keeps this job from depending on that
       # recovery working.
-      # The most registry-exposed job here: five third-party images plus the
-      # golang base the relay and sink builds fetch. Pulled up front with the
-      # same retry the image job uses, so a Docker Hub 5xx costs a sleep rather
-      # than a red build and a human pressing re-run.
+      # The most registry-exposed job here: nine third-party runtime images.
+      # Pull them up front with the same retry the image job uses, so a registry
+      # 5xx costs a sleep rather than a red build and a human pressing re-run.
+      # This includes the observability images even though those containers stay
+      # stopped until after the no-collector smoke check. Downloading them here
+      # keeps that contract while taking their pull off the later critical path.
       #
-      # --ignore-buildable skips the services compose builds from source; their
-      # base images are read out of the Dockerfiles instead, so the version is
-      # never written down twice.
+      # --ignore-buildable skips relay and sink. Bake builds those below and
+      # restores their Go build stages from GitHub's cache when possible.
       - name: Pull images, with retries
         run: |
           set -u
-          images=$(awk '/^FROM/ && $2 != "scratch" {print $2}' services/*/Dockerfile | sort -u)
           retry() {
             for attempt in 1 2 3; do
               if "$@"; then return 0; fi
@@ -135,11 +164,8 @@ jobs:
             done
             return 1
           }
-          for image in $images; do
-            retry docker pull "$image" || { echo "could not pull $image" >&2; exit 1; }
-          done
           retry docker compose --env-file .env.example -f local/docker-compose.yml \
-            --profile core --profile messaging --profile apps \
+            --profile core --profile messaging --profile apps --profile obs \
             pull --ignore-buildable ||
             { echo "could not pull the compose images" >&2; exit 1; }
 
@@ -151,11 +177,34 @@ jobs:
       - name: Seed AWS resources, Kafka topics and relay subscriptions
         run: make seed ENV_FILE=.env.example
 
+      # relay-ingest and relay-deliver use the same relay:dev image, so building
+      # relay-ingest is sufficient for both containers. Separate cache scopes
+      # stop the relay and sink exports from replacing each other. Cache export
+      # errors are non-fatal. The 2m setting shortens each cache request's 429
+      # retry budget; it is not a wall-clock limit on this step.
+      #
+      # bake-action grants Buildx fs=* for local sources. The selected Compose
+      # targets still limit the build contexts to services/relay and services/sink.
+      - name: Build relay and sink with shared cache
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          source: ./local
+          files: docker-compose.yml
+          targets: relay-ingest,sink
+          load: true
+          set: |
+            relay-ingest.cache-from=type=gha,scope=smoke-relay,timeout=2m
+            relay-ingest.cache-to=type=gha,scope=smoke-relay,mode=max,ignore-error=true,timeout=2m
+            sink.cache-from=type=gha,scope=smoke-sink,timeout=2m
+            sink.cache-to=type=gha,scope=smoke-sink,mode=max,ignore-error=true,timeout=2m
+
       - name: Start relay and the sink
         run: |
           docker compose --env-file .env.example -f local/docker-compose.yml \
             --profile core --profile messaging --profile apps \
-            up -d --build --wait --wait-timeout 600
+            up -d --no-build --wait --wait-timeout 600
 
       # The observability profile is deliberately left out: the smoke service
       # treats tracing as best effort, so its absence must not fail the run.
