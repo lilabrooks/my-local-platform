@@ -22,21 +22,29 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 )
+
+const collectorRetryDelay = time.Second
 
 // Init sends relay spans over OTLP. The collector chooses their destination.
 func Init(ctx context.Context, serviceName, environment, endpoint string) (func(context.Context) error, error) {
 	endpoint = strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://")
+	connectBackoff := backoff.DefaultConfig
+	connectBackoff.MaxDelay = collectorRetryDelay
 	exporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint(endpoint),
+		// A bare endpoint makes grpc.NewClient use its DNS resolver. That
+		// resolver has a separate error backoff capped at 120s, so a collector
+		// that joins the Docker network after relay starts can remain
+		// undiscoverable after it is healthy. Passthrough leaves name resolution
+		// to each dial.
+		otlptracegrpc.WithEndpoint("passthrough:///"+endpoint),
 		otlptracegrpc.WithInsecure(),
-		// CI starts the collector after relay to exercise best-effort tracing.
-		// Docker DNS can return a transient lookup failure while the collector
-		// joins the network. gRPC's default connection timeout then leaves the
-		// first trace batch waiting long enough to expire before it re-resolves
-		// the service name. One second gives this startup sequence several
-		// re-resolution attempts inside the batch export window.
-		otlptracegrpc.WithReconnectionPeriod(time.Second),
+		otlptracegrpc.WithDialOption(grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           connectBackoff,
+			MinConnectTimeout: collectorRetryDelay,
+		})),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("otlp exporter: %w", err)
