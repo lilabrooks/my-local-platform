@@ -407,7 +407,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // lagInterval bounds itself rather than trusting the environment: a poll every
-// few milliseconds would hammer the broker with three requests a round, and one
+// few milliseconds would hammer the broker with four requests a round, and one
 // every ten minutes would make the demo's lag panel a flat line that moves
 // after the interesting part is over.
 func lagInterval(log *slog.Logger) time.Duration {

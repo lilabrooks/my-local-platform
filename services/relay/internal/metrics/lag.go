@@ -49,12 +49,12 @@ var (
 	// from a lag nobody has been able to measure.
 	LagRefreshErrors = factory.NewCounter(prometheus.CounterOpts{
 		Name: "relay_lag_refresh_errors_total",
-		Help: "Failed attempts to read consumer group lag from the broker.",
+		Help: "Failed attempts to refresh complete broker-derived consumer group evidence.",
 	})
 
 	LagRefreshedAt = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "relay_lag_refreshed_timestamp_seconds",
-		Help: "Unix time of the last COMPLETE lag refresh. Stale means the gauges above are stale.",
+		Help: "Unix time of the last complete lag and group-assignment refresh. Stale means the broker-derived gauges are stale.",
 	})
 
 	// A partial read is the case the two metrics above do not cover. The poll
@@ -65,6 +65,21 @@ var (
 		Name: "relay_lag_partitions_missing",
 		Help: "Partitions whose lag could not be read on the last poll. Non-zero means the total is not published.",
 	}, []string{"group", "topic"})
+
+	GroupMembers = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "relay_group_members",
+		Help: "Members visible to the broker for a consumer group.",
+	}, []string{"group"})
+
+	GroupUnassignedMembers = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "relay_group_unassigned_members",
+		Help: "Consumer group members holding no partitions for the configured topic.",
+	}, []string{"group"})
+
+	TopicPartitionsUnassigned = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "relay_topic_partitions_unassigned",
+		Help: "Topic partitions assigned to no member of the consumer group.",
+	}, []string{"group", "topic"})
 )
 
 // offsetClient is the part of kafka.Client the poller needs, as an interface so
@@ -73,9 +88,10 @@ type offsetClient interface {
 	Metadata(context.Context, *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
 	OffsetFetch(context.Context, *kafka.OffsetFetchRequest) (*kafka.OffsetFetchResponse, error)
 	ListOffsets(context.Context, *kafka.ListOffsetsRequest) (*kafka.ListOffsetsResponse, error)
+	DescribeGroups(context.Context, *kafka.DescribeGroupsRequest) (*kafka.DescribeGroupsResponse, error)
 }
 
-// LagPoller refreshes the lag gauges on an interval.
+// LagPoller refreshes broker-derived lag and group-assignment gauges on an interval.
 type LagPoller struct {
 	client   offsetClient
 	group    string
@@ -88,7 +104,7 @@ type LagPoller struct {
 //
 // The interval wants to be short enough that a scrape never returns a value
 // older than Prometheus's scrape interval, and long enough that it is not a
-// meaningful load on the broker. Three requests every few seconds against a
+// meaningful load on the broker. Four requests every few seconds against a
 // twelve-partition topic is nothing.
 func NewLagPoller(brokers []string, group, topic string, interval time.Duration, log *slog.Logger) *LagPoller {
 	return newLagPoller(&kafka.Client{
@@ -110,7 +126,7 @@ func newLagPoller(c offsetClient, group, topic string, interval time.Duration, l
 }
 
 // Run refreshes until the context is cancelled. It never returns an error: a
-// broker that cannot be reached makes the lag gauges stale, which
+// broker that cannot be reached makes the broker-derived gauges stale, which
 // relay_lag_refreshed_timestamp_seconds reports, and is not a reason to take
 // ingest out of service when it is still accepting events perfectly well.
 func (p *LagPoller) Run(ctx context.Context) {
@@ -136,15 +152,20 @@ func (p *LagPoller) refreshLogged(ctx context.Context) {
 		if ctx.Err() != nil {
 			return // shutting down, not a fault
 		}
+		if errors.Is(err, errGroupAssignmentInTransition) {
+			p.log.Info("consumer group rebalancing, holding the last complete broker metrics snapshot",
+				"error", err, "group", p.group, "topic", p.topic)
+			return
+		}
 		LagRefreshErrors.Inc()
-		p.log.Warn("lag refresh failed, gauges are now stale",
+		p.log.Warn("broker metrics refresh failed, gauges are now stale",
 			"error", err, "group", p.group, "topic", p.topic)
 	}
 }
 
 // Refresh performs one poll: list the topic's partitions, read the group's
-// committed offset on each, read each partition's bounds, and publish the
-// difference.
+// committed offset on each, read each partition's bounds and assignments, and
+// publish a complete broker snapshot.
 func (p *LagPoller) Refresh(ctx context.Context) error {
 	partitions, err := p.partitions(ctx)
 	if err != nil {
@@ -162,6 +183,10 @@ func (p *LagPoller) Refresh(ctx context.Context) error {
 		return err
 	}
 	bounds, err := p.partitionBounds(ctx, partitions)
+	if err != nil {
+		return err
+	}
+	coverage, err := p.groupCoverage(ctx, partitions)
 	if err != nil {
 		return err
 	}
@@ -211,8 +236,96 @@ func (p *LagPoller) Refresh(ctx context.Context) error {
 	}
 
 	ConsumerLagTotal.WithLabelValues(p.group, p.topic).Set(total)
+	GroupMembers.WithLabelValues(p.group).Set(float64(coverage.members))
+	GroupUnassignedMembers.WithLabelValues(p.group).Set(float64(coverage.unassignedMembers))
+	TopicPartitionsUnassigned.WithLabelValues(p.group, p.topic).Set(float64(coverage.unassignedPartitions))
 	LagRefreshedAt.Set(float64(time.Now().Unix()))
 	return nil
+}
+
+type assignmentCoverage struct {
+	members              int
+	unassignedMembers    int
+	unassignedPartitions int
+}
+
+var errGroupAssignmentInTransition = errors.New("consumer group assignment is in transition")
+
+func (p *LagPoller) groupCoverage(ctx context.Context, partitions []int) (assignmentCoverage, error) {
+	res, err := p.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{p.group}})
+	if err != nil {
+		return assignmentCoverage{}, fmt.Errorf("describe group %q: %w", p.group, err)
+	}
+
+	var group *kafka.DescribeGroupsResponseGroup
+	for i := range res.Groups {
+		if res.Groups[i].GroupID == p.group {
+			group = &res.Groups[i]
+			break
+		}
+	}
+	if group == nil {
+		return assignmentCoverage{}, fmt.Errorf("group %q not present in describe response", p.group)
+	}
+	if group.Error != nil {
+		return assignmentCoverage{}, fmt.Errorf("describe group %q: %w", p.group, group.Error)
+	}
+
+	switch group.GroupState {
+	case "Stable":
+		// Member assignments describe the current generation only in Stable.
+	case "Empty", "Dead":
+		// DescribeGroups v5 reports an unknown group as Dead with no group-level
+		// error. Empty and Dead groups have no owners, which is complete evidence
+		// rather than a missing measurement.
+		if len(group.Members) != 0 {
+			return assignmentCoverage{}, fmt.Errorf(
+				"group %q is %s but reports %d members", p.group, group.GroupState, len(group.Members))
+		}
+		return assignmentCoverage{unassignedPartitions: len(partitions)}, nil
+	default:
+		// During PreparingRebalance and CompletingRebalance Kafka may expose old
+		// assignments for existing members and empty assignments for new ones.
+		// Publishing either as current would invent owners or gaps, so leave the
+		// last complete snapshot and its timestamp in place.
+		return assignmentCoverage{}, fmt.Errorf(
+			"%w: group %q is %s; assignment snapshot is incomplete",
+			errGroupAssignmentInTransition, p.group, group.GroupState)
+	}
+
+	known := make(map[int]struct{}, len(partitions))
+	for _, partition := range partitions {
+		known[partition] = struct{}{}
+	}
+	assigned := make(map[int]string, len(partitions))
+	coverage := assignmentCoverage{members: len(group.Members)}
+	for _, member := range group.Members {
+		memberAssigned := false
+		for _, topic := range member.MemberAssignments.Topics {
+			if topic.Topic != p.topic {
+				continue
+			}
+			for _, partition := range topic.Partitions {
+				if _, ok := known[partition]; !ok {
+					return assignmentCoverage{}, fmt.Errorf(
+						"group %q member %q holds unknown partition %d of topic %q",
+						p.group, member.MemberID, partition, p.topic)
+				}
+				if owner, exists := assigned[partition]; exists && owner != member.MemberID {
+					return assignmentCoverage{}, fmt.Errorf(
+						"group %q reports partition %d of topic %q assigned to both %q and %q",
+						p.group, partition, p.topic, owner, member.MemberID)
+				}
+				assigned[partition] = member.MemberID
+				memberAssigned = true
+			}
+		}
+		if !memberAssigned {
+			coverage.unassignedMembers++
+		}
+	}
+	coverage.unassignedPartitions = len(known) - len(assigned)
+	return coverage, nil
 }
 
 // lagFor is the whole arithmetic, extracted because the uncommitted case is the

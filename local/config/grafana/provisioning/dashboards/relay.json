@@ -20,8 +20,8 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Consumer lag and consumer count",
-      "description": "The demo, on one graph. Slowing the sink raises its latency; lag climbs behind it; KEDA adds consumers; lag drains; the consumers go away again. Lag is read from the broker by relay-ingest, which is where KEDA reads it too, so the scaler and this panel are looking at the same source. One caveat: if a partition cannot be read, relay does NOT publish a total for that poll -- it holds the last complete one and raises relay_lag_partitions_missing. Check that gauge and relay_lag_refreshed_timestamp_seconds before trusting a flat line.\n\nmax() rather than sum(): every relay-ingest replica polls the broker for the same consumer group and reports the same number, so summing multiplies lag by the ingest replica count. max() is the truth whatever that count is.",
+      "title": "Consumer lag, processes, and group assignment",
+      "description": "The demo, on one graph. Slowing the sink raises its latency; lag climbs behind it; KEDA adds consumers; lag drains; the consumers go away again. relay-ingest reads lag, group membership, and partition assignments from the broker in one poll. The process count comes from scraped relay-deliver instances. It can briefly lead or trail broker membership while scaling because Prometheus scrapes and broker polls run on separate intervals; a sustained gap after both settle points to a process that has not joined. Unassigned members hold zero partitions. Unassigned partitions have no owner and cannot drain.\n\nIf a partition or group cannot be read, or the group is rebalancing, relay leaves the last complete values in place. Check relay_lag_partitions_missing and relay_lag_refreshed_timestamp_seconds before trusting a flat line. max() keeps the 2 relay-ingest replicas from multiplying the broker-wide values.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -49,8 +49,8 @@
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "deliver instances"
+              "id": "byRegexp",
+              "options": "/(deliver instances|group members|unassigned members|unassigned partitions)/"
             },
             "properties": [
               {
@@ -82,7 +82,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "instances / ms"
+                "value": "instances / members / partitions / ms"
               }
             ]
           },
@@ -181,6 +181,36 @@
           "expr": "max(sink_latency_ms)",
           "legendFormat": "sink latency (ms)",
           "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(relay_group_members{group=\"relay-deliver\"})",
+          "legendFormat": "group members",
+          "refId": "D",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(relay_group_unassigned_members{group=\"relay-deliver\"})",
+          "legendFormat": "unassigned members",
+          "refId": "E",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(relay_topic_partitions_unassigned{group=\"relay-deliver\",topic=\"mlp.relay.deliveries\"})",
+          "legendFormat": "unassigned partitions",
+          "refId": "F",
           "range": true
         }
       ]
@@ -512,12 +542,12 @@
     {
       "id": 7,
       "type": "stat",
-      "title": "Age of the lag measurement",
+      "title": "Age of the broker measurement",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Seconds since relay-ingest last read lag from the broker. The gauges above hold their last value when a poll fails, so a lag of zero and a lag nobody could measure look identical on a graph. This is how they are told apart.\n\nHealthy is under about 20s and not under 5: the age is a 5s poll interval plus however long ago Prometheus scraped it, up to another 15s. Thresholds sit above that sum, or this would sit amber while everything was fine.",
+      "description": "Seconds since the oldest scraped relay-ingest instance last completed both the lag and group-assignment reads. The gauges hold their last value when a poll fails or the group is rebalancing, so this age separates a measured zero from incomplete broker evidence on either ingest instance. If no ingest instance is scraped, the panel says NO INGEST SCRAPED in red.\n\nHealthy is under about 20s and not under 5: the age is a 5s poll interval plus however long ago Prometheus scraped it, up to another 15s. Thresholds sit above that sum, or this would sit amber while everything was fine.",
       "gridPos": {
         "h": 5,
         "w": 8,
@@ -527,6 +557,18 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
+          "mappings": [
+            {
+              "options": {
+                "999999999": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "NO INGEST SCRAPED"
+                }
+              },
+              "type": "value"
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -565,7 +607,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "time() - max(relay_lag_refreshed_timestamp_seconds)",
+          "expr": "(time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role=\"ingest\"})) or vector(999999999)",
           "legendFormat": "age",
           "refId": "A",
           "range": true

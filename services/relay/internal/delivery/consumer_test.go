@@ -56,12 +56,52 @@ func (f *fakeReader) CommitMessages(_ context.Context, msgs ...kafka.Message) er
 	return nil
 }
 
+func (f *fakeReader) Stats() kafka.ReaderStats { return kafka.ReaderStats{} }
+
 func (f *fakeReader) Close() error { return nil }
 
 func (f *fakeReader) commits() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.committed)
+}
+
+type blockingReader struct {
+	fakeReader
+	fetchStarted chan struct{}
+	startOnce    sync.Once
+	joined       bool
+	joinReported bool
+	statsCalls   int
+}
+
+func (f *blockingReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	f.startOnce.Do(func() { close(f.fetchStarted) })
+	<-ctx.Done()
+	return kafka.Message{}, ctx.Err()
+}
+
+func (f *blockingReader) Stats() kafka.ReaderStats {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statsCalls++
+	if f.joined && !f.joinReported {
+		f.joinReported = true
+		return kafka.ReaderStats{Rebalances: 1}
+	}
+	return kafka.ReaderStats{}
+}
+
+func (f *blockingReader) markJoined() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.joined = true
+}
+
+func (f *blockingReader) statsCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statsCalls
 }
 
 type fakeDLQ struct {
@@ -171,6 +211,79 @@ func alwaysFails(t *testing.T) *httptest.Server {
 }
 
 // --- tests ------------------------------------------------------------------
+
+func TestReadinessWaitsForGroupJoinAndAllowsZeroPartitionMember(t *testing.T) {
+	t.Parallel()
+
+	r := &blockingReader{fetchStarted: make(chan struct{})}
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	<-r.fetchStarted
+	if c.Ready() {
+		t.Fatal("consumer became ready when fetching began but before it joined a group generation")
+	}
+
+	// The fetch remains blocked for the entire test, which is the shape of a
+	// healthy group member assigned zero partitions. A successful group join is
+	// enough to make that member ready.
+	r.markJoined()
+	deadline := time.Now().Add(time.Second)
+	for !c.Ready() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !c.Ready() {
+		t.Fatal("consumer stayed unready after joining with zero assigned partitions")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run after cancellation: %v", err)
+	}
+	if c.Ready() {
+		t.Fatal("consumer stayed ready after shutdown")
+	}
+}
+
+func TestReadinessDoesNotConsumeAJoinBeforeFetchingStarts(t *testing.T) {
+	t.Parallel()
+
+	r := &blockingReader{fetchStarted: make(chan struct{})}
+	r.markJoined()
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.markReadyAfterGroupJoin(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Let the watcher enter its initial check and pass at least one tick. Stats
+	// must remain untouched while Run has not entered the fetch loop, because
+	// kafka.Reader clears its rebalance counter when Stats reads it.
+	time.Sleep(2 * groupJoinPollInterval)
+	if got := r.statsCallCount(); got != 0 {
+		t.Fatalf("Stats called %d times before fetching started; the join event was consumed early", got)
+	}
+	if c.Ready() {
+		t.Fatal("consumer became ready before fetching started")
+	}
+
+	c.fetchStarted.Store(true)
+	deadline := time.Now().Add(time.Second)
+	for !c.Ready() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !c.Ready() {
+		t.Fatal("consumer stayed unready after fetching started with a previously reported join")
+	}
+}
 
 func TestSuccessfulDeliveryCommitsWithoutDeadLettering(t *testing.T) {
 	t.Parallel()

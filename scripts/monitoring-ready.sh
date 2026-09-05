@@ -12,9 +12,12 @@
 #   - relay-deliver is not running
 #
 # Checking that the pieces EXIST catches only the fourth. So this asserts the
-# query the panel actually plots, which covers all five at once:
+# process query plus the broker-derived group evidence the panel plots:
 #
 #   count(relay_build_info{role="deliver"}) >= 1
+#   count(relay_group_members{group="relay-deliver"}) >= 1
+#   count(relay_group_unassigned_members{group="relay-deliver"}) >= 1
+#   count(relay_topic_partitions_unassigned{group="relay-deliver"}) >= 1
 #
 # Reasoning recorded in docs/adr/0008-in-cluster-observability-for-the-demo.md,
 # under "The label stays, and the guard is a runtime assertion".
@@ -34,6 +37,7 @@ say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v kubectl >/dev/null || fail "kubectl is not on PATH"
+command -v python3 >/dev/null || fail "python3 is not on PATH"
 
 kubectl cluster-info >/dev/null 2>&1 || fail \
   "no reachable cluster. Run 'make k8s-up' first."
@@ -71,23 +75,64 @@ query() {
     --data-urlencode "query=$1" 2>/dev/null || true
 }
 
-say "waiting for consumer metrics (up to ${TIMEOUT}s)"
-deadline=$(( $(date +%s) + TIMEOUT ))
-consumers=0
-while [ "$(date +%s)" -lt "$deadline" ]; do
-  response="$(query 'count(relay_build_info{role="deliver"})')"
-  consumers="$(printf '%s' "$response" |
-    python3 -c 'import json,sys
+scalar() {
+	python3 -c 'import json,math,sys
 try:
     r = json.load(sys.stdin)
-    print(int(float(r["data"]["result"][0]["value"][1])) if r["data"]["result"] else 0)
+    if r.get("status") != "success" or not r["data"]["result"]:
+        raise ValueError("query returned no result")
+    value = float(r["data"]["result"][0]["value"][1])
+    print(format(value, ".15g") if math.isfinite(value) else "nan")
 except Exception:
-    print(0)' 2>/dev/null || echo 0)"
-  [ "$consumers" -ge 1 ] && break
+    print("nan")'
+}
+
+at_least() {
+	python3 -c 'import math,sys
+try:
+    value = float(sys.argv[1])
+    limit = float(sys.argv[2])
+    ok = math.isfinite(value) and value >= limit
+except (ValueError, IndexError):
+    ok = False
+raise SystemExit(0 if ok else 1)' "$1" "$2"
+}
+
+at_most() {
+	python3 -c 'import math,sys
+try:
+    value = float(sys.argv[1])
+    limit = float(sys.argv[2])
+    ok = math.isfinite(value) and value <= limit
+except (ValueError, IndexError):
+    ok = False
+raise SystemExit(0 if ok else 1)' "$1" "$2"
+}
+
+say "waiting for consumer and group-assignment metrics (up to ${TIMEOUT}s)"
+deadline=$(( $(date +%s) + TIMEOUT ))
+consumers=nan
+group_members_series=nan
+unassigned_members_series=nan
+unassigned_partitions_series=nan
+broker_age=nan
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  consumers="$(query 'count(relay_build_info{role="deliver"})' | scalar)"
+  group_members_series="$(query 'count(relay_group_members{group="relay-deliver"})' | scalar)"
+  unassigned_members_series="$(query 'count(relay_group_unassigned_members{group="relay-deliver"})' | scalar)"
+  unassigned_partitions_series="$(query 'count(relay_topic_partitions_unassigned{group="relay-deliver"})' | scalar)"
+  broker_age="$(query 'time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role="ingest"})' | scalar)"
+  if at_least "$consumers" 1 &&
+     at_least "$group_members_series" 1 &&
+     at_least "$unassigned_members_series" 1 &&
+     at_least "$unassigned_partitions_series" 1 &&
+     at_most "$broker_age" 30; then
+    break
+  fi
   sleep 3
 done
 
-if [ "$consumers" -lt 1 ]; then
+if ! at_least "$consumers" 1; then
   printf '\n' >&2
   fail "$(cat <<EOM
 Prometheus has no relay-deliver targets, so the demo's lag panel would be empty.
@@ -109,4 +154,26 @@ EOM
 )"
 fi
 
-say "OK -- $consumers relay-deliver target(s) scraped; the lag panel has data"
+if ! at_least "$group_members_series" 1 ||
+   ! at_least "$unassigned_members_series" 1 ||
+   ! at_least "$unassigned_partitions_series" 1 ||
+   ! at_most "$broker_age" 30; then
+  printf '\n' >&2
+  fail "$(cat <<EOM
+Prometheus scrapes relay-deliver, but relay-ingest has not published complete
+broker assignment evidence. A zero value must still have a time series; an
+absent series means the broker read did not complete.
+
+  relay_group_members series:                  $group_members_series
+  relay_group_unassigned_members series:       $unassigned_members_series
+  relay_topic_partitions_unassigned series:    $unassigned_partitions_series
+  broker measurement age in seconds:           $broker_age
+
+Check relay-ingest logs for a DescribeGroups failure or a consumer group that
+has not returned to Stable. A complete poll should refresh
+relay_lag_refreshed_timestamp_seconds every few seconds.
+EOM
+)"
+fi
+
+say "OK -- $consumers relay-deliver target(s) and complete broker assignment evidence scraped"

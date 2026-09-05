@@ -48,6 +48,9 @@ func TestHandlerServesTheRegisteredFamilies(t *testing.T) {
 	RecordsConsumed.WithLabelValues("0").Add(0)
 	BuildInfo.WithLabelValues("test", "ingest").Set(1)
 	ConsumerLag.WithLabelValues(testGroup, testTopic, "0").Set(0)
+	GroupMembers.WithLabelValues(testGroup).Set(0)
+	GroupUnassignedMembers.WithLabelValues(testGroup).Set(0)
+	TopicPartitionsUnassigned.WithLabelValues(testGroup, testTopic).Set(0)
 
 	rec := httptest.NewRecorder()
 	Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -74,6 +77,9 @@ func TestHandlerServesTheRegisteredFamilies(t *testing.T) {
 		"relay_consumer_group_lag_total",
 		"relay_lag_refreshed_timestamp_seconds",
 		"relay_lag_partitions_missing",
+		"relay_group_members",
+		"relay_group_unassigned_members",
+		"relay_topic_partitions_unassigned",
 		// Registered explicitly rather than inherited from the default
 		// registry, so worth confirming they actually arrived.
 		"go_goroutines",

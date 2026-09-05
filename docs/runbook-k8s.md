@@ -257,6 +257,15 @@ consumer group, and both publish the same numbers. Summing multiplies lag by the
 replica count. The shipped panels do this correctly; a query typed by hand in
 Explore will not.
 
+The same broker poll publishes `relay_group_members`,
+`relay_group_unassigned_members`, and `relay_topic_partitions_unassigned`.
+Together with the process count, they separate a running pod from a joined
+consumer and show partitions that have no owner. During a rebalance, relay holds
+the last stable assignment instead of treating the old generation as current.
+Check **Age of the broker measurement** before trusting a 0 in any of those
+series. It reports the oldest measurement across the scraped ingest instances,
+so one stalled poller cannot hide behind the other.
+
 ## Do not run the compose apps and the cluster apps together
 
 They are alternatives, not complements.
