@@ -115,6 +115,49 @@ func TestDashboardPayloadKeepsItsContractWithTheDemo(t *testing.T) {
 	}
 }
 
+func TestDashboardFreshnessPanelMakesAnAbsentIngestScrapeVisible(t *testing.T) {
+	cm := dashboardConfigMap(t)
+	payload, _ := nested(cm, "data")["relay.json"].(string)
+
+	var dashboard map[string]any
+	if err := json.Unmarshal([]byte(payload), &dashboard); err != nil {
+		t.Fatalf("the ConfigMap payload is not valid JSON: %v", err)
+	}
+	panels, _ := dashboard["panels"].([]any)
+	for _, rawPanel := range panels {
+		panel, _ := rawPanel.(map[string]any)
+		if panel["title"] != "Age of the broker measurement" {
+			continue
+		}
+
+		targets, _ := panel["targets"].([]any)
+		if len(targets) != 1 {
+			t.Fatalf("freshness panel has %d targets, want 1", len(targets))
+		}
+		target, _ := targets[0].(map[string]any)
+		expr, _ := target["expr"].(string)
+		if !strings.Contains(expr, "or vector(999999999)") {
+			t.Errorf("freshness query %q has no value for an absent ingest scrape", expr)
+		}
+
+		defaults := nested(panel, "fieldConfig", "defaults")
+		mappings, _ := defaults["mappings"].([]any)
+		for _, rawMapping := range mappings {
+			mapping, _ := rawMapping.(map[string]any)
+			if mapping["type"] != "value" {
+				continue
+			}
+			options, _ := mapping["options"].(map[string]any)
+			result, _ := options["999999999"].(map[string]any)
+			if result["text"] == "NO INGEST SCRAPED" && result["color"] == "red" {
+				return
+			}
+		}
+		t.Fatal("freshness panel does not map its absent-ingest sentinel to a red message")
+	}
+	t.Fatal("dashboard has no Age of the broker measurement panel")
+}
+
 // TestDashboardConfigMapCarriesTheSidecarLabel asserts the one label that makes
 // the ConfigMap visible at all.
 //

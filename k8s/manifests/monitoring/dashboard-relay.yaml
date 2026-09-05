@@ -566,7 +566,7 @@ data:
               "type": "prometheus",
               "uid": "prometheus"
             },
-            "description": "Seconds since the oldest scraped relay-ingest instance last completed both the lag and group-assignment reads. The gauges hold their last value when a poll fails or the group is rebalancing, so this age separates a measured zero from incomplete broker evidence on either ingest instance.\n\nHealthy is under about 20s and not under 5: the age is a 5s poll interval plus however long ago Prometheus scraped it, up to another 15s. Thresholds sit above that sum, or this would sit amber while everything was fine.",
+            "description": "Seconds since the oldest scraped relay-ingest instance last completed both the lag and group-assignment reads. The gauges hold their last value when a poll fails or the group is rebalancing, so this age separates a measured zero from incomplete broker evidence on either ingest instance. If no ingest instance is scraped, the panel says NO INGEST SCRAPED in red.\n\nHealthy is under about 20s and not under 5: the age is a 5s poll interval plus however long ago Prometheus scraped it, up to another 15s. Thresholds sit above that sum, or this would sit amber while everything was fine.",
             "gridPos": {
               "h": 5,
               "w": 8,
@@ -576,6 +576,18 @@ data:
             "fieldConfig": {
               "defaults": {
                 "unit": "s",
+                "mappings": [
+                  {
+                    "options": {
+                      "999999999": {
+                        "color": "red",
+                        "index": 0,
+                        "text": "NO INGEST SCRAPED"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ],
                 "thresholds": {
                   "mode": "absolute",
                   "steps": [
@@ -614,7 +626,7 @@ data:
                   "type": "prometheus",
                   "uid": "prometheus"
                 },
-                "expr": "time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role=\"ingest\"})",
+                "expr": "(time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role=\"ingest\"})) or vector(999999999)",
                 "legendFormat": "age",
                 "refId": "A",
                 "range": true

@@ -72,6 +72,7 @@ type blockingReader struct {
 	startOnce    sync.Once
 	joined       bool
 	joinReported bool
+	statsCalls   int
 }
 
 func (f *blockingReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
@@ -83,6 +84,7 @@ func (f *blockingReader) FetchMessage(ctx context.Context) (kafka.Message, error
 func (f *blockingReader) Stats() kafka.ReaderStats {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.statsCalls++
 	if f.joined && !f.joinReported {
 		f.joinReported = true
 		return kafka.ReaderStats{Rebalances: 1}
@@ -94,6 +96,12 @@ func (f *blockingReader) markJoined() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.joined = true
+}
+
+func (f *blockingReader) statsCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statsCalls
 }
 
 type fakeDLQ struct {
@@ -236,6 +244,44 @@ func TestReadinessWaitsForGroupJoinAndAllowsZeroPartitionMember(t *testing.T) {
 	}
 	if c.Ready() {
 		t.Fatal("consumer stayed ready after shutdown")
+	}
+}
+
+func TestReadinessDoesNotConsumeAJoinBeforeFetchingStarts(t *testing.T) {
+	t.Parallel()
+
+	r := &blockingReader{fetchStarted: make(chan struct{})}
+	r.markJoined()
+	c := newConsumer(t, r, &fakeDLQ{}, fakeSubs{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.markReadyAfterGroupJoin(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Let the watcher enter its initial check and pass at least one tick. Stats
+	// must remain untouched while Run has not entered the fetch loop, because
+	// kafka.Reader clears its rebalance counter when Stats reads it.
+	time.Sleep(2 * groupJoinPollInterval)
+	if got := r.statsCallCount(); got != 0 {
+		t.Fatalf("Stats called %d times before fetching started; the join event was consumed early", got)
+	}
+	if c.Ready() {
+		t.Fatal("consumer became ready before fetching started")
+	}
+
+	c.fetchStarted.Store(true)
+	deadline := time.Now().Add(time.Second)
+	for !c.Ready() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !c.Ready() {
+		t.Fatal("consumer stayed unready after fetching started with a previously reported join")
 	}
 }
 

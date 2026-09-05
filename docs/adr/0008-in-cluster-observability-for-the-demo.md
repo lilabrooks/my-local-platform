@@ -278,6 +278,9 @@ Deployment and the `ServiceMonitor` CRD exist -- what an earlier draft proposed
 -- passes in every case where they exist and nothing is scraped, which is the
 case that actually happens.
 
+If every ingest scrape disappears after that preflight, **Age of the broker
+measurement** displays `NO INGEST SCRAPED` in red.
+
 **A scrape target down mid-demo.** The lag line is unaffected: lag is published
 by `relay-ingest` reading the broker, and every ingest replica reports the same
 value, so losing one changes nothing. A missing deliver target shows as the
@@ -292,7 +295,9 @@ stale and the dashboard's freshness panel passes its threshold. The query uses
 the oldest timestamp from the scraped ingest instances, so one failed poller
 cannot borrow the other's fresh timestamp. It covers lag and group assignments
 together. A rebalance also holds the last stable assignment and lets this age
-until the broker reports a complete generation again.
+until the broker reports a complete generation again. Relay logs that as an
+informational transition. `relay_lag_refresh_errors_total` is reserved for
+failed refresh attempts; the growing age records the incomplete snapshot.
 
 **Replay interrupted in cluster mode.** This failure has no compose equivalent.
 If the script dies between pausing the ScaledObject and unpausing it, the

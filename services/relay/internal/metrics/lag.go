@@ -152,6 +152,11 @@ func (p *LagPoller) refreshLogged(ctx context.Context) {
 		if ctx.Err() != nil {
 			return // shutting down, not a fault
 		}
+		if errors.Is(err, errGroupAssignmentInTransition) {
+			p.log.Info("consumer group rebalancing, holding the last complete broker metrics snapshot",
+				"error", err, "group", p.group, "topic", p.topic)
+			return
+		}
 		LagRefreshErrors.Inc()
 		p.log.Warn("broker metrics refresh failed, gauges are now stale",
 			"error", err, "group", p.group, "topic", p.topic)
@@ -244,6 +249,8 @@ type assignmentCoverage struct {
 	unassignedPartitions int
 }
 
+var errGroupAssignmentInTransition = errors.New("consumer group assignment is in transition")
+
 func (p *LagPoller) groupCoverage(ctx context.Context, partitions []int) (assignmentCoverage, error) {
 	res, err := p.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{p.group}})
 	if err != nil {
@@ -282,7 +289,8 @@ func (p *LagPoller) groupCoverage(ctx context.Context, partitions []int) (assign
 		// Publishing either as current would invent owners or gaps, so leave the
 		// last complete snapshot and its timestamp in place.
 		return assignmentCoverage{}, fmt.Errorf(
-			"group %q is %s; assignment snapshot is incomplete", p.group, group.GroupState)
+			"%w: group %q is %s; assignment snapshot is incomplete",
+			errGroupAssignmentInTransition, p.group, group.GroupState)
 	}
 
 	known := make(map[int]struct{}, len(partitions))

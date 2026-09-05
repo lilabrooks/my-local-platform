@@ -1,10 +1,12 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -302,6 +304,53 @@ func TestGroupCoverageFailureKeepsTheLastCompleteMeasurement(t *testing.T) {
 				t.Errorf("refresh timestamp after incomplete group evidence = %v, want 123", got)
 			}
 		})
+	}
+}
+
+func TestRefreshLoggedDoesNotCountRebalanceAsARefreshError(t *testing.T) {
+	for _, state := range []string{"PreparingRebalance", "CompletingRebalance"} {
+		t.Run(state, func(t *testing.T) {
+			resetLagGauges()
+			broker := &fakeBroker{
+				partitions: []int{0},
+				committed:  map[int]int64{0: 0},
+				bounds:     map[int]offsetBounds{0: {}},
+				groupState: state,
+			}
+			var logs bytes.Buffer
+			poller := newLagPoller(broker, testGroup, testTopic, 0,
+				slog.New(slog.NewTextHandler(&logs, nil)))
+			errorsBefore := testutil.ToFloat64(LagRefreshErrors)
+
+			poller.refreshLogged(context.Background())
+
+			if got := testutil.ToFloat64(LagRefreshErrors); got != errorsBefore {
+				t.Errorf("refresh errors = %v, want unchanged %v during a rebalance", got, errorsBefore)
+			}
+			if got := logs.String(); !strings.Contains(got, "level=INFO") ||
+				!strings.Contains(got, "consumer group rebalancing") {
+				t.Errorf("rebalance log = %q, want an informational transition message", got)
+			}
+		})
+	}
+}
+
+func TestRefreshLoggedCountsBrokerFailure(t *testing.T) {
+	resetLagGauges()
+	broker := &fakeBroker{metadataErr: errors.New("broker unreachable")}
+	var logs bytes.Buffer
+	poller := newLagPoller(broker, testGroup, testTopic, 0,
+		slog.New(slog.NewTextHandler(&logs, nil)))
+	errorsBefore := testutil.ToFloat64(LagRefreshErrors)
+
+	poller.refreshLogged(context.Background())
+
+	if got := testutil.ToFloat64(LagRefreshErrors); got != errorsBefore+1 {
+		t.Errorf("refresh errors = %v, want %v after a broker failure", got, errorsBefore+1)
+	}
+	if got := logs.String(); !strings.Contains(got, "level=WARN") ||
+		!strings.Contains(got, "broker metrics refresh failed") {
+		t.Errorf("failure log = %q, want a warning", got)
 	}
 }
 

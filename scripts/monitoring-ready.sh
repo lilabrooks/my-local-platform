@@ -37,6 +37,7 @@ say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v kubectl >/dev/null || fail "kubectl is not on PATH"
+command -v python3 >/dev/null || fail "python3 is not on PATH"
 
 kubectl cluster-info >/dev/null 2>&1 || fail \
   "no reachable cluster. Run 'make k8s-up' first."
@@ -168,8 +169,9 @@ absent series means the broker read did not complete.
   relay_topic_partitions_unassigned series:    $unassigned_partitions_series
   broker measurement age in seconds:           $broker_age
 
-Check relay-ingest logs for the DescribeGroups failure. A complete poll should
-refresh relay_lag_refreshed_timestamp_seconds every few seconds.
+Check relay-ingest logs for a DescribeGroups failure or a consumer group that
+has not returned to Stable. A complete poll should refresh
+relay_lag_refreshed_timestamp_seconds every few seconds.
 EOM
 )"
 fi
