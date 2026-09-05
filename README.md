@@ -230,6 +230,10 @@ make lint          # Go, YAML, shell, Markdown, Actions, Docker, Terraform, secu
 CI runs the same tests, linters, image builds, Terraform validation, and smoke
 path on every pull request.
 
+See [Repository file checks](docs/repository-file-checks.md) for the full local
+and CI inventory, including security scans, ArgoCD invariants, and runtime
+verification.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
