@@ -201,15 +201,17 @@ docs/adr/               decisions with commands and measured evidence
 
 The architecture decisions explain why the repository uses this shape:
 
-- [Local-first with ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)
-- [floci over LocalStack](docs/adr/0002-floci-over-localstack.md)
-- [OpenTelemetry-first observability](docs/adr/0003-otel-first-observability.md)
-- [Real Kafka for local development](docs/adr/0004-real-kafka-not-emulated.md)
-- [ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)
-- [Kafka for relay delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)
-- [KEDA scaling from consumer lag](docs/adr/0007-keda-lag-autoscaling.md)
-- [In-cluster observability for the demo](docs/adr/0008-in-cluster-observability-for-the-demo.md)
-- [Separate ArgoCD control and workload permissions](docs/adr/0009-separate-argocd-control-and-workload-projects.md)
+| Decision | Status |
+|---|---|
+| [Local-first with ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md) | Accepted |
+| [floci over LocalStack](docs/adr/0002-floci-over-localstack.md) | Accepted |
+| [OpenTelemetry-first observability](docs/adr/0003-otel-first-observability.md) | Accepted |
+| [Real Kafka for local development](docs/adr/0004-real-kafka-not-emulated.md) | Accepted |
+| [ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md) | Accepted |
+| [Kafka for relay delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md) | Accepted |
+| [KEDA scaling from consumer lag](docs/adr/0007-keda-lag-autoscaling.md) | Accepted |
+| [In-cluster observability for the demo](docs/adr/0008-in-cluster-observability-for-the-demo.md) | Accepted |
+| [Separate ArgoCD control and workload permissions](docs/adr/0009-separate-argocd-control-and-workload-projects.md) | Accepted |
 
 GitHub Issues and milestones hold the active backlog. Start with the
 [open issues](https://github.com/lilabrooks/my-local-platform/issues) for the
@@ -223,7 +225,7 @@ Run the checks that cover your change:
 ```bash
 make test          # Go tests across all modules
 make k8s-validate  # manifest and GitOps invariants
-make lint          # Go, YAML, shell, Markdown, Actions, Docker, Terraform, security, secrets
+make lint          # Go, YAML, shell, Markdown, docs, Actions, Docker, Terraform, security, secrets
 ```
 
 `make smoke` is the local end-to-end gate and needs the Compose stack running.

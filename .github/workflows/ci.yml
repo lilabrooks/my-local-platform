@@ -407,7 +407,7 @@ jobs:
 
       # ONE implementation, not two.
       #
-      # This job used to re-implement each of the ten linters that
+      # This job used to re-implement each linter that
       # scripts/lint.sh already runs, and every divergence between them cost a
       # red build that said nothing about the code:
       #
