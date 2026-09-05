@@ -1,12 +1,42 @@
 # my-local-platform
 
-A distributed-systems playground that runs on a laptop for free, and on real
-AWS when it needs to.
+[![CI](https://github.com/lilabrooks/my-local-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/lilabrooks/my-local-platform/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Kafka, RabbitMQ, Postgres, S3, SNS, SQS, SES, OpenTelemetry, Prometheus, Tempo
-and Grafana come up with one command and no cloud account. ArgoCD deploys onto
-a local Kubernetes cluster from git. EKS and RDS are one Terraform flag away
-when emulation is not enough.
+A local-first playground for building cloud applications, testing them on a
+laptop, and running short validation sessions on AWS.
+
+The default workflow uses Docker Compose and minikube. It combines an
+AWS-compatible local API with Kafka, RabbitMQ, Postgres, GitOps, and a complete
+telemetry path. A separate Terraform workflow creates real AWS resources when
+local evidence is no longer enough. Paid resources are opt-in, tagged, and
+designed to be destroyed after the test.
+
+`relay`, a webhook delivery service, is the first application built on the
+platform. It is the current reference path across local services, Kubernetes,
+observability, and smoke tests. M4 extends that path to AWS.
+
+## What is included
+
+| Area | Local path | AWS path |
+|---|---|---|
+| AWS APIs | floci for S3, SNS, SQS, SES, and container-backed services | S3, SNS, SQS, ECR, optional SES, RDS, and EKS |
+| Streaming | Apache Kafka in KRaft mode | MSK is planned for the live relay milestone |
+| Messaging | RabbitMQ | Amazon MQ is a counterpart; Terraform does not provision it |
+| Database | Postgres 18 | RDS for PostgreSQL, opt-in |
+| Kubernetes | dedicated `mlp` minikube profile | EKS, opt-in |
+| Deployment | ArgoCD app-of-apps | planned reuse of the GitOps structure with ECR images |
+| Telemetry | OpenTelemetry, Prometheus, Tempo, and Grafana | OpenTelemetry with an optional Datadog exporter |
+
+Everything in `local/` runs without an AWS account. Terraform under
+`infra/terraform/` is the boundary where real cloud credentials and costs
+begin.
+
+## Quick start
+
+The full local stack needs Docker, Docker Compose, Go 1.27 or newer, and Make.
+It uses about 1.6 GB of sustained memory after startup. The first run can take a
+few minutes while Docker downloads and builds images.
 
 ```bash
 cp .env.example .env
@@ -14,283 +44,190 @@ make up
 make smoke
 ```
 
+`make up` starts every Compose profile and seeds the local AWS resources,
+Kafka topics, and relay database. `make smoke` writes and reads back through
+S3, SNS to SQS, SES, Kafka, RabbitMQ, Postgres, and relay. A passing run ends
+with:
+
 ```text
-smoke check  aws=http://localhost:4566 region=us-east-1 kafka=localhost:9092
-
-  PASS  s3               18ms  s3://mlp-artifacts/smoke/1787624424137397000.txt round trip
-  PASS  sns->sqs         16ms  fanout delivered smoke-1787624424165875000
-  PASS  ses               4ms  sent message 3254d6c8-84f5-4225-ab89-6e88607344ed
-  PASS  kafka           211ms  mlp.events partition 0 offset 6
-  PASS  rabbitmq         14ms  queue mlp.smoke round trip
-  PASS  postgres         17ms  row 6 on postgres 18.6
-  PASS  relay           718ms  evt_17a6be2526665f2606e42a9add11a497 returned by 2 concurrent requests for one idempotency key, delivered to /hooks/ok, dead-lettered http://sink:8081/hooks/flaky after 3 attempts; one Kafka record, one healthy delivery, one event row and 4 attempts persisted
-
 all components healthy
 ```
 
-## Project status
+Print the service URLs with `make urls`. Stop the stack while keeping its data
+with `make down`. `make clean` also deletes the local volumes.
 
-GitHub Issues and milestones hold the current backlog. Open work records its
-outcome, trigger, decision owner, governing anchors, dependency relation, and
-checked evidence in the issue body.
+See the [local runbook](docs/runbook-local.md) for ports, credentials, memory
+measurements, tracing, and troubleshooting.
 
-| Milestone | State | Purpose |
-|---|---|---|
-| [M0: clear the runway](https://github.com/lilabrooks/my-local-platform/milestone/1) | Closed | Fix the smoke path, create relay topics, and settle the Kafka client. |
-| [M1: the relay delivers](https://github.com/lilabrooks/my-local-platform/milestone/2) | Closed | Deliver one accepted event and dead-letter a refusing subscriber. |
-| [M2: KEDA scaling on lag](https://github.com/lilabrooks/my-local-platform/milestone/3) | Closed | Scale relay-deliver on broker lag, drain the backlog, and scale down. |
-| [M3: local relay readiness](https://github.com/lilabrooks/my-local-platform/milestone/4) | Active | Finish the local semantic hardening and prove relay as one application. |
-| [M4: ephemeral live AWS validation](https://github.com/lilabrooks/my-local-platform/milestone/5) | Waiting on M3 | Rehearse locally, validate briefly on EKS, MSK, and RDS, then destroy the environment. |
+## Run only what you need
 
-The owner selected M3 followed by M4 on 2026-09-01. M4 stays blocked until
-M3's [whole-application local proof](https://github.com/lilabrooks/my-local-platform/issues/90)
-closes. The [relay roadmap](docs/roadmap-relay.md) records the sequence and its
-cost boundary. See the
-[open issues](https://github.com/lilabrooks/my-local-platform/issues) for the
-work queue and
-[#84](https://github.com/lilabrooks/my-local-platform/issues/84) for the backlog
-authority record.
+Compose profiles keep smaller experiments light.
 
-## What is here
+| Command | Starts |
+|---|---|
+| `make up-core` | floci and Postgres |
+| `make up-messaging` | Kafka and RabbitMQ |
+| `make up-tools` | Kafka UI plus the messaging profile |
+| `make up-obs` | OpenTelemetry Collector, Prometheus, Tempo, and Grafana |
+| `make up-apps` | relay and its test sink, plus core and messaging |
+| `make up` | every profile |
 
-```text
-local/          docker-compose stack, split into profiles
-  bootstrap/    idempotent seed scripts for AWS resources and Kafka topics
-  config/       OTel Collector, Prometheus, Tempo, Grafana provisioning
-services/
-  smoke/        Go service that writes to and reads back from every component
-  echo/         small HTTP service, the workload ArgoCD deploys
-  relay/        webhook delivery service: ingest to Kafka, deliver with retries
-  sink/         subscriber relay delivers to, deliberately slow or failing
-k8s/
-  argocd/       ArgoCD install, scoped AppProjects, root Application
-  apps/         one Application per workload (app-of-apps)
-  manifests/    what those Applications point at
-infra/terraform/
-  bootstrap/    remote state backend, run once
-  envs/dev/     the AWS environment, split cheap vs expensive
-docs/adr/       why each choice was made, and what was verified
+## Build another application
+
+The repository is meant to hold more than one cloud application. `relay` shows
+the current application seam:
+
+1. Put application code in `services/<name>/`.
+2. Add its local runtime and dependencies to `local/docker-compose.yml`.
+3. Add repeatable resource setup under `local/bootstrap/`.
+4. Put Kubernetes resources in `k8s/manifests/<name>/` and register an ArgoCD
+   `Application` in `k8s/apps/`.
+5. Add a smoke check that writes data, reads it back, and asserts the result.
+6. Add Terraform only for the cloud behavior that needs a live AWS check.
+
+This split keeps application work cheap and repeatable. The live AWS step has a
+narrow purpose and an explicit teardown path.
+
+## The first application: relay
+
+`relay` accepts tenant events, stores their history in Postgres, writes them to
+Kafka, and delivers signed webhooks through a consumer group. It has
+idempotent ingest, ordered delivery per tenant, retries, dead-letter handling,
+replay, and Prometheus metrics. KEDA scales the delivery workers from broker
+lag.
+
+```bash
+make up-apps
+make seed
+make smoke
 ```
 
-## The stack
+The [relay goal](docs/goal-relay.md) defines its behavior and limitations. The
+[relay roadmap](docs/roadmap-relay.md) records the milestone sequence and the
+evidence behind it.
 
-| Component | Local | Real AWS counterpart |
-|---|---|---|
-| Object storage | floci S3 | S3 |
-| Container-backed AWS | floci RDS/EKS (opt-in socket) | the real services |
-| Pub/sub + queues | floci SNS/SQS | SNS + SQS with a DLQ |
-| Email | floci SES | SES |
-| Event streaming | Apache Kafka (KRaft) | MSK or self-managed |
-| Message broker | RabbitMQ | Amazon MQ |
-| Relational | Postgres 18 | RDS (`enable_rds`) |
-| Kubernetes | minikube (`mlp` profile) | EKS (`enable_eks`) |
-| Deployment | ArgoCD, app-of-apps | same manifests, ECR images |
-| Telemetry | OTel → Prometheus + Tempo + Grafana | OTel → Datadog |
+Current state:
 
-The Terraform currently implements S3, SNS/SQS, ECR, and optional SES, RDS,
-and EKS. MSK is proposed for M4; Amazon MQ is a service counterpart, not a
-resource this repository provisions.
+- M0 through M2 are complete, including the measured KEDA lag-scaling demo.
+- M3 is active and closes with a whole-application local proof in
+  [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90).
+- M4 follows that proof with a rehearsed, short-lived AWS run on EKS, MSK, and
+  RDS.
+- The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
+  RDS, and MSK validation remains future work.
 
-`relay` and its sink are scraped by Prometheus directly and come with a
-provisioned Grafana dashboard at
-**<http://localhost:3000/d/relay-delivery>** — consumer lag against consumer
-count, delivery latency, and the outcomes behind both. Details in the
-[local runbook](docs/runbook-local.md#metrics-and-the-relay-dashboard).
-
-## Design decisions
-
-Nine choices shape this repository, each recorded with the evidence behind it:
-
-- **[Local-first, ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)** —
-  an always-on version of this stack runs ~$150-250/month on a personal
-  account. Expensive resources are opt-in and tagged so they can be found.
-- **[floci over LocalStack](docs/adr/0002-floci-over-localstack.md)** —
-  LocalStack retired its free Community Edition in 2026 and now requires an auth
-  token. A public repository should clone and run.
-- **[OpenTelemetry-first](docs/adr/0003-otel-first-observability.md)** —
-  Datadog is one exporter behind a collector, not a dependency. Application
-  code names no vendor.
-- **[Real Kafka, not emulated MSK](docs/adr/0004-real-kafka-not-emulated.md)** —
-  the goal is learning Kafka, not learning MSK's control plane.
-- **[ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)** — pull-based
-  deployment onto a dedicated minikube profile, so an existing cluster on the
-  machine is left alone.
-- **[Kafka over SNS to SQS for delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)** —
-  webhook delivery needs replay, and a queue deletes on acknowledgement. Cost is
-  what argues the other way, and an ephemeral stack never pays it.
-- **[KEDA on lag, not an HPA on CPU](docs/adr/0007-keda-lag-autoscaling.md)** —
-  measured: a consumer's CPU is *lower* with a 595-event backlog than with none,
-  so an HPA would scale down exactly when consumers are needed.
-- **[In-cluster Prometheus and Grafana](docs/adr/0008-in-cluster-observability-for-the-demo.md)** —
-  the autoscaling demo's argument is a picture, so the thing that draws it has
-  to live where the pods do. Amends ADR 0005, which had kept telemetry out of
-  the cluster on purpose.
-- **[Separate ArgoCD control and workload projects](docs/adr/0009-separate-argocd-control-and-workload-projects.md)**:
-  the root may create child Applications, workloads stay inside `mlp`, and the
-  built-in `default` project has no permissions.
-
-The Kafka one covers `relay`, the first application — see
-**[its goal](docs/goal-relay.md)** and **[roadmap](docs/roadmap-relay.md)**.
-M0 through M2 are built, and M3 local-readiness work is active. `make up-apps`
-starts it, `make smoke` exercises the whole pipeline end to end, and
-`make relay-demo` runs the autoscaling demo against the cluster.
-
-## The smoke service
-
-`services/smoke` is the load-bearing piece of this repository. Every check
-**writes something and reads it back**, then asserts the payload matches — a
-check that merely opens a connection proves a port is listening, which is not
-the same as the component working. It exits non-zero on failure, so it doubles
-as a CI gate.
-
-It is also the reference for how to talk to each component: the AWS SDK against
-a custom endpoint, a Kafka produce-and-fetch at the returned partition and
-offset, an AMQP round trip, `pgx`, and OTLP tracing that wraps every check in a
-span.
+Run `make relay-demo` after completing the cluster setup in the
+[Kubernetes runbook](docs/runbook-k8s.md). The measured results and the choice
+to scale on lag are recorded in
+[ADR 0007](docs/adr/0007-keda-lag-autoscaling.md).
 
 ## Kubernetes and GitOps
 
+The local cluster uses a dedicated minikube profile named `mlp`. It does not
+reuse another Kubernetes context on the machine.
+
 ```bash
-make k8s-up          # dedicated 'mlp' minikube profile
-make echo-image      # build and load the workload image
-make argocd-install  # ArgoCD + app-of-apps
-make argocd-ui       # https://localhost:8081
+make k8s-up
+make echo-image
+make argocd-install
+make k8s-status
 ```
 
-ArgoCD pulls from a git URL. A private remote needs a read-only deploy key;
-`make argocd-repo-creds` generates one, registers it, and repoints the live
-Applications at the SSH URL. A public remote can use HTTPS without credentials.
-Keep the tracked Application URLs and `REPO_URL` consistent with that choice.
-`make k8s-apply-local` applies the same manifests directly, without git.
-**[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the details.
+ArgoCD watches `k8s/apps/` and deploys each workload from git. The root
+Application can create child Applications in `argocd`; workload Applications
+can deploy only into the `mlp` namespace. The built-in `default` project has no
+deployment permissions.
 
-The root Application uses `mlp-root`, which can create only Application objects
-inside `argocd`. Child Applications use `mlp`, which is confined to namespace
-`mlp`. ArgoCD's built-in `default` project is disabled.
+A fork must point the root and child Applications at the fork's git URL. The
+[Kubernetes runbook](docs/runbook-k8s.md) covers public and private remotes,
+image loading, KEDA, the in-cluster Grafana stack, and the relay demo.
 
-## Real AWS
+## Brief AWS validation
 
-Requires an SSO session and the one-time remote-state bootstrap described in
-[the cost guide](docs/costs.md#remote-state-comes-first):
+Real AWS requires Terraform 1.10 or newer, AWS CLI v2, and an AWS SSO session.
+Read the [cost guide](docs/costs.md) before running any apply.
 
 ```bash
-make aws-login      # aws sso login
+make aws-login
 make aws-whoami
-make aws-bootstrap  # once for a new account: versioned S3 state backend
-make aws-init       # bind this checkout to the account-scoped backend
-make aws-plan       # read-only; also runs aws-init as a prerequisite
-make aws-up         # prompts before creating anything billable
-make aws-cost       # month-to-date spend
-make aws-down       # destroy through the already initialized backend
+make aws-bootstrap  # once per account
+make aws-init
+make aws-plan
 ```
 
-If the account already has the state bucket, skip `make aws-bootstrap`.
-Override the defaults with Make variables, for example
-`make aws-plan AWS_PROFILE_NAME=my-sso-profile AWS_REAL_REGION=us-west-2`.
+The default plan creates the low-cost tier: S3, SNS, SQS, and ECR, with SES
+enabled only when a sender address is supplied. `enable_rds` and `enable_eks`
+both default to `false` because they create hourly charges.
 
-The default environment is ten serverless resources that cost approximately
-nothing idle. EKS and RDS are behind `enable_eks` and `enable_rds`, both
-`false` by default. **[docs/costs.md](docs/costs.md)** has the arithmetic.
-
-## Linting
+After reviewing the plan and deciding to create the resources:
 
 ```bash
-make lint
+make aws-up
 ```
 
-Ten checks: Go, YAML, shell, Markdown, GitHub Actions workflows, every service
-Dockerfile, Terraform formatting and lint rules, infrastructure security, and a
-secret scan across git history.
-
-Every linter is pinned, and a locally installed binary is used **only when it
-reports the pinned version** — otherwise a pinned container runs instead, so
-Docker alone is enough. Preferring whatever was on `PATH` is how `make lint` and
-CI came to run different shellchecks and disagree on the same commit.
-
-CI runs this script rather than its own copy of the ten checks, for the same
-reason. A linter that can run neither way reports `SKIP` locally; under
-`LINT_STRICT`, which CI sets, a skip is a failure — there, a gate that did not
-run must not read as one that passed.
-
-| Check | Tool | Catches |
-|---|---|---|
-| YAML | yamllint | syntax errors, indentation |
-| Shell | shellcheck | quoting bugs, unsafe `cd`, bad assignments |
-| Markdown | markdownlint | broken structure, unlabelled code fences |
-| Actions | actionlint | workflow errors that otherwise appear only on push |
-| Docker | hadolint | Dockerfile antipatterns |
-| Go | golangci-lint | unchecked errors, dead code, staticcheck |
-| Terraform | fmt + tflint | formatting, deprecated syntax, invalid values |
-| Infra security | trivy | encryption, CVEs, misconfiguration |
-| Secrets | gitleaks | credentials committed to history |
-
-## Agent tooling
-
-The repository declares its own MCP servers in `.mcp.json`, so a fresh clone
-gets the same code-intelligence tooling rather than depending on whatever each
-machine happens to have configured:
-
-| Server | Transport | Use |
-|---|---|---|
-| `codegraph` | stdio | symbol source, call paths, blast radius (`.codegraph/` is indexed) |
-| `semble` | stdio | semantic search when the symbol name is unknown |
-| `token-savior` | stdio | change impact, affected tests, routes, env usage |
-| `parallel-search` | http | web search and page fetch |
-
-`.claude/launch.json` adds attach-only browser targets for the stack's web UIs,
-so an agent can open Grafana or the ArgoCD UI against a running stack.
-
-**[AGENTS.md](AGENTS.md)** carries the working rules — cost guardrails, which
-lookup tool to reach for, how to verify a change, and the traps that have
-already caught someone. `CLAUDE.md` points at it so there is one source of
-truth rather than per-agent copies.
-
-## Requirements
-
-Docker, Go 1.27+, Terraform 1.10+, the AWS CLI v2, minikube, kubectl and Helm.
-
-Helm is needed only by `make monitoring-install`, which renders
-`kube-prometheus-stack` into the cluster so the relay demo has a panel to point
-at — see [ADR 0008](docs/adr/0008-in-cluster-observability-for-the-demo.md).
-Everything else in the cluster is plain manifests applied by kubectl or synced
-by ArgoCD, and no CI job touches a cluster, so nothing else needs it.
-
-Tested with **Helm v4.2.4**. 3.x is untested rather than known-broken — the
-chart declares `apiVersion: v2`, which both majors read.
-
-The linters need only Docker, and fall back to pinned containers for anything
-not installed. Two are worth having natively because they run on every change:
+Finish the session by destroying the dev stack and checking the account's
+month-to-date spend:
 
 ```bash
-brew install trivy golangci-lint
+make aws-down
+make aws-cost
 ```
 
-`make help` lists every target. **[docs/runbook-local.md](docs/runbook-local.md)**
-covers ports, credentials and troubleshooting;
-**[docs/runbook-k8s.md](docs/runbook-k8s.md)** covers the cluster.
+The versioned S3 state bucket is a separate bootstrap resource and survives a
+dev-stack destroy. The cost guide explains the current estimates, state
+recovery, tags, and resources that AWS may leave behind.
 
-## Status
+## Repository layout
 
-The local stack and the smoke checks are verified working end to end. ArgoCD is
-installed and its sync engine verified against a public repo; the `echo`
-manifests apply cleanly and serve traffic.
+```text
+local/                 Docker Compose stack, profiles, and seed scripts
+services/
+  smoke/               end-to-end round-trip checks
+  echo/                small HTTP workload used by the GitOps path
+  relay/               webhook ingest and delivery service
+  sink/                controllable relay subscriber for tests and demos
+k8s/
+  argocd/              ArgoCD install, projects, and root Application
+  apps/                one ArgoCD Application per workload
+  manifests/           Kubernetes workload resources
+infra/terraform/
+  bootstrap/           account-scoped remote state bucket
+  envs/dev/            low-cost resources and opt-in RDS/EKS
+docs/adr/               decisions with commands and measured evidence
+```
 
-The GitOps loop is verified end to end: a commit pushed to GitHub changed the
-running replica count ~12 seconds later, with no `kubectl`. The last main run
-that received GitHub-hosted runners passed all thirteen jobs.
+## Design and evidence
 
-**`relay` has completed M0 through M2; M3 is active.** `make relay-demo` drives
-six steps in 190 seconds against minikube: an event delivered, the subscriber
-slowed, KEDA scaling the consumer group from one pod to twelve on lag, the backlog
-drained, a failing subscriber dead-lettered while a healthy one is unaffected,
-and the whole window replayed from the log. The measurements behind that are in
-[ADR 0007](docs/adr/0007-keda-lag-autoscaling.md), including why an HPA on CPU
-cannot work here.
+The architecture decisions explain why the repository uses this shape:
 
-The AWS gap remains: **the expensive Terraform tier has never been applied.**
-The cheap tier has — applied to a real account, verified with the
-smoke checks against live S3 and SNS/SQS, then destroyed. EKS and RDS are
-plan-only, so nothing is proven against a live cluster or database.
+- [Local-first with ephemeral AWS](docs/adr/0001-local-first-with-ephemeral-aws.md)
+- [floci over LocalStack](docs/adr/0002-floci-over-localstack.md)
+- [OpenTelemetry-first observability](docs/adr/0003-otel-first-observability.md)
+- [Real Kafka for local development](docs/adr/0004-real-kafka-not-emulated.md)
+- [ArgoCD for GitOps](docs/adr/0005-argocd-gitops.md)
+- [Kafka for relay delivery](docs/adr/0006-kafka-over-sqs-for-delivery.md)
+- [KEDA scaling from consumer lag](docs/adr/0007-keda-lag-autoscaling.md)
+- [In-cluster observability for the demo](docs/adr/0008-in-cluster-observability-for-the-demo.md)
+- [Separate ArgoCD control and workload permissions](docs/adr/0009-separate-argocd-control-and-workload-projects.md)
+
+GitHub Issues and milestones hold the active backlog. Start with the
+[open issues](https://github.com/lilabrooks/my-local-platform/issues) for the
+current work and [AGENTS.md](AGENTS.md) for repository rules and cost
+guardrails.
+
+## Verification
+
+Run the checks that cover your change:
+
+```bash
+make test          # Go tests across all modules
+make k8s-validate  # manifest and GitOps invariants
+make lint          # Go, YAML, shell, Markdown, Actions, Docker, Terraform, security, secrets
+```
+
+`make smoke` is the local end-to-end gate and needs the Compose stack running.
+CI runs the same tests, linters, image builds, Terraform validation, and smoke
+path on every pull request.
 
 ## License
 
