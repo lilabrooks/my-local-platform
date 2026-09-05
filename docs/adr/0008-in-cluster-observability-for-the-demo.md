@@ -287,9 +287,12 @@ That property is load-bearing and was nearly lost. An earlier draft said "ingest
 is single-replica" -- it is not, the Deployment runs two -- and the panels
 summed across them, doubling lag. See the correction under Consequences.
 
-**The lag poll itself failing.** `relay_lag_refreshed_timestamp_seconds` goes
-stale and the dashboard's freshness panel passes its threshold. This already
-works and is what distinguishes a drained topic from a lag nobody could measure.
+**The broker poll itself failing.** `relay_lag_refreshed_timestamp_seconds` goes
+stale and the dashboard's freshness panel passes its threshold. The query uses
+the oldest timestamp from the scraped ingest instances, so one failed poller
+cannot borrow the other's fresh timestamp. It covers lag and group assignments
+together. A rebalance also holds the last stable assignment and lets this age
+until the broker reports a complete generation again.
 
 **Replay interrupted in cluster mode.** This failure has no compose equivalent.
 If the script dies between pausing the ScaledObject and unpausing it, the
@@ -411,6 +414,48 @@ description of the lag panel produced
 `make monitoring-dashboard` regenerated it and the test passed. An invariant
 that has only ever been tested by breaking it on purpose is a weaker claim than
 one that has stopped a change nobody intended to make.
+
+**M3 added broker-side group assignment evidence on 2026-09-05.** The check was
+run on the existing 1-node, 6g `mlp` profile with Kafka and Postgres in compose
+and relay, sink, Prometheus, Grafana, and KEDA in minikube:
+
+```bash
+make test
+make lint
+make k8s-validate
+make up-apps
+make seed
+make smoke
+make relay-image
+make k8s-apply-local
+kubectl -n mlp rollout restart deployment/relay-ingest deployment/relay-deliver
+make monitoring-ready
+make relay-demo
+```
+
+The compose check returned `/readyz` as ready after the consumer joined and
+published `relay_group_members=1`, `relay_group_unassigned_members=0`, and
+`relay_topic_partitions_unassigned=0`. The zeroes were present time series with
+a current `relay_lag_refreshed_timestamp_seconds`. In minikube,
+`make monitoring-ready` found every assignment series and a measurement under
+30 seconds old. The one demo run produced 600 events, reached a measured lag of
+593, scaled from 1 consumer to 12, drained lag to 0, and returned to 1 consumer
+before the failing-subscriber and replay steps passed.
+
+A second review found that Kafka's assignment bytes can describe an older
+generation while a classic group is rebalancing. The same command sequence was
+run again after relay began withholding those transitional snapshots and the
+freshness query began selecting the oldest scraped ingest timestamp. Both ingest
+replicas logged a withheld `PreparingRebalance` poll during the demo. After the
+replay, Prometheus reported their measurement ages as 16.982 and 13.982 seconds;
+the assignment gauges reported 0 idle members and 0 partitions without an owner.
+A 5-second range query showed 12 unowned partitions only during the initial
+no-consumer interval, then 0 from 19:36:35 UTC through the later scale changes;
+idle members stayed at 0. The second 600-event run reached lag 575, scaled from
+1 consumer to 12, drained at 110 seconds, returned to 1 at 140 seconds, and
+completed the failing-subscriber and replay steps. These are two local runs.
+They establish the checked path and do not claim a rate or reliability
+distribution.
 
 Nothing in this section is still outstanding.
 

@@ -29,8 +29,11 @@ import (
 type Reader interface {
 	FetchMessage(ctx context.Context) (kafka.Message, error)
 	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+	Stats() kafka.ReaderStats
 	Close() error
 }
+
+const groupJoinPollInterval = 50 * time.Millisecond
 
 // Producer writes dead-letter records.
 type Producer interface {
@@ -67,7 +70,10 @@ type Consumer struct {
 	recordTimeout time.Duration
 	log           *slog.Logger
 
+	readinessMu  sync.Mutex
+	stopping     bool
 	ready        atomic.Bool
+	fetchStarted atomic.Bool
 	handled      atomic.Int64
 	delivered    atomic.Int64
 	deadLettered atomic.Int64
@@ -93,8 +99,16 @@ func NewConsumer(
 	}
 }
 
-// MarkReady flips readiness.
-func (c *Consumer) MarkReady(ready bool) { c.ready.Store(ready) }
+// MarkReady flips readiness unless shutdown has already begun. The guard keeps
+// a late group-join observation from racing the cancellation path back to ready.
+func (c *Consumer) MarkReady(ready bool) {
+	c.readinessMu.Lock()
+	defer c.readinessMu.Unlock()
+	if ready && c.stopping {
+		return
+	}
+	c.ready.Store(ready)
+}
 
 // Ready reports readiness.
 func (c *Consumer) Ready() bool { return c.ready.Load() }
@@ -108,20 +122,32 @@ func (c *Consumer) Stats() map[string]int64 {
 	}
 }
 
-// Run consumes until the context is cancelled.
+// Run consumes until the context is cancelled. A Consumer and its Reader are
+// single-use; call Run once.
 func (c *Consumer) Run(ctx context.Context) error {
 	if c.recordTimeout <= 0 {
 		return fmt.Errorf("record timeout %s must be positive", c.recordTimeout)
 	}
 
-	c.MarkReady(true)
-	defer c.MarkReady(false)
+	c.startReadiness()
+	joinCtx, cancelJoinWatch := context.WithCancel(ctx)
+	joinWatchDone := make(chan struct{})
+	go func() {
+		defer close(joinWatchDone)
+		c.markReadyAfterGroupJoin(joinCtx)
+	}()
+	defer func() {
+		cancelJoinWatch()
+		<-joinWatchDone
+		c.stopReadiness()
+	}()
 	// Stop advertising readiness as soon as shutdown begins. A record already in
 	// hand still drains below; new work should go to members that are staying.
-	stopReadiness := context.AfterFunc(ctx, func() { c.MarkReady(false) })
+	stopReadiness := context.AfterFunc(ctx, c.stopReadiness)
 	defer stopReadiness()
 
 	for {
+		c.fetchStarted.Store(true)
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -130,6 +156,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("fetch: %w", err)
 		}
+		// A returned message is independent proof that this reader joined the
+		// group and fetched successfully. The stats watcher covers the equally
+		// healthy case where the member owns zero partitions and FetchMessage
+		// remains blocked.
+		c.MarkReady(true)
 
 		if err := c.processRecord(ctx, msg); err != nil {
 			if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
@@ -149,6 +180,44 @@ func (c *Consumer) Run(ctx context.Context) error {
 			c.log.Info("consumer drained current record and is stopping",
 				"partition", msg.Partition, "offset", msg.Offset)
 			return nil
+		}
+	}
+}
+
+func (c *Consumer) startReadiness() {
+	c.readinessMu.Lock()
+	defer c.readinessMu.Unlock()
+	c.stopping = false
+	c.ready.Store(false)
+	c.fetchStarted.Store(false)
+}
+
+func (c *Consumer) stopReadiness() {
+	c.readinessMu.Lock()
+	defer c.readinessMu.Unlock()
+	c.stopping = true
+	c.ready.Store(false)
+}
+
+// kafka.NewReader starts the consumer-group goroutine, and kafka.Reader records
+// a rebalance only after ConsumerGroup.Next has returned a joined generation,
+// including one that assigns this member no partitions. Stats clears the
+// counters it returns, so fetchStarted must stay first in the short-circuit and
+// this must remain the only Stats caller. Together they prove that Run entered
+// its fetch loop and the reader joined a generation.
+func (c *Consumer) markReadyAfterGroupJoin(ctx context.Context) {
+	ticker := time.NewTicker(groupJoinPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if c.fetchStarted.Load() && c.reader.Stats().Rebalances > 0 {
+			c.MarkReady(true)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

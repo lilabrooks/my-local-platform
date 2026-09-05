@@ -196,10 +196,20 @@ would read as lost deliveries.
 without it the whole buffer is serialised on every call.
 
 `relay_lag_refreshed_timestamp_seconds` is how you tell a drained topic from a
-lag nobody could measure. The gauges hold their last value when a poll fails,
-so the dashboard carries an **Age of the lag measurement** panel; anything past
-about 20s means the lag panels are stale rather than calm. The 20s is a 5s poll
-interval (`RELAY_LAG_INTERVAL`) plus up to a 15s Prometheus scrape interval.
+lag nobody could measure. The same complete poll reads group membership and
+partition assignment, so its timestamp covers `relay_group_members`,
+`relay_group_unassigned_members`, and `relay_topic_partitions_unassigned` too.
+The gauges hold their last value when a poll fails or the group is rebalancing,
+so transitional assignments never appear as current evidence. The dashboard's
+**Age of the broker measurement** uses the oldest timestamp across scraped
+ingest instances; anything past about 20s means those panels are stale. The 20s
+is a 5s poll interval (`RELAY_LAG_INTERVAL`) plus up to a 15s Prometheus scrape
+interval.
+
+`relay-deliver` keeps `/readyz` at `503` until kafka-go reports that its first
+consumer-group generation was joined. A member assigned 0 partitions is still
+ready. The broker-wide gauges above show that idle assignment without making a
+rolling update wait for every member to own work.
 
 Prometheus finds relay through DNS service discovery rather than a static
 target, so `docker compose --profile apps up -d --scale relay-deliver=3` is

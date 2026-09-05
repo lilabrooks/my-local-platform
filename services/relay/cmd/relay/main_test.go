@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lilabrooks/my-local-platform/relay/config"
+	"github.com/lilabrooks/my-local-platform/relay/internal/delivery"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
@@ -28,6 +30,33 @@ func listenLocal(t *testing.T, handler http.Handler) (*http.Server, string) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv, "http://" + ln.Addr().String()
+}
+
+func TestDeliverHealthStaysIndependentFromReadiness(t *testing.T) {
+	consumer := &delivery.Consumer{}
+	handler := healthServer(":0", consumer).Handler
+
+	request := func(path string) int {
+		t.Helper()
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, path, nil))
+		return res.Code
+	}
+
+	if got := request("/healthz"); got != http.StatusOK {
+		t.Errorf("GET /healthz before readiness = %d, want 200", got)
+	}
+	if got := request("/readyz"); got != http.StatusServiceUnavailable {
+		t.Errorf("GET /readyz before group join = %d, want 503", got)
+	}
+
+	consumer.MarkReady(true)
+	if got := request("/healthz"); got != http.StatusOK {
+		t.Errorf("GET /healthz after readiness = %d, want 200", got)
+	}
+	if got := request("/readyz"); got != http.StatusOK {
+		t.Errorf("GET /readyz after group join = %d, want 200", got)
+	}
 }
 
 // A handler still running when the process decides to shut down must finish

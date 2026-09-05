@@ -53,15 +53,20 @@ func TestLagFor(t *testing.T) {
 	}
 }
 
-// fakeBroker answers the three requests the poller makes.
+// fakeBroker answers the four requests the poller makes.
 type fakeBroker struct {
 	partitions []int
 	committed  map[int]int64
 	bounds     map[int]offsetBounds
+	members    []kafka.DescribeGroupsResponseMember
+	groupState string
 
 	metadataErr error
 	fetchErr    error
 	listErr     error
+	describeErr error
+	groupErr    error
+	omitGroup   bool
 
 	// partitionErr marks one partition as failing in both offset responses,
 	// which is how a broker reports a partition without a leader.
@@ -108,6 +113,25 @@ func (f *fakeBroker) ListOffsets(_ context.Context, _ *kafka.ListOffsetsRequest)
 	return &kafka.ListOffsetsResponse{Topics: map[string][]kafka.PartitionOffsets{testTopic: out}}, nil
 }
 
+func (f *fakeBroker) DescribeGroups(_ context.Context, _ *kafka.DescribeGroupsRequest) (*kafka.DescribeGroupsResponse, error) {
+	if f.describeErr != nil {
+		return nil, f.describeErr
+	}
+	if f.omitGroup {
+		return &kafka.DescribeGroupsResponse{}, nil
+	}
+	state := f.groupState
+	if state == "" {
+		state = "Stable"
+	}
+	return &kafka.DescribeGroupsResponse{Groups: []kafka.DescribeGroupsResponseGroup{{
+		GroupID:    testGroup,
+		GroupState: state,
+		Error:      f.groupErr,
+		Members:    f.members,
+	}}}, nil
+}
+
 const (
 	testTopic = "mlp.relay.deliveries"
 	testGroup = "relay-deliver"
@@ -124,6 +148,161 @@ func resetLagGauges() {
 	CommittedOffset.Reset()
 	HighWatermark.Reset()
 	LagPartitionsMissing.Reset()
+	GroupMembers.Reset()
+	GroupUnassignedMembers.Reset()
+	TopicPartitionsUnassigned.Reset()
+	LagRefreshedAt.Set(0)
+}
+
+func TestRefreshPublishesGroupAssignmentCoverage(t *testing.T) {
+	resetLagGauges()
+
+	broker := &fakeBroker{
+		partitions: []int{0, 1, 2, 3},
+		committed:  map[int]int64{0: 0, 1: 0, 2: 0, 3: 0},
+		bounds: map[int]offsetBounds{
+			0: {}, 1: {}, 2: {}, 3: {},
+		},
+		members: []kafka.DescribeGroupsResponseMember{
+			{
+				MemberID: "member-a",
+				MemberAssignments: kafka.DescribeGroupsResponseAssignments{Topics: []kafka.GroupMemberTopic{{
+					Topic: testTopic, Partitions: []int{0, 1},
+				}}},
+			},
+			{
+				MemberID: "member-b",
+				MemberAssignments: kafka.DescribeGroupsResponseAssignments{Topics: []kafka.GroupMemberTopic{{
+					Topic: testTopic, Partitions: []int{2},
+				}}},
+			},
+			{MemberID: "member-c"},
+		},
+	}
+
+	if err := quietPoller(broker).Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  float64
+		want float64
+	}{
+		{"group members", testutil.ToFloat64(GroupMembers.WithLabelValues(testGroup)), 3},
+		{"members with zero partitions", testutil.ToFloat64(GroupUnassignedMembers.WithLabelValues(testGroup)), 1},
+		{"topic partitions without an owner", testutil.ToFloat64(TopicPartitionsUnassigned.WithLabelValues(testGroup, testTopic)), 1},
+	}
+	for _, check := range checks {
+		if check.got != check.want {
+			t.Errorf("%s = %v, want %v", check.name, check.got, check.want)
+		}
+	}
+}
+
+func TestRefreshPublishesAnEmptyGroupAsMeasuredZero(t *testing.T) {
+	for _, state := range []string{"Empty", "Dead"} {
+		t.Run(state, func(t *testing.T) {
+			resetLagGauges()
+
+			broker := &fakeBroker{
+				partitions: []int{0, 1},
+				committed:  map[int]int64{0: 0, 1: 0},
+				bounds:     map[int]offsetBounds{0: {}, 1: {}},
+				groupState: state,
+			}
+			if err := quietPoller(broker).Refresh(context.Background()); err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+
+			if got := testutil.ToFloat64(GroupMembers.WithLabelValues(testGroup)); got != 0 {
+				t.Errorf("group members = %v, want measured zero", got)
+			}
+			if got := testutil.ToFloat64(GroupUnassignedMembers.WithLabelValues(testGroup)); got != 0 {
+				t.Errorf("unassigned members = %v, want measured zero", got)
+			}
+			if got := testutil.ToFloat64(TopicPartitionsUnassigned.WithLabelValues(testGroup, testTopic)); got != 2 {
+				t.Errorf("unassigned partitions = %v, want 2", got)
+			}
+			if got := testutil.ToFloat64(LagRefreshedAt); got == 0 {
+				t.Error("measured zero group evidence did not receive a freshness timestamp")
+			}
+		})
+	}
+}
+
+func TestGroupCoverageFailureKeepsTheLastCompleteMeasurement(t *testing.T) {
+	tests := map[string]func(*fakeBroker){
+		"request error": func(f *fakeBroker) {
+			f.describeErr = errors.New("coordinator unavailable")
+		},
+		"group error": func(f *fakeBroker) {
+			f.groupErr = errors.New("group authorization failed")
+		},
+		"group missing from response": func(f *fakeBroker) {
+			f.omitGroup = true
+		},
+		"preparing rebalance": func(f *fakeBroker) {
+			f.groupState = "PreparingRebalance"
+		},
+		"completing rebalance": func(f *fakeBroker) {
+			f.groupState = "CompletingRebalance"
+		},
+		"duplicate owner": func(f *fakeBroker) {
+			f.members = append(f.members, kafka.DescribeGroupsResponseMember{
+				MemberID: "member-b",
+				MemberAssignments: kafka.DescribeGroupsResponseAssignments{Topics: []kafka.GroupMemberTopic{{
+					Topic: testTopic, Partitions: []int{0},
+				}}},
+			})
+		},
+		"unknown partition": func(f *fakeBroker) {
+			f.members[0].MemberAssignments.Topics[0].Partitions = []int{0, 9}
+		},
+	}
+
+	for name, breakPoll := range tests {
+		t.Run(name, func(t *testing.T) {
+			resetLagGauges()
+			healthy := &fakeBroker{
+				partitions: []int{0},
+				committed:  map[int]int64{0: 0},
+				bounds:     map[int]offsetBounds{0: {}},
+				members: []kafka.DescribeGroupsResponseMember{{
+					MemberID: "member-a",
+					MemberAssignments: kafka.DescribeGroupsResponseAssignments{Topics: []kafka.GroupMemberTopic{{
+						Topic: testTopic, Partitions: []int{0},
+					}}},
+				}},
+			}
+			if err := quietPoller(healthy).Refresh(context.Background()); err != nil {
+				t.Fatalf("healthy Refresh: %v", err)
+			}
+			LagRefreshedAt.Set(123)
+
+			failed := *healthy
+			failed.members = append([]kafka.DescribeGroupsResponseMember(nil), healthy.members...)
+			failed.members[0].MemberAssignments.Topics = append(
+				[]kafka.GroupMemberTopic(nil), healthy.members[0].MemberAssignments.Topics...)
+			breakPoll(&failed)
+
+			if err := quietPoller(&failed).Refresh(context.Background()); err == nil {
+				t.Fatal("Refresh returned nil after incomplete group evidence")
+			}
+			if got := testutil.ToFloat64(GroupMembers.WithLabelValues(testGroup)); got != 1 {
+				t.Errorf("group members after failed refresh = %v, want last complete value 1", got)
+			}
+			if got := testutil.ToFloat64(GroupUnassignedMembers.WithLabelValues(testGroup)); got != 0 {
+				t.Errorf("unassigned members after failed refresh = %v, want last complete value 0", got)
+			}
+			if got := testutil.ToFloat64(TopicPartitionsUnassigned.WithLabelValues(testGroup, testTopic)); got != 0 {
+				t.Errorf("unassigned partitions after failed refresh = %v, want last complete value 0", got)
+			}
+			if got := testutil.ToFloat64(LagRefreshedAt); got != 123 {
+				t.Errorf("refresh timestamp after incomplete group evidence = %v, want 123", got)
+			}
+		})
+	}
 }
 
 func TestRefreshPublishesPerPartitionAndTotalLag(t *testing.T) {

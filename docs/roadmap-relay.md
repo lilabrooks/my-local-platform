@@ -296,6 +296,15 @@ roadmap reconciliation
 and remaining pieces culminate in the whole-application local proof
 ([#90](https://github.com/lilabrooks/my-local-platform/issues/90)).
 
+- **Consumer readiness and assignment evidence, built 2026-09-05.**
+  `relay-deliver` stays unready until kafka-go reports its first joined group
+  generation; a joined member holding 0 partitions stays ready. `relay-ingest`
+  now reads group members and assignments from the broker beside lag. The
+  dashboard shows process count, group members, idle members, and partitions
+  without an owner. `make monitoring-ready` requires each broker series plus a
+  measurement no more than 30 seconds old on every scraped ingest instance.
+  Two `make relay-demo` runs produced 600 events each, raised lag to 593 and
+  575, scaled from 1 consumer to 12, drained lag to 0, and returned to 1.
 - **Delivery attempts persisted, built 2026-09-02.** The audit trail answers
   "did you deliver my webhook?" through `GET /v1/events/{id}/attempts`.
   `make smoke` posted one event to the real local Kafka broker, matched the

@@ -3,6 +3,7 @@ package validate
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -43,8 +44,8 @@ func TestDashboardConfigMapMatchesTheSourceFile(t *testing.T) {
 	}
 }
 
-// TestDashboardPayloadKeepsItsContractWithTheDemo checks the two things about
-// the dashboard that something OUTSIDE it depends on.
+// TestDashboardPayloadKeepsItsContractWithTheDemo checks the dashboard fields
+// and queries that something outside it depends on.
 //
 // An earlier version of this comment claimed to guard the generator's block
 // scalar indentation. That was wrong, and checking it rather than asserting it
@@ -57,7 +58,7 @@ func TestDashboardConfigMapMatchesTheSourceFile(t *testing.T) {
 // and has quietly broken its contract with everything that links to it:
 //
 //   - the uid, which `make relay-demo` and the runbook reach as /d/relay-delivery
-//   - having any panels at all
+//   - having panels that query the broker assignment metrics
 //
 // Change either in relay.json, regenerate honestly, and every other check here
 // passes: the ConfigMap matches its source, the YAML is well formed, the JSON
@@ -74,8 +75,43 @@ func TestDashboardPayloadKeepsItsContractWithTheDemo(t *testing.T) {
 		t.Errorf("dashboard uid = %v, want relay-delivery -- the demo links to /d/relay-delivery",
 			dashboard["uid"])
 	}
-	if len(dashboard["panels"].([]any)) == 0 {
+	panels, ok := dashboard["panels"].([]any)
+	if !ok || len(panels) == 0 {
 		t.Error("the dashboard has no panels")
+	}
+	var expressions []string
+	for _, rawPanel := range panels {
+		panel, ok := rawPanel.(map[string]any)
+		if !ok {
+			continue
+		}
+		targets, _ := panel["targets"].([]any)
+		for _, rawTarget := range targets {
+			target, ok := rawTarget.(map[string]any)
+			if !ok {
+				continue
+			}
+			if expr, ok := target["expr"].(string); ok {
+				expressions = append(expressions, expr)
+			}
+		}
+	}
+
+	for _, metric := range []string{
+		"relay_group_members",
+		"relay_group_unassigned_members",
+		"relay_topic_partitions_unassigned",
+	} {
+		found := false
+		for _, expr := range expressions {
+			if strings.Contains(expr, metric) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the dashboard does not query %s; group assignment would be invisible", metric)
+		}
 	}
 }
 
