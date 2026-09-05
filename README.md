@@ -3,8 +3,9 @@
 [![CI](https://github.com/lilabrooks/my-local-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/lilabrooks/my-local-platform/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-A local-first playground for building cloud applications, testing them on a
-laptop, and running short validation sessions on AWS.
+A local-first playground for building cloud applications. Build and test on a
+laptop, then validate briefly on real AWS through an explicit, short-lived
+Terraform workflow.
 
 The default workflow uses Docker Compose and minikube. It combines an
 AWS-compatible local API with Kafka, RabbitMQ, Postgres, GitOps, and a complete
