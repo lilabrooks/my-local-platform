@@ -3,7 +3,7 @@
 This repository checks source files, generated artifacts, infrastructure
 contracts, and running behavior. The checks fall into 4 groups:
 
-- `make lint` runs the 10 static linters.
+- `make lint` runs the static linters and repository-owned documentation check.
 - `make test` runs every Go test, including the Kubernetes manifest tests.
 - GitHub Actions adds Terraform validation, image builds, dependency review,
   module discovery, and end-to-end checks.
@@ -55,7 +55,7 @@ flowchart TD
     event --> smoke[Smoke: ordered runtime suite]
     event --> image[Images: 3-service matrix]
     event --> modules[Go-module coverage]
-    event --> lint[10-linter bundle]
+    event --> lint[Lint, ADR index, and security scans]
     event --> dependency[Dependency review: pull requests only]
 
     go --> required[Required checks aggregate]
@@ -84,7 +84,7 @@ same shape with dependency review skipped.
 | `smoke` | 1 | 30 minutes | Start the local platform and run smoke, trace, replay, ordering, drain, and crash checks. |
 | `image` | 3 services | 20 minutes | Pull each pinned build base with retries, then build the service image. |
 | `go-modules-covered` | 1 | 5 minutes | Compare discovered `go.mod` files with the Go matrix. |
-| `lint` | 1 | 20 minutes | Run the lint program in strict mode against a full-history checkout; the Go matrix supplies golangci-lint. |
+| `lint` | 1 | 20 minutes | Run format, documentation, infrastructure, and security checks in strict mode against a full-history checkout; the Go matrix supplies golangci-lint. |
 | `dependency-review` | 1 | 10 minutes | Inspect pull-request dependency changes; skip on manual dispatch. |
 | `required` | 1 | 5 minutes | Combine every prerequisite result into the protected-branch result. |
 
@@ -182,6 +182,12 @@ LINT_SKIP_OK=golangci-lint
 Strict mode fails an unavailable checker. The declared golangci-lint exception
 exists because every Go matrix job already runs the pinned linter action.
 
+The repository-owned ADR index runs inside this job after markdownlint. It
+discovers the ADR files and their `Status:` values, then compares them with the
+README table. The check has no missing-tool skip path. A missing, stale,
+duplicate, or wrong-status entry fails the `lint` job and therefore the
+aggregate result.
+
 Dependency review runs only for pull requests. It uses the pinned
 `actions/dependency-review-action` with its default configuration.
 
@@ -260,6 +266,34 @@ enables the default rule set with these exceptions:
 - `MD024`, duplicate headings, applies only among sibling headings.
 
 The repository currently has no Markdown link checker.
+
+### ADR index: repository-owned check
+
+[`scripts/check-adr-index.sh`](../scripts/check-adr-index.sh) discovers every
+numbered `docs/adr/*.md` file and every numbered ADR link in the README's
+“Design and evidence” section. It fails when:
+
+- an ADR file is missing from the README;
+- the README links to an ADR file that does not exist;
+- the README lists one ADR more than once;
+- an ADR has no `Status:` line, more than 1 status line, or an empty status;
+- the status displayed by the README differs from the ADR's declared status;
+- the README section or ADR directory is absent;
+- no numbered ADR files are discovered.
+
+The comparison uses the 2 discovered path sets. It stores no expected ADR
+count, filename list, or highest sequence number. A passing result prints the
+current discovered count and a summary of the declared statuses for visibility.
+
+Each ADR's `Status:` line is the source of truth. The README exposes the same
+value in its ADR table. The check derives the value from each record and does
+not carry an allowed-status list, so states can change without editing the
+checker.
+
+The check permits a README link to include a heading fragment and removes that
+fragment before comparing paths. It checks index membership, uniqueness, and
+status. It does not require consecutive ADR numbers or compare link text with
+ADR titles.
 
 ### GitHub Actions: actionlint 1.7.12
 
@@ -716,6 +750,8 @@ The following boundaries are deliberate descriptions of current behavior:
 - There is no repository-wide JSON syntax checker. The shipped Grafana
   dashboard has dedicated JSON checks.
 - There is no Markdown link checker.
+- The ADR index checks membership, uniqueness, and status. It does not enforce
+  consecutive numbering or require README link text to match an ADR title.
 - CI inspects ArgoCD configuration and scripts without installing ArgoCD.
 - CodeQL uses GitHub default setup, whose exact settings are outside tracked
   repository files.

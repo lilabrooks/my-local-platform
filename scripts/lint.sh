@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every linter in the repository.
+# Run the repository's linters and static checks.
 #
 # Each linter runs from a local binary when one is installed, and falls back to
 # a pinned container otherwise, so this works on a clean machine with only
@@ -140,6 +140,11 @@ elif has npx; then
 else
   skip "markdownlint" "needs docker, npx, or markdownlint-cli2 $MARKDOWNLINT_VERSION"
 fi
+
+# --- Documentation inventory -----------------------------------------------
+# README is the reader-facing ADR index. Discover both sides so a new ADR fails
+# until it is linked, without copying today's count into another file.
+out=$(./scripts/check-adr-index.sh 2>&1); report "ADR index" $? "$out"
 
 # --- GitHub Actions ---------------------------------------------------------
 if has actionlint && pinned "$ACTIONLINT_VERSION" "$(actionlint -version 2>&1)"; then

@@ -224,7 +224,7 @@ tidy: ## go mod tidy in every module
 	done
 
 .PHONY: lint
-lint: ## Run every linter (yaml, shell, markdown, actions, docker, terraform, secrets)
+lint: ## Run lint, documentation, infrastructure, security, and secret checks
 	./scripts/lint.sh
 
 .PHONY: fmt
