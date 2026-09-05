@@ -13,7 +13,7 @@ spec:
     # ArgoCD reads this file straight from git, where nothing substitutes
     # anything -- a placeholder here syncs literally and the app fails with
     # "application repo __REPO_URL__ is not permitted in project 'mlp'".
-    repoURL: git@github.com:lilabrooks/my-local-platform.git
+    repoURL: https://github.com/lilabrooks/my-local-platform.git
     targetRevision: main
     path: k8s/manifests/relay
 

@@ -8,7 +8,7 @@ set -euo pipefail
 # added in ArgoCD 3.3. Keep this fixed, rather than allowing an environment
 # override to install an older CRD that accepts the field but cannot enforce it.
 readonly ARGOCD_VERSION="v3.5.1"
-REPO_URL="${REPO_URL:-git@github.com:lilabrooks/my-local-platform.git}"
+REPO_URL="${REPO_URL:-https://github.com/lilabrooks/my-local-platform.git}"
 NAMESPACE=argocd
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
