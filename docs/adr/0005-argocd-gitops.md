@@ -93,10 +93,16 @@ Installed and checked on the `mlp` cluster (Kubernetes v1.35.1):
 - The `echo` manifests apply cleanly from scratch and both replicas serve
   traffic: `/`, `/healthz` and `/metrics` all respond over the ClusterIP
   Service.
-- **The GitOps loop is verified end to end.** The repository is now a private
-  GitHub remote with a read-only deploy key. Pushing a commit that changed
-  `replicas: 2` to `3` produced a third running pod ~12s later with no
-  `kubectl` involved; reverting the commit scaled it back down just as fast.
+- **The GitOps loop was verified end to end while the repository was private.**
+  It used a read-only deploy key. Pushing a commit that changed `replicas: 2`
+  to `3` produced a third running pod ~12s later with no `kubectl` involved;
+  reverting the commit scaled it back down just as fast.
+
+On 2026-09-05, the repository moved to a public remote. The tracked child
+Applications, install script, and Make default moved together from the SSH URL
+to anonymous HTTPS. `make k8s-validate` checks that all 3 sources stay on one
+canonical URL. The original private-remote run above remains the evidence for
+the reconciliation loop; the public change removes its authentication step.
 
 Verifying it also exposed a flaw in the placeholder scheme. `install.sh`
 substitutes `__REPO_URL__` as it applies `k8s/argocd/*.yaml`, but `k8s/apps/`

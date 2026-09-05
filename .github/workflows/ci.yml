@@ -1,20 +1,28 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# `main` requires this workflow's aggregate check on an up-to-date pull
+# request. Running the whole suite again after merge tests the same tree and
+# roughly doubles the hosted work. CodeQL default setup still scans pushes to
+# the protected branch.
 
 # No AWS credentials are used anywhere in this workflow. Terraform runs with
 # -backend=false and never plans against an account.
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go:
     name: go build and vet
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         # Kept in step with the modules that exist. This was hardcoded to
@@ -29,6 +37,8 @@ jobs:
         working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -78,11 +88,14 @@ jobs:
   terraform:
     name: terraform fmt and validate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         stack: [infra/terraform/bootstrap, infra/terraform/envs/dev]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -101,8 +114,11 @@ jobs:
   smoke:
     name: end-to-end smoke check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -284,6 +300,7 @@ jobs:
   image:
     name: build the ${{ matrix.service }} image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       # Three independent images that cannot break each other. Without this, one
       # registry hiccup on any of them CANCELS the other two, so a single
@@ -294,6 +311,8 @@ jobs:
         service: [echo, relay, sink]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Docker Hub returned 500 from auth.docker.io here on 2026-08-27 and
       # failed the job; the same commit built clean on re-run, so the cost of a
@@ -334,8 +353,11 @@ jobs:
   go-modules-covered:
     name: every go module is in the build matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: compare go.mod discovery against the matrix
         run: |
           python3 - <<'PY'
@@ -374,9 +396,11 @@ jobs:
   lint:
     name: linters
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # gitleaks scans history, which needs more than the default shallow
           # clone of one commit.
           fetch-depth: 0
@@ -411,3 +435,49 @@ jobs:
           LINT_STRICT: "1"
           LINT_SKIP_OK: golangci-lint
         run: make lint
+
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+
+  required:
+    name: required checks
+    if: always()
+    needs:
+      - go
+      - terraform
+      - smoke
+      - image
+      - go-modules-covered
+      - lint
+      - dependency-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify prerequisite results
+        env:
+          GO_RESULT: ${{ needs.go.result }}
+          TERRAFORM_RESULT: ${{ needs.terraform.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          MODULES_RESULT: ${{ needs.go-modules-covered.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+        run: |
+          for result in \
+            "$GO_RESULT" \
+            "$TERRAFORM_RESULT" \
+            "$SMOKE_RESULT" \
+            "$IMAGE_RESULT" \
+            "$MODULES_RESULT" \
+            "$LINT_RESULT" \
+            "$DEPENDENCY_REVIEW_RESULT"; do
+            case "$result" in
+              success | skipped) ;;
+              *) echo "required job result: $result" >&2; exit 1 ;;
+            esac
+          done

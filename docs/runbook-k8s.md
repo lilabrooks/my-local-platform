@@ -62,11 +62,12 @@ a compromised workload to rewrite your git history.
 The private key is written to `~/.ssh/` and into the cluster. It never enters
 the repository.
 
-A public remote needs no deploy key when every Application and `REPO_URL` use
-its HTTPS URL. Change those tracked URLs when repository visibility changes;
-leaving an SSH URL in one child Application still requires SSH credentials.
-`make k8s-validate` checks that all child Applications, the install script, and
-the Make default use the same URL.
+This repository's public default is
+`https://github.com/lilabrooks/my-local-platform.git`, so a fresh install needs
+no deploy key. A private fork can use `make argocd-repo-creds` to switch the
+live Applications to SSH. Keep every child Application and `REPO_URL` on the
+same URL; one SSH source still requires SSH credentials. `make k8s-validate`
+checks the child Applications, install script, and Make default together.
 
 ## Project boundaries
 

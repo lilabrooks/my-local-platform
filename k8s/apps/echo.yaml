@@ -16,7 +16,7 @@ spec:
     # "application repo __REPO_URL__ is not permitted in project 'mlp'".
     #
     # Forking? Change this line, and pass REPO_URL to install.sh.
-    repoURL: git@github.com:lilabrooks/my-local-platform.git
+    repoURL: https://github.com/lilabrooks/my-local-platform.git
     targetRevision: main
     path: k8s/manifests/echo
 
