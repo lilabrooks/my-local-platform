@@ -1,0 +1,21 @@
+# #96 replaces the broker placeholder and applies this object before ArgoCD
+# syncs the workloads. The name is fixed in the generated root Application.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-runtime
+  namespace: mlp
+  labels:
+    app.kubernetes.io/part-of: my-local-platform
+data:
+  KAFKA_BOOTSTRAP: __MSK_BOOTSTRAP_BROKERS__
+  KAFKA_AUTH_MODE: aws_msk_iam
+  AWS_REGION: us-east-1
+  DEPLOYMENT_ENVIRONMENT: aws
+  RELAY_TOPIC: mlp.relay.deliveries
+  RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
+  RELAY_CONSUMER_GROUP: relay-deliver
+  RELAY_RETRY_DELAYS: demo
+  RELAY_DELIVERY_TIMEOUT: 2s
+  RELAY_RETRY_JITTER: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317

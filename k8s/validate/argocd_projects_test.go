@@ -256,14 +256,20 @@ func TestArgoCDInstallUsesConsistentRepoAndRequiredVersion(t *testing.T) {
 }
 
 func TestArgoCDScriptsPreserveProjectMigrationOrder(t *testing.T) {
-	wantOrder := []string{
-		"$HERE/root-project.yaml",
-		"$HERE/root-app.yaml",
-		"$HERE/project.yaml",
-		"$HERE/default-project.yaml",
-	}
-
-	for _, name := range []string{"install.sh", "repo-creds.sh"} {
+	for _, tc := range []struct {
+		name    string
+		rootApp string
+	}{
+		{name: "install.sh", rootApp: "$ROOT_APP"},
+		{name: "repo-creds.sh", rootApp: "$ROOT_APP"},
+	} {
+		wantOrder := []string{
+			"$HERE/root-project.yaml",
+			tc.rootApp,
+			"$HERE/project.yaml",
+			"$HERE/default-project.yaml",
+		}
+		name := tc.name
 		path := filepath.Join(argocdManifestRoot, name)
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -272,7 +278,7 @@ func TestArgoCDScriptsPreserveProjectMigrationOrder(t *testing.T) {
 		text := string(b)
 		previous := -1
 		for _, token := range wantOrder {
-			position := strings.Index(text, token)
+			position := strings.LastIndex(text, token)
 			if position < 0 {
 				t.Errorf("%s does not apply %s", path, token)
 				continue

@@ -1,13 +1,13 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-05
+Date: 2026-08-24 · Last audited: 2026-09-06
 Status: **M0 through M3 are built. M3's whole-application proof passed on
 2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
-is closed.** On 2026-09-01, the owner selected M3 followed by M4. The satisfied
-M3 gate released M4 contract work at
-[#91](https://github.com/lilabrooks/my-local-platform/issues/91). Earlier
-versions called M3 and M4 optional alternatives; that status ended with the
-owner decision.
+is closed. M4's contract, IAM transport, Terraform runtime, shutdown budget,
+and AWS deployment render are implemented.** The local rehearsal in
+[#95](https://github.com/lilabrooks/my-local-platform/issues/95) is the next
+gate. Live staging and the hourly apply still require their separate owner
+decisions.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -421,7 +421,8 @@ at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
      [#101](https://github.com/lilabrooks/my-local-platform/issues/101).
 
 3. Render the AWS relay deployment and evidence stack in
-   [#94](https://github.com/lilabrooks/my-local-platform/issues/94).
+   [#94](https://github.com/lilabrooks/my-local-platform/issues/94). The render
+   is implemented and locally validated; merge closes the issue.
 4. Rehearse the deployment, demonstration, evidence capture, abort path, and
    cleanup locally in
    [#95](https://github.com/lilabrooks/my-local-platform/issues/95).

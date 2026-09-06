@@ -1,0 +1,45 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: relay-msk
+  labels:
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  # KEDA uses its own keda-operator Pod Identity association. It must not
+  # borrow relay-deliver's broader consumer-group authority.
+  podIdentity:
+    provider: aws
+    identityOwner: keda
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: relay-deliver
+  labels:
+    app.kubernetes.io/name: relay-deliver
+    app.kubernetes.io/part-of: my-local-platform
+spec:
+  scaleTargetRef:
+    name: relay-deliver
+  minReplicaCount: 1
+  maxReplicaCount: 12
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 30
+  triggers:
+    - type: apache-kafka
+      metadata:
+        # The generated AWS root Application replaces this value. Keeping the
+        # account-bearing MSK endpoint out of git is part of ADR 0010.
+        bootstrapServers: __MSK_BOOTSTRAP_BROKERS__
+        consumerGroup: relay-deliver
+        topic: mlp.relay.deliveries
+        awsRegion: us-east-1
+        sasl: aws_msk_iam
+        tls: enable
+        lagThreshold: "10"
+        offsetResetPolicy: earliest
+      authenticationRef:
+        name: relay-msk

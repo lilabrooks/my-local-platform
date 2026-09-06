@@ -54,9 +54,13 @@ func scaledObjects(t *testing.T) map[string]map[string]any {
 	t.Helper()
 
 	out := map[string]map[string]any{}
-	for _, dir := range manifestDirs(t) {
+	dirs := manifestDirs(t)
+	for _, component := range awsComponents(t) {
+		dirs = append(dirs, "../aws/"+component)
+	}
+	for _, dir := range dirs {
 		for _, so := range kindsOf(render(t, dir), "ScaledObject") {
-			out[name(so)] = so
+			out[dir+"/"+name(so)] = so
 		}
 	}
 	return out

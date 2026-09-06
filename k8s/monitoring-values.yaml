@@ -8,35 +8,6 @@
 # being true, which is the first thing that ADR's "Revisit when" names.
 ---
 grafana:
-  # Anonymous admin, matching the compose Grafana at local/docker-compose.yml.
-  #
-  # Not a convenience. `make relay-demo` targets three minutes and is the
-  # watchable path -- somebody reads lag off a panel while the script drives.
-  # A login prompt at step 2 stops that, and the chart generates a random
-  # 40-character admin password, so the person watching cannot even guess it.
-  #
-  # The two Grafanas behaving differently was not a decision anyone made; the
-  # compose one has been anonymous since it was added. This makes the cluster
-  # match rather than inventing a new posture.
-  #
-  # Safe here and nowhere else: this Grafana is reachable only through
-  # `kubectl port-forward` to a local minikube profile. It has no Service of
-  # type LoadBalancer, no Ingress, and no route from outside the host. On any
-  # cluster that is not a laptop, delete this block.
-  grafana.ini:
-    auth.anonymous:
-      enabled: true
-      org_role: Admin
-    users:
-      # Land on the relay dashboard rather than Grafana's welcome page, so the
-      # demo does not spend seconds navigating.
-      home_dashboard_uid: relay-delivery
-
-  # The login form stays enabled on purpose. Anonymous covers the demo, and
-  # disabling it would remove the only way to reach admin-only pages when
-  # something needs diagnosing -- `make monitoring-password` still works.
-  # The compose Grafana makes the same trade.
-
   sidecar:
     dashboards:
       # Already the chart default; stated because the whole one-dashboard-file

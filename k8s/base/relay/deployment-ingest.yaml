@@ -7,8 +7,6 @@ metadata:
     app.kubernetes.io/component: ingest
     app.kubernetes.io/part-of: my-local-platform
 spec:
-  # Two replicas: ingest is stateless HTTP and a rolling update should not
-  # drop events on the floor.
   replicas: 2
   selector:
     matchLabels:
@@ -34,18 +32,18 @@ spec:
           type: RuntimeDefault
       containers:
         - name: relay
-          image: relay:dev
-          # The tag exists in no registry; `make relay-image` loads it into the
-          # cluster. Always would sit in ImagePullBackOff reaching for Docker Hub.
+          # Overlays replace this non-routable fixture with relay:dev locally
+          # or an ECR digest in AWS.
+          image: example.invalid/mlp-dev/relay@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           env:
             - name: RELAY_MODE
               value: ingest
           envFrom:
             - configMapRef:
-                name: relay
+                name: relay-runtime
             - secretRef:
-                name: relay
+                name: relay-secrets
           ports:
             - name: http
               containerPort: 8080
@@ -72,15 +70,6 @@ spec:
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
-      # Ingest has no record deadline: it fails readiness, keeps serving for
-      # IngestReadinessGrace (3s) so load balancers notice, waits out in-flight
-      # requests (20s), closes the Kafka writer and pool (5s shared), and
-      # flushes traces (3s). 31s in total, which is config.IngestDrainBudget and
-      # what k8s/validate asserts against this number. The rest is slack for
-      # process exit and container teardown.
-      #
-      # The 20s is not arbitrary: postEvent detaches from the request context
-      # and keeps 15s to finish persisting and publishing, so a shutdown that
-      # stopped waiting sooner would close the pool under the handler that
-      # detachment exists to protect.
+      # config.IngestDrainBudget is 31s. The remainder covers process exit and
+      # container teardown; k8s/validate checks the executable budget.
       terminationGracePeriodSeconds: 45

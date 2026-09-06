@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: relay
+  name: relay-runtime
   labels:
     app.kubernetes.io/part-of: my-local-platform
 data:

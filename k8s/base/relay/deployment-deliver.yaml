@@ -7,11 +7,8 @@ metadata:
     app.kubernetes.io/component: deliver
     app.kubernetes.io/part-of: my-local-platform
 spec:
-  # No replicas field on purpose. KEDA owns this number (scaledobject.yaml), and
-  # a value here would be a second authority: ArgoCD would restore it from git
-  # every sync while KEDA re-scaled from lag, the two overwriting each other
-  # every few seconds. The Application ignores /spec/replicas for this
-  # Deployment so the git state stays silent about it.
+  # KEDA is the only replica authority. ArgoCD ignores this field in both
+  # environment Applications.
   selector:
     matchLabels:
       app.kubernetes.io/name: relay-deliver
@@ -36,18 +33,16 @@ spec:
           type: RuntimeDefault
       containers:
         - name: relay
-          image: relay:dev
-          # The tag exists in no registry; `make relay-image` loads it into the
-          # cluster. Always would sit in ImagePullBackOff reaching for Docker Hub.
+          image: example.invalid/mlp-dev/relay@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           env:
             - name: RELAY_MODE
               value: deliver
           envFrom:
             - configMapRef:
-                name: relay
+                name: relay-runtime
             - secretRef:
-                name: relay
+                name: relay-secrets
           ports:
             - name: http
               containerPort: 8080
@@ -74,16 +69,6 @@ spec:
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
-      # On SIGTERM relay stops fetching and drains its current record for at
-      # most DefaultStallBudget (30s), then runs four bounded cleanup steps in
-      # order: an interrupted attempt's history write (5s), the health server's
-      # shutdown (5s), the Kafka reader, DLQ writer and database pool closing
-      # (5s shared), and the trace exporter's final flush (3s). 48s in total,
-      # which is config.DeliverDrainBudget; k8s/validate asserts it against this
-      # number, and also checks that the ConfigMap's 25s delivery schedule fits
-      # inside the record deadline.
-      #
-      # The 12s above that budget is not decoration. It covers what relay cannot
-      # put a deadline on -- process exit, container teardown -- and the closes
-      # relay abandons rather than waits for when their shared budget runs out.
+      # config.DeliverDrainBudget is 48s. The remainder covers process exit
+      # and container teardown; k8s/validate checks the executable budget.
       terminationGracePeriodSeconds: 60

@@ -1,0 +1,30 @@
+# AWS-only Grafana settings. Authentication remains enabled. The Service stays
+# ClusterIP in kube-prometheus-stack, so the UI is available only by an
+# authenticated kubectl port-forward.
+grafana:
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+  additionalDataSources:
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.mlp.svc.cluster.local:3200
+      editable: false
+  grafana.ini:
+    users:
+      home_dashboard_uid: relay-delivery
+
+prometheus:
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+
+alertmanager:
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
