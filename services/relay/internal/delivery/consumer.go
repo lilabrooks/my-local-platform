@@ -2,11 +2,13 @@ package delivery
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +35,17 @@ type Reader interface {
 	Close() error
 }
 
-const groupJoinPollInterval = 50 * time.Millisecond
+const (
+	groupJoinPollInterval    = 50 * time.Millisecond
+	maxUndecodableKeyBytes   = 256 * 1024
+	maxUndecodableValueBytes = 256 * 1024
+	maxDecodeReasonBytes     = 4 * 1024
+	decodeReasonSuffix       = " (reason truncated)"
+)
+
+// MaxDLQBatchBytes is the kafka-go writer limit for one dead-letter message.
+// Keep it explicit in the writer and the envelope-size regression test.
+const MaxDLQBatchBytes int64 = 1 << 20
 
 // Producer writes dead-letter records.
 type Producer interface {
@@ -45,19 +57,39 @@ type SubscriptionSource interface {
 	ForTenant(ctx context.Context, tenantID string) ([]subscriptions.Subscription, error)
 }
 
+// DeadLetterSource identifies the Kafka record that could not be decoded.
+// Key and RawValue are bounded byte slices, so arbitrary input survives JSON
+// encoding without letting a nearly broker-sized source record expand past
+// the DLQ's message limit when encoding/json base64-encodes it.
+type DeadLetterSource struct {
+	Topic              string    `json:"topic"`
+	Partition          int       `json:"partition"`
+	Offset             int64     `json:"offset"`
+	Timestamp          time.Time `json:"timestamp"`
+	Key                []byte    `json:"key"`
+	KeySHA256          string    `json:"key_sha256"`
+	OriginalKeyBytes   int       `json:"original_key_bytes"`
+	KeyTruncated       bool      `json:"key_truncated"`
+	RawValue           []byte    `json:"raw_value"`
+	OriginalValueBytes int       `json:"original_value_bytes"`
+	RawValueTruncated  bool      `json:"raw_value_truncated"`
+}
+
 // DeadLetter is what lands on the dead-letter topic.
 //
-// It carries the original record so the event can be replayed, and enough about
-// the failure to act on it. It deliberately does NOT carry the signing secret;
-// only the subscription's identity and URL.
+// Delivery failures carry the decoded record so the event can be replayed.
+// Decode failures carry source identity and bounded raw bytes instead. Neither
+// path carries the signing secret; delivery failures include only the
+// subscription's identity and URL.
 type DeadLetter struct {
-	Record         event.Record `json:"record"`
-	SubscriptionID int64        `json:"subscription_id"`
-	URL            string       `json:"url"`
-	Attempts       int          `json:"attempts"`
-	LastStatus     int          `json:"last_status,omitempty"`
-	Reason         string       `json:"reason"`
-	FailedAt       time.Time    `json:"failed_at"`
+	Record         event.Record      `json:"record"`
+	Source         *DeadLetterSource `json:"source,omitempty"`
+	SubscriptionID int64             `json:"subscription_id"`
+	URL            string            `json:"url"`
+	Attempts       int               `json:"attempts"`
+	LastStatus     int               `json:"last_status,omitempty"`
+	Reason         string            `json:"reason"`
+	FailedAt       time.Time         `json:"failed_at"`
 }
 
 // Consumer reads the delivery topic and fans each record out to its tenant's
@@ -275,13 +307,10 @@ func (c *Consumer) handle(ctx context.Context, msg kafka.Message) error {
 		// Park it and move on, or it blocks the partition forever.
 		c.log.Error("undecodable record, dead-lettering",
 			"error", err, "partition", msg.Partition, "offset", msg.Offset)
-		metrics.DeadLetters.WithLabelValues("undecodable").Inc()
-		if err := c.deadLetter(ctx, DeadLetter{
-			Reason:   fmt.Sprintf("undecodable record at partition %d offset %d: %v", msg.Partition, msg.Offset, err),
-			FailedAt: time.Now().UTC(),
-		}); err != nil {
+		if err := c.deadLetter(ctx, undecodableDeadLetter(msg, err)); err != nil {
 			return err
 		}
+		metrics.DeadLetters.WithLabelValues("undecodable").Inc()
 		// This path parks an event and then returns nil so the offset advances.
 		// Without an event and a status here the trace is indistinguishable
 		// from a clean delivery -- and the record has no id to search by, so
@@ -447,10 +476,63 @@ func (c *Consumer) deadLetter(ctx context.Context, dl DeadLetter) error {
 	if err != nil {
 		return fmt.Errorf("encode dead letter: %w", err)
 	}
-	// Keyed by tenant like the source topic, so a tenant's failures stay
-	// together and in order.
+	// Delivery failures stay keyed by tenant like the source topic. A poison
+	// record has no trustworthy tenant, so its stable source coordinates are
+	// the key instead.
 	return c.dlq.WriteMessages(ctx, kafka.Message{
-		Key:   []byte(dl.Record.TenantID),
+		Key:   deadLetterKey(dl),
 		Value: value,
 	})
+}
+
+func undecodableDeadLetter(msg kafka.Message, decodeErr error) DeadLetter {
+	key, keyTruncated := boundedCopy(msg.Key, maxUndecodableKeyBytes)
+	raw, rawTruncated := boundedCopy(msg.Value, maxUndecodableValueBytes)
+	keyHash := sha256.Sum256(msg.Key)
+	return DeadLetter{
+		Source: &DeadLetterSource{
+			Topic:              msg.Topic,
+			Partition:          msg.Partition,
+			Offset:             msg.Offset,
+			Timestamp:          msg.Time,
+			Key:                key,
+			KeySHA256:          fmt.Sprintf("%x", keyHash),
+			OriginalKeyBytes:   len(msg.Key),
+			KeyTruncated:       keyTruncated,
+			RawValue:           raw,
+			OriginalValueBytes: len(msg.Value),
+			RawValueTruncated:  rawTruncated,
+		},
+		Reason:   boundedDecodeReason(decodeErr),
+		FailedAt: time.Now().UTC(),
+	}
+}
+
+func boundedCopy(value []byte, limit int) ([]byte, bool) {
+	if value == nil {
+		return nil, false
+	}
+	truncated := len(value) > limit
+	if truncated {
+		value = value[:limit]
+	}
+	copyOfValue := make([]byte, len(value))
+	copy(copyOfValue, value)
+	return copyOfValue, truncated
+}
+
+func boundedDecodeReason(decodeErr error) string {
+	reason := strings.ToValidUTF8(fmt.Sprintf("undecodable Kafka record: %v", decodeErr), "")
+	if len(reason) <= maxDecodeReasonBytes {
+		return reason
+	}
+	prefixBytes := maxDecodeReasonBytes - len(decodeReasonSuffix)
+	return strings.ToValidUTF8(reason[:prefixBytes], "") + decodeReasonSuffix
+}
+
+func deadLetterKey(dl DeadLetter) []byte {
+	if dl.Source != nil {
+		return []byte(fmt.Sprintf("poison:%s:%d:%d", dl.Source.Topic, dl.Source.Partition, dl.Source.Offset))
+	}
+	return []byte(dl.Record.TenantID)
 }

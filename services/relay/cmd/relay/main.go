@@ -356,6 +356,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: false,
+		BatchBytes:             delivery.MaxDLQBatchBytes,
 		BatchTimeout:           10 * time.Millisecond,
 	}
 	closers = append(closers, dlq.Close)

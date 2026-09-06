@@ -3,6 +3,7 @@ package checks
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,11 +49,27 @@ func Relay(cfg platform.Config) Check {
 			return "", fmt.Errorf("read %s end offsets: %w", cfg.RelayTopic, err)
 		}
 
-		// Where the DLQ ends now. Anything at or after this offset belongs to
-		// this run.
-		dlqStart, err := endOffset(ctx, brokers[0], cfg.RelayDLQTopic, 0)
+		// The direct reader below deliberately has no consumer group. The local
+		// DLQ is one partition, so one start offset covers every record from this
+		// run; fail clearly if that topology changes.
+		dlqStarts, err := topicEndOffsets(ctx, brokers[0], cfg.RelayDLQTopic)
 		if err != nil {
-			return "", fmt.Errorf("read %s end offset: %w", cfg.RelayDLQTopic, err)
+			return "", fmt.Errorf("read %s end offsets: %w", cfg.RelayDLQTopic, err)
+		}
+		if len(dlqStarts) != 1 {
+			return "", fmt.Errorf("%s has %d partitions, want exactly 1 for the relay smoke reader",
+				cfg.RelayDLQTopic, len(dlqStarts))
+		}
+		dlqStart, ok := dlqStarts[0]
+		if !ok {
+			return "", fmt.Errorf("%s has one partition but its id is not 0", cfg.RelayDLQTopic)
+		}
+		poison, err := producePoisonRecord(ctx, brokers, cfg.RelayTopic, marker)
+		if err != nil {
+			return "", err
+		}
+		if err := awaitPoisonDeadLetter(ctx, brokers, cfg.RelayDLQTopic, dlqStart, poison); err != nil {
+			return "", err
 		}
 
 		eventIDs := make([]string, 2)
@@ -127,9 +144,53 @@ func Relay(cfg platform.Config) Check {
 				"Tempo trace %s joins ingest, Kafka, consume and one span per persisted attempt", traceID)
 		}
 
-		return fmt.Sprintf("%s returned by 2 concurrent requests for one idempotency key, delivered to %s, dead-lettered %s after %d attempts; one Kafka record, one healthy delivery, one event row and %d attempts persisted; %s",
-			eventID, delivered, dead.URL, dead.Attempts, len(attempts), traceEvidence), nil
+		return fmt.Sprintf("%s returned by 2 concurrent requests for one idempotency key, delivered to %s, dead-lettered %s after %d attempts; poison %s[%d]@%d key, timestamp and %d raw bytes preserved; one Kafka record, one healthy delivery, one event row and %d attempts persisted; %s",
+			eventID, delivered, dead.URL, dead.Attempts,
+			poison.Topic, poison.Partition, poison.Offset, len(poison.Value), len(attempts), traceEvidence), nil
 	}}
+}
+
+func producePoisonRecord(ctx context.Context, brokers []string, topic, marker string) (kafka.Message, error) {
+	want := kafka.Message{
+		Topic: topic,
+		// Kafka stores this producer CreateTime at millisecond resolution under
+		// the topic's default timestamp policy. The DLQ comparison proves relay
+		// preserved the timestamp returned by its broker fetch.
+		Time:  time.Now().UTC().Truncate(time.Millisecond),
+		Key:   []byte("poison-" + marker),
+		Value: []byte(`{"poison":"` + marker),
+	}
+	var (
+		mu       sync.Mutex
+		produced kafka.Message
+		acked    bool
+	)
+	w := &kafka.Writer{
+		Addr:                   kafka.TCP(brokers...),
+		Balancer:               &kafka.Hash{},
+		RequiredAcks:           kafka.RequireAll,
+		AllowAutoTopicCreation: false,
+		BatchSize:              1,
+		Completion: func(messages []kafka.Message, err error) {
+			if err != nil || len(messages) == 0 {
+				return
+			}
+			mu.Lock()
+			produced, acked = messages[0], true
+			mu.Unlock()
+		},
+	}
+	defer func() { _ = w.Close() }()
+
+	if err := w.WriteMessages(ctx, want); err != nil {
+		return kafka.Message{}, fmt.Errorf("produce poison record: %w", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !acked {
+		return kafka.Message{}, fmt.Errorf("produce poison record: no partition or offset in the produce response")
+	}
+	return produced, nil
 }
 
 // postEvent submits one event and returns the id relay assigned it.
@@ -551,16 +612,70 @@ func countHealthyDeliveries(ctx context.Context, sinkURL, eventID string) (int, 
 
 type deadLetter struct {
 	Record struct {
-		ID string `json:"id"`
+		ID       string `json:"id"`
+		TenantID string `json:"tenant_id"`
 	} `json:"record"`
-	URL      string `json:"url"`
-	Attempts int    `json:"attempts"`
-	Reason   string `json:"reason"`
+	Source   *deadLetterSource `json:"source,omitempty"`
+	URL      string            `json:"url"`
+	Attempts int               `json:"attempts"`
+	Reason   string            `json:"reason"`
+}
+
+type deadLetterSource struct {
+	Topic              string    `json:"topic"`
+	Partition          int       `json:"partition"`
+	Offset             int64     `json:"offset"`
+	Timestamp          time.Time `json:"timestamp"`
+	Key                []byte    `json:"key"`
+	KeySHA256          string    `json:"key_sha256"`
+	OriginalKeyBytes   int       `json:"original_key_bytes"`
+	KeyTruncated       bool      `json:"key_truncated"`
+	RawValue           []byte    `json:"raw_value"`
+	OriginalValueBytes int       `json:"original_value_bytes"`
+	RawValueTruncated  bool      `json:"raw_value_truncated"`
 }
 
 // awaitDeadLetter reads forward from start until it finds this event's failed
 // delivery, proving the DLQ topic is really written rather than merely intended.
 func awaitDeadLetter(ctx context.Context, brokers []string, topic string, start int64, eventID string) (deadLetter, error) {
+	dl, _, err := awaitDeadLetterMatch(ctx, brokers, topic, start, "event "+eventID,
+		func(_ kafka.Message, dl deadLetter) bool { return dl.Record.ID == eventID })
+	if err != nil {
+		return deadLetter{}, err
+	}
+	if dl.Reason == "" {
+		return dl, fmt.Errorf("dead letter for %s carries no reason", eventID)
+	}
+	return dl, nil
+}
+
+func awaitPoisonDeadLetter(
+	ctx context.Context,
+	brokers []string,
+	topic string,
+	start int64,
+	want kafka.Message,
+) error {
+	description := fmt.Sprintf("poison source %s[%d]@%d", want.Topic, want.Partition, want.Offset)
+	dl, message, err := awaitDeadLetterMatch(ctx, brokers, topic, start, description,
+		func(_ kafka.Message, dl deadLetter) bool {
+			return dl.Source != nil && dl.Source.Topic == want.Topic &&
+				dl.Source.Partition == want.Partition && dl.Source.Offset == want.Offset
+		})
+	if err != nil {
+		return err
+	}
+	return checkPoisonDeadLetter(message, dl, want)
+}
+
+func awaitDeadLetterMatch(
+	ctx context.Context,
+	brokers []string,
+	topic string,
+	start int64,
+	description string,
+	match func(kafka.Message, deadLetter) bool,
+) (deadLetter, kafka.Message, error) {
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:   brokers,
 		Topic:     topic,
@@ -574,13 +689,13 @@ func awaitDeadLetter(ctx context.Context, brokers []string, topic string, start 
 	defer func() { _ = r.Close() }()
 
 	if err := r.SetOffset(start); err != nil {
-		return deadLetter{}, fmt.Errorf("seek %s to %d: %w", topic, start, err)
+		return deadLetter{}, kafka.Message{}, fmt.Errorf("seek %s to %d: %w", topic, start, err)
 	}
 
 	for {
 		m, err := r.ReadMessage(ctx)
 		if err != nil {
-			return deadLetter{}, fmt.Errorf("no dead letter for %s on %s: %w", eventID, topic, err)
+			return deadLetter{}, kafka.Message{}, fmt.Errorf("no dead letter for %s on %s: %w", description, topic, err)
 		}
 		var dl deadLetter
 		if err := json.Unmarshal(m.Value, &dl); err != nil {
@@ -588,13 +703,48 @@ func awaitDeadLetter(ctx context.Context, brokers []string, topic string, start 
 			// rather than failing on a record this check did not write.
 			continue
 		}
-		if dl.Record.ID == eventID {
-			if dl.Reason == "" {
-				return dl, fmt.Errorf("dead letter for %s carries no reason", eventID)
-			}
-			return dl, nil
+		if match(m, dl) {
+			return dl, m, nil
 		}
 	}
+}
+
+func checkPoisonDeadLetter(message kafka.Message, dl deadLetter, want kafka.Message) error {
+	if dl.Source == nil {
+		return fmt.Errorf("poison dead letter has no source")
+	}
+	source := dl.Source
+	if source.Topic != want.Topic || source.Partition != want.Partition || source.Offset != want.Offset {
+		return fmt.Errorf("poison source = %s[%d]@%d, want %s[%d]@%d",
+			source.Topic, source.Partition, source.Offset, want.Topic, want.Partition, want.Offset)
+	}
+	if !source.Timestamp.Equal(want.Time) {
+		return fmt.Errorf("poison source timestamp = %s, want %s", source.Timestamp, want.Time)
+	}
+	if !bytes.Equal(source.Key, want.Key) {
+		return fmt.Errorf("poison source key = %q, want %q", source.Key, want.Key)
+	}
+	wantKeyHash := sha256.Sum256(want.Key)
+	if source.KeySHA256 != fmt.Sprintf("%x", wantKeyHash) ||
+		source.OriginalKeyBytes != len(want.Key) || source.KeyTruncated {
+		return fmt.Errorf("poison source key metadata = hash %q bytes %d truncated=%t, want %x %d false",
+			source.KeySHA256, source.OriginalKeyBytes, source.KeyTruncated, wantKeyHash, len(want.Key))
+	}
+	if !bytes.Equal(source.RawValue, want.Value) || source.OriginalValueBytes != len(want.Value) || source.RawValueTruncated {
+		return fmt.Errorf("poison source value = %q (%d bytes, truncated=%t), want %q (%d bytes, truncated=false)",
+			source.RawValue, source.OriginalValueBytes, source.RawValueTruncated, want.Value, len(want.Value))
+	}
+	if dl.Record.TenantID != "" {
+		return fmt.Errorf("poison dead letter inferred tenant %q from invalid bytes", dl.Record.TenantID)
+	}
+	if !strings.Contains(dl.Reason, "undecodable") {
+		return fmt.Errorf("poison dead-letter reason = %q, want undecodable", dl.Reason)
+	}
+	wantKey := []byte(fmt.Sprintf("poison:%s:%d:%d", want.Topic, want.Partition, want.Offset))
+	if !bytes.Equal(message.Key, wantKey) {
+		return fmt.Errorf("poison dead-letter key = %q, want %q", message.Key, wantKey)
+	}
+	return nil
 }
 
 // endOffset reports where a partition currently ends, so a reader can start
