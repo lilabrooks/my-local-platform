@@ -11,6 +11,11 @@ make smoke
 `make up` starts every profile and seeds resources. Expect the first run to
 take a few minutes while images download.
 
+The relay part of `make smoke` also writes an invalid value directly to
+`mlp.relay.deliveries`. It reads the resulting DLQ entry and matches the source
+topic, partition, offset, timestamp, key bytes and hash, and raw bytes. The same
+run still checks the normal exhausted-delivery dead letter from `/hooks/flaky`.
+
 ## Profiles
 
 Profiles exist because memory is a real constraint. An earlier note here
@@ -258,8 +263,8 @@ curl -fsS "http://localhost:3200/api/traces/${TRACE_ID}" |
 A completed event prints `relay.ingest`, `kafka.produce`, `relay.consume`, and
 one `relay.webhook.attempt` line per delivery attempt. Failed attempts carry an
 error status, retries carry `relay.retry.scheduled`, and the consumer span
-records dead-lettering — including the undecodable-record case, which has no
-event id to search by and so is only visible on the span.
+records dead-lettering. The undecodable-record case has no event id to search
+by; use its source coordinates in the DLQ or its `relay.consume` span.
 
 **A failure's span says what kind of failure, never what the error said.**
 Attributes are event and subscription ids, HTTP status, partition, offset, and

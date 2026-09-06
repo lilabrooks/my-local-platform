@@ -2,11 +2,15 @@ package checks
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/segmentio/kafka-go"
 
 	"github.com/lilabrooks/my-local-platform/smoke/internal/platform"
 )
@@ -20,6 +24,55 @@ func TestRelayEmptyURLIsAnExplicitSkip(t *testing.T) {
 	}
 	if detail != "skipped (apps profile disabled)" {
 		t.Fatalf("detail = %q, want an explicit skip", detail)
+	}
+}
+
+func TestCheckPoisonDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	want := kafka.Message{
+		Topic: "mlp.relay.deliveries", Partition: 3, Offset: 42,
+		Time: time.Date(2026, 9, 5, 18, 30, 0, 123000000, time.UTC),
+		Key:  []byte("original-key"), Value: []byte(`{"broken":`),
+	}
+	validLetter := func() (kafka.Message, deadLetter) {
+		keyHash := sha256.Sum256(want.Key)
+		return kafka.Message{Key: []byte("poison:mlp.relay.deliveries:3:42")}, deadLetter{
+			Source: &deadLetterSource{
+				Topic: want.Topic, Partition: want.Partition, Offset: want.Offset,
+				Timestamp: want.Time, Key: append([]byte(nil), want.Key...),
+				KeySHA256: fmt.Sprintf("%x", keyHash), OriginalKeyBytes: len(want.Key),
+				RawValue: append([]byte(nil), want.Value...), OriginalValueBytes: len(want.Value),
+			},
+			Reason: "undecodable Kafka record: unexpected end of JSON input",
+		}
+	}
+
+	message, letter := validLetter()
+	if err := checkPoisonDeadLetter(message, letter, want); err != nil {
+		t.Fatalf("valid poison evidence: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		edit func(*kafka.Message, *deadLetter)
+	}{
+		{"wrong dlq key", func(message *kafka.Message, _ *deadLetter) { message.Key = []byte("tenant-guessed") }},
+		{"wrong key hash", func(_ *kafka.Message, letter *deadLetter) { letter.Source.KeySHA256 = "wrong" }},
+		{"truncated small key", func(_ *kafka.Message, letter *deadLetter) { letter.Source.KeyTruncated = true }},
+		{"wrong raw bytes", func(_ *kafka.Message, letter *deadLetter) { letter.Source.RawValue = []byte("changed") }},
+		{"truncated small record", func(_ *kafka.Message, letter *deadLetter) { letter.Source.RawValueTruncated = true }},
+		{"tenant inferred", func(_ *kafka.Message, letter *deadLetter) { letter.Record.TenantID = "guessed" }},
+		{"missing decode reason", func(_ *kafka.Message, letter *deadLetter) { letter.Reason = "unknown" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			message, letter := validLetter()
+			tc.edit(&message, &letter)
+			if err := checkPoisonDeadLetter(message, letter, want); err == nil {
+				t.Fatal("invalid poison evidence was accepted")
+			}
+		})
 	}
 }
 

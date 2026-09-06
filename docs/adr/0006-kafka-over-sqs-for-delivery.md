@@ -533,6 +533,65 @@ mechanism for the same reason.
 Dead-lettering is covered: the `relay` smoke check asserts a failed delivery
 reaches `mlp.relay.deliveries.dlq` with a reason on every `make smoke`.
 
+### Poison-record dead letters, run 2026-09-05
+
+An undecodable Kafka value cannot supply a trustworthy event or tenant. Its
+dead letter now carries a separate `source` object with the source topic,
+partition, offset, timestamp, bounded original-key bytes, the full key's
+SHA-256, bounded raw value, original byte counts, and truncation flags. Keys at
+or below the bound survive byte for byte; a longer key retains a prefix and a
+full-value digest. The decoded `record` remains empty. Relay does not parse
+fragments of invalid JSON to guess a tenant.
+
+The key digest makes a truncated key verifiable against a recovered original.
+A truncated raw value is diagnostic rather than replayable, so it carries its
+preserved prefix, original byte count, and truncation flag without a digest.
+Nil and non-nil empty keys and values remain distinct in the serialized source
+object.
+
+The DLQ message key is `poison:<topic>:<partition>:<offset>`. Those broker
+coordinates stay stable across redelivery, give poison records a non-empty
+deterministic key, and do not pretend the source key identifies a tenant.
+Ordinary exhausted-delivery dead letters keep their existing tenant key and
+serialized fields; `source` is absent on that path.
+
+Source keys and raw values each have an independent 256 KiB DLQ cap, and the
+decode reason has a 4 KiB cap including its truncation marker. Those bounds
+come from the DLQ message budget. `encoding/json` base64-encodes each byte
+slice to at most 349,528 bytes, or 699,056 bytes together, before the remaining
+source fields are added. A 4 KiB reason can occupy at most 24,576 bytes after
+`encoding/json` escapes its text. Relay pins kafka-go's client-side
+`BatchBytes` guard at 1,048,576 bytes, so a library default change cannot move
+that bound silently. Kafka 4.3's default `max.message.bytes` value of 1,048,588
+applies to the complete record batch rather than kafka-go's in-memory message
+size. The tested envelope has more than 300 KiB of room under either limit for
+the pinned `apache/kafka:4.3.1` broker. The broker limit and the commands for
+setting or reading a topic override come from the
+[Kafka 4.3 topic configuration](https://kafka.apache.org/43/configuration/topic-configs/#topicconfigs_max.message.bytes).
+A unit test uses an oversized key and a 400 KiB invalid timestamp filled with
+characters that expand sixfold when JSON-escaped. It checks both preserved
+prefixes, their truncation metadata, the bounded reason, and the full kafka-go
+message size including its key, empty header array, and record framing.
+
+Commands run against the compose Kafka broker, relay ingest and deliver
+processes, Postgres subscriptions, and the controlled sink:
+
+```bash
+make up-apps
+make seed
+make smoke
+```
+
+The final smoke run produced an invalid 36-byte value at
+`mlp.relay.deliveries[10]@1821`. It read the matching DLQ record back and
+matched the source coordinates, timestamp, key bytes, key digest, byte counts,
+truncation flags, raw bytes, decode reason, empty tenant, and deterministic DLQ
+key. The same run delivered the healthy subscriber once, exhausted the failing
+subscriber after 3 attempts, read that ordinary dead letter, found one event
+record and row, and matched all 4 attempt-history rows. The relay check took
+937ms. The observability profile was not running, so the optional Tempo
+assertion was off.
+
 ## Rollback
 
 Before M1 ships, reverting is deleting `services/relay`. After it ships,

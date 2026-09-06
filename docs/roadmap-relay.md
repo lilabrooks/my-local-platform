@@ -305,6 +305,13 @@ and remaining pieces culminate in the whole-application local proof
   measurement no more than 30 seconds old on every scraped ingest instance.
   Two `make relay-demo` runs produced 600 events each, raised lag to 593 and
   575, scaled from 1 consumer to 12, drained lag to 0, and returned to 1.
+- **Poison-record dead letters, built 2026-09-05.** Undecodable Kafka records
+  now carry source topic, partition, offset, timestamp, bounded original-key
+  bytes with a full SHA-256 digest, and bounded raw bytes in the DLQ. Their
+  deterministic key comes from broker coordinates rather than an inferred
+  tenant. `make smoke` produced an invalid 36-byte value, read its dead letter
+  back, and matched every source field and byte while the existing
+  exhausted-delivery path still passed.
 - **Delivery attempts persisted, built 2026-09-02.** The audit trail answers
   "did you deliver my webhook?" through `GET /v1/events/{id}/attempts`.
   `make smoke` posted one event to the real local Kafka broker, matched the

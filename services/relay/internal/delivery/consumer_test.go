@@ -3,6 +3,7 @@ package delivery
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,10 +123,9 @@ func (f *fakeDLQ) WriteMessages(_ context.Context, msgs ...kafka.Message) error 
 
 func (f *fakeDLQ) letters(t *testing.T) []DeadLetter {
 	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]DeadLetter, 0, len(f.got))
-	for _, m := range f.got {
+	messages := f.messages()
+	out := make([]DeadLetter, 0, len(messages))
+	for _, m := range messages {
 		var dl DeadLetter
 		if err := json.Unmarshal(m.Value, &dl); err != nil {
 			t.Fatalf("dead letter is not decodable: %v", err)
@@ -133,6 +133,12 @@ func (f *fakeDLQ) letters(t *testing.T) []DeadLetter {
 		out = append(out, dl)
 	}
 	return out
+}
+
+func (f *fakeDLQ) messages() []kafka.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]kafka.Message(nil), f.got...)
 }
 
 type fakeSubs struct {
@@ -337,6 +343,17 @@ func TestExhaustedDeliveryIsDeadLetteredThenCommitted(t *testing.T) {
 	}
 	if dl.Reason == "" {
 		t.Error("dead letter has no reason; whoever reads this later needs one")
+	}
+	messages := dlq.messages()
+	if !bytes.Equal(messages[0].Key, rec.Key()) {
+		t.Errorf("dead-letter key = %q, want tenant key %q", messages[0].Key, rec.Key())
+	}
+	var encoded map[string]json.RawMessage
+	if err := json.Unmarshal(messages[0].Value, &encoded); err != nil {
+		t.Fatalf("decode serialized dead letter: %v", err)
+	}
+	if _, present := encoded["source"]; present {
+		t.Error("ordinary exhausted-delivery dead letter gained a source field")
 	}
 	// Only after the failure is recorded may the offset advance.
 	if got := r.commits(); got != 1 {
@@ -802,7 +819,15 @@ func TestOneFailingSubscriberDoesNotBlockAHealthyOne(t *testing.T) {
 func TestUndecodableRecordIsParkedAndCommitted(t *testing.T) {
 	t.Parallel()
 
-	r := &fakeReader{queue: []kafka.Message{{Partition: 1, Offset: 9, Value: []byte(`{not json`)}}}
+	source := kafka.Message{
+		Topic:     "mlp.relay.deliveries",
+		Partition: 1,
+		Offset:    9,
+		Time:      time.Date(2026, 9, 5, 18, 30, 0, 123000000, time.UTC),
+		Key:       []byte("original-key"),
+		Value:     []byte{0xff, '{', 'n', 'o', 't', ' ', 'j', 's', 'o', 'n'},
+	}
+	r := &fakeReader{queue: []kafka.Message{source}}
 	dlq := &fakeDLQ{}
 	c := newConsumer(t, r, dlq, fakeSubs{})
 
@@ -816,8 +841,145 @@ func TestUndecodableRecordIsParkedAndCommitted(t *testing.T) {
 	if !strings.Contains(letters[0].Reason, "undecodable") {
 		t.Errorf("reason = %q, want it to say the record was undecodable", letters[0].Reason)
 	}
+	dl := letters[0]
+	if dl.Source == nil {
+		t.Fatal("undecodable dead letter has no source identity")
+	}
+	if dl.Source.Topic != source.Topic || dl.Source.Partition != source.Partition || dl.Source.Offset != source.Offset ||
+		!dl.Source.Timestamp.Equal(source.Time) {
+		t.Errorf("source identity = %+v, want topic=%q partition=%d offset=%d timestamp=%s",
+			dl.Source, source.Topic, source.Partition, source.Offset, source.Time)
+	}
+	if !bytes.Equal(dl.Source.Key, source.Key) || !bytes.Equal(dl.Source.RawValue, source.Value) {
+		t.Errorf("source key/value = %q/%v, want %q/%v", dl.Source.Key, dl.Source.RawValue, source.Key, source.Value)
+	}
+	wantKeyHash := sha256.Sum256(source.Key)
+	if dl.Source.KeySHA256 != fmt.Sprintf("%x", wantKeyHash) ||
+		dl.Source.OriginalKeyBytes != len(source.Key) || dl.Source.KeyTruncated {
+		t.Errorf("source key metadata = hash %q bytes %d truncated=%t, want %x %d false",
+			dl.Source.KeySHA256, dl.Source.OriginalKeyBytes, dl.Source.KeyTruncated,
+			wantKeyHash, len(source.Key))
+	}
+	if dl.Source.OriginalValueBytes != len(source.Value) || dl.Source.RawValueTruncated {
+		t.Errorf("source byte metadata = %d truncated=%t, want %d false",
+			dl.Source.OriginalValueBytes, dl.Source.RawValueTruncated, len(source.Value))
+	}
+	if dl.Record.TenantID != "" {
+		t.Errorf("poison record inferred tenant %q from invalid bytes", dl.Record.TenantID)
+	}
+	messages := dlq.messages()
+	wantKey := []byte("poison:mlp.relay.deliveries:1:9")
+	if !bytes.Equal(messages[0].Key, wantKey) {
+		t.Errorf("poison dead-letter key = %q, want deterministic key %q", messages[0].Key, wantKey)
+	}
+	var serialized struct {
+		Source map[string]json.RawMessage `json:"source"`
+	}
+	if err := json.Unmarshal(messages[0].Value, &serialized); err != nil {
+		t.Fatalf("decode serialized poison dead letter: %v", err)
+	}
+	wantSourceFields := []string{
+		"topic", "partition", "offset", "timestamp", "key", "key_sha256",
+		"original_key_bytes", "key_truncated", "raw_value",
+		"original_value_bytes", "raw_value_truncated",
+	}
+	if len(serialized.Source) != len(wantSourceFields) {
+		t.Errorf("serialized source fields = %v, want exactly %v", serialized.Source, wantSourceFields)
+	}
+	for _, field := range wantSourceFields {
+		if _, present := serialized.Source[field]; !present {
+			t.Errorf("serialized source is missing %q", field)
+		}
+	}
 	if got := r.commits(); got != 1 {
 		t.Errorf("committed %d times, want 1 -- a poison record must not block the partition", got)
+	}
+}
+
+func TestUndecodableDLQFailureBlocksTheCommit(t *testing.T) {
+	t.Parallel()
+
+	r := &fakeReader{queue: []kafka.Message{{
+		Topic: "mlp.relay.deliveries", Partition: 1, Offset: 9, Value: []byte(`{"broken":`),
+	}}}
+	dlq := &fakeDLQ{fail: errors.New("dlq broker unreachable")}
+	c := newConsumer(t, r, dlq, fakeSubs{})
+
+	if err := c.Run(context.Background()); err == nil {
+		t.Fatal("Run returned nil when the poison dead-letter write failed")
+	}
+	if got := r.commits(); got != 0 {
+		t.Errorf("committed %d times after a failed poison dead-letter write, want 0", got)
+	}
+}
+
+func TestBoundedCopyPreservesNilAndEmpty(t *testing.T) {
+	t.Parallel()
+
+	nilCopy, nilTruncated := boundedCopy(nil, 1)
+	if nilCopy != nil || nilTruncated {
+		t.Errorf("nil copy = %#v truncated=%t, want nil false", nilCopy, nilTruncated)
+	}
+	emptyCopy, emptyTruncated := boundedCopy([]byte{}, 1)
+	if emptyCopy == nil || len(emptyCopy) != 0 || emptyTruncated {
+		t.Errorf("empty copy = %#v truncated=%t, want non-nil empty false", emptyCopy, emptyTruncated)
+	}
+}
+
+func TestUndecodableEnvelopeIsBoundedBelowTheKafkaWriterLimit(t *testing.T) {
+	t.Parallel()
+
+	key := bytes.Repeat([]byte{'k'}, maxUndecodableKeyBytes+1)
+	// time.Time's JSON decoder includes the invalid timestamp twice in its
+	// error. This input caught the unbounded reason that a flat invalid byte
+	// string missed.
+	raw := []byte(`{"occurred_at":"` + strings.Repeat("<", 400*1024) + `"}`)
+	r := &fakeReader{queue: []kafka.Message{{
+		Topic: "mlp.relay.deliveries", Partition: 11, Offset: 99,
+		Key: key, Value: raw,
+	}}}
+	dlq := &fakeDLQ{}
+	c := newConsumer(t, r, dlq, fakeSubs{})
+
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	letters := dlq.letters(t)
+	if len(letters) != 1 || letters[0].Source == nil {
+		t.Fatalf("dead letters = %+v, want one poison source", letters)
+	}
+	source := letters[0].Source
+	if len(source.Key) != maxUndecodableKeyBytes || !bytes.Equal(source.Key, key[:maxUndecodableKeyBytes]) {
+		t.Errorf("bounded source key is %d bytes and does not preserve the expected prefix", len(source.Key))
+	}
+	wantKeyHash := sha256.Sum256(key)
+	if source.KeySHA256 != fmt.Sprintf("%x", wantKeyHash) ||
+		source.OriginalKeyBytes != len(key) || !source.KeyTruncated {
+		t.Errorf("source key metadata = hash %q bytes %d truncated=%t, want %x %d true",
+			source.KeySHA256, source.OriginalKeyBytes, source.KeyTruncated, wantKeyHash, len(key))
+	}
+	if len(source.RawValue) != maxUndecodableValueBytes {
+		t.Errorf("raw bytes = %d, want cap %d", len(source.RawValue), maxUndecodableValueBytes)
+	}
+	if !bytes.Equal(source.RawValue, raw[:maxUndecodableValueBytes]) {
+		t.Error("bounded raw value does not preserve the source prefix byte for byte")
+	}
+	if source.OriginalValueBytes != len(raw) || !source.RawValueTruncated {
+		t.Errorf("source byte metadata = %d truncated=%t, want %d true",
+			source.OriginalValueBytes, source.RawValueTruncated, len(raw))
+	}
+	if len(letters[0].Reason) > maxDecodeReasonBytes || !strings.HasSuffix(letters[0].Reason, decodeReasonSuffix) {
+		t.Errorf("decode reason = %d bytes, want at most %d bytes ending %q",
+			len(letters[0].Reason), maxDecodeReasonBytes, decodeReasonSuffix)
+	}
+	// kafka-go v0.4.51's Message.totalSize is the key, value, 22 bytes from
+	// Message.size, and 1 byte for the empty header array. WriteMessages rejects
+	// a record above BatchBytes before contacting Kafka.
+	const kafkaGoMessageFramingBytes = 23
+	message := dlq.messages()[0]
+	if got := len(message.Key) + len(message.Value) + kafkaGoMessageFramingBytes; got > int(MaxDLQBatchBytes) {
+		t.Errorf("encoded dead-letter message = %d bytes, want at most kafka-go BatchBytes %d",
+			got, MaxDLQBatchBytes)
 	}
 }
 
