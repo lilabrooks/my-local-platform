@@ -409,20 +409,26 @@ at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
 
 1. Settle the topology, identity, cost, evidence, and teardown contract in
    [#91](https://github.com/lilabrooks/my-local-platform/issues/91).
-2. Add the locally testable MSK IAM transport in
-   [#92](https://github.com/lilabrooks/my-local-platform/issues/92).
-3. Add the opt-in Terraform runtime, with every hourly resource disabled by
-   default, in
-   [#93](https://github.com/lilabrooks/my-local-platform/issues/93).
-4. Render the AWS relay deployment and evidence stack in
+2. Complete the three locally testable foundation items, which can proceed in
+   parallel after #91:
+
+   - add the MSK IAM transport in
+     [#92](https://github.com/lilabrooks/my-local-platform/issues/92);
+   - add the opt-in Terraform runtime, with every hourly resource disabled by
+     default, in
+     [#93](https://github.com/lilabrooks/my-local-platform/issues/93); and
+   - derive relay's drain budgets from its executable shutdown sequences in
+     [#101](https://github.com/lilabrooks/my-local-platform/issues/101).
+
+3. Render the AWS relay deployment and evidence stack in
    [#94](https://github.com/lilabrooks/my-local-platform/issues/94).
-5. Rehearse the deployment, demonstration, evidence capture, abort path, and
+4. Rehearse the deployment, demonstration, evidence capture, abort path, and
    cleanup locally in
    [#95](https://github.com/lilabrooks/my-local-platform/issues/95).
-6. With separate owner authority, stage the cheap AWS tier, immutable images,
+5. With separate owner authority, stage the cheap AWS tier, immutable images,
    budget protection, and reviewed plan in
    [#96](https://github.com/lilabrooks/my-local-platform/issues/96).
-7. With a new owner authorization for the expensive apply, run the brief live
+6. With a new owner authorization for the expensive apply, run the brief live
    validation and destroy it in
    [#97](https://github.com/lilabrooks/my-local-platform/issues/97).
 
@@ -442,12 +448,13 @@ across that sequence:
 | Session | three hours, destroy begins at 2 hours 30 minutes, $1.25/hour shape gate, $5 maximum |
 | Terminal condition | success or failure runs state-backed destroy, service-native empty inventories, and a settled cost capture |
 
-Each child issue consumes the preceding artifact: issue #92 proves IAM
-transport, issue #93 produces guarded Terraform, issue #94 renders the
-workload, issue #95 rehearses the whole runbook locally, issue #96 stages
-immutable images and the reviewed plan, and issue #97 performs the separately
-authorized paid run. A change to the table returns to the owner before it
-enters a plan.
+The three foundation issues consume #91 independently: issue #92 proves IAM
+transport, issue #93 produces guarded Terraform, and issue #101 makes shutdown
+execution and drain accounting share one definition. Issue #94 consumes all
+three artifacts to render the workload. Issue #95 then rehearses the whole
+runbook locally, issue #96 stages immutable images and the reviewed plan, and
+issue #97 performs the separately authorized paid run. A change to the table
+returns to the owner before it enters a plan.
 
 The one thing the local stack structurally cannot teach: MSK Serverless supports
 **IAM authentication only** -- no SASL/SCRAM -- so this is SASL_SSL with

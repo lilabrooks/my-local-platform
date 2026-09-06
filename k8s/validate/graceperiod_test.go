@@ -2,6 +2,7 @@ package validate
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,12 @@ import (
 // below catches a record deadline raised past that grace period. Together they
 // prove schedule worst case < record deadline < termination grace period.
 func TestDeliveryScheduleFitsInsideRecordDeadlineAndGracePeriod(t *testing.T) {
+	recordDeadline, ok := config.ShutdownStepTimeout(
+		config.DeliverShutdownSequence(), config.ShutdownDeliverRecordDrain,
+	)
+	if !ok {
+		t.Fatal("relay-deliver shutdown sequence has no record-drain step")
+	}
 	checked := 0
 
 	for _, dir := range manifestDirs(t) {
@@ -90,7 +97,7 @@ func TestDeliveryScheduleFitsInsideRecordDeadlineAndGracePeriod(t *testing.T) {
 				// crashloop: relay refuses to start on a schedule it cannot
 				// outlive, and nothing else here would notice until the pod
 				// was already restarting.
-				if err := schedule.ValidateStallBudget(config.DefaultStallBudget, attemptTimeout); err != nil {
+				if err := schedule.ValidateStallBudget(recordDeadline, attemptTimeout); err != nil {
 					t.Errorf("%s would not start: %v", name(deploy), err)
 					continue
 				}
@@ -205,9 +212,9 @@ func gracePeriod(podSpec map[string]any) (time.Duration, error) {
 // pass.
 //
 // Every ordered cleanup step counts, not just the record work, and both relay
-// modes have one. config.DeliverDrainBudget and config.IngestDrainBudget are
-// the sums; this test's job is to hold each manifest above the sum for the mode
-// it runs.
+// modes have one. The config package exposes those sequences to the runtime and
+// this validator, so this test derives each total from the same ordered steps
+// the process executes.
 //
 // Two review rounds on 2026-09-03 each found a term missing from those sums --
 // first the OTLP flush, then the Kafka and pool closes, which had no deadline
@@ -221,14 +228,10 @@ func gracePeriod(podSpec map[string]any) (time.Duration, error) {
 // which is why each manifest also carries slack above its budget.
 func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 	modes := map[string]struct {
-		budget time.Duration
-		terms  string
+		sequence []config.ShutdownStep
 	}{
-		"deliver": {config.DeliverDrainBudget(),
-			"record work, interrupted-attempt history write, health-server shutdown, " +
-				"broker and pool closes, trace flush"},
-		"ingest": {config.IngestDrainBudget(),
-			"readiness grace, HTTP server shutdown, broker and pool closes, trace flush"},
+		"deliver": {config.DeliverShutdownSequence()},
+		"ingest":  {config.IngestShutdownSequence()},
 	}
 	checked := map[string]int{}
 
@@ -258,13 +261,18 @@ func TestStallBudgetFitsInsideTheGracePeriod(t *testing.T) {
 				continue
 			}
 			checked[mode]++
-			if want.budget >= grace {
+			budget := config.ShutdownDrainBudget(want.sequence)
+			terms := make([]string, 0, len(want.sequence))
+			for _, step := range want.sequence {
+				terms = append(terms, step.Description)
+			}
+			if budget >= grace {
 				t.Errorf("%s (RELAY_MODE=%s) has terminationGracePeriodSeconds=%v but its drain "+
 					"budget is %v -- the sum of %s.\n"+
 					"Work that uses all of it must finish before SIGKILL. Raise the grace period "+
 					"above %v, or lower one of the budgets in relay's config package.\n"+
 					"See docs/adr/0006-kafka-over-sqs-for-delivery.md.",
-					name(deploy), mode, grace, want.budget, want.terms, want.budget)
+					name(deploy), mode, grace, budget, strings.Join(terms, ", "), budget)
 			}
 		}
 	}

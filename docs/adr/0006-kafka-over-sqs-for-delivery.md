@@ -254,13 +254,12 @@ actually runs:
   dead-letter production and offset commit.
 - **Bounded shutdown drain.** On SIGTERM the consumer fails readiness and stops
   fetching, then lets its current record finish under the same 30s deadline.
-  Four more bounded steps follow it -- an interrupted attempt's history write,
-  the health server's shutdown, the broker and pool closes, and the trace
-  flush -- summing to `config.DeliverDrainBudget`, 48s.
-  `terminationGracePeriodSeconds` is 60s. `k8s/validate` checks both
-  inequalities against that sum rather than against the record deadline alone;
-  it was 45s and 35s until 2026-09-03, when review found two shutdown steps
-  missing from the sum, one of which had no deadline at all.
+  The complete ordered sequence is defined once in `relay/config` and sums to
+  `config.DeliverDrainBudget`, 48s. Runtime execution and `k8s/validate` consume
+  that same definition. `terminationGracePeriodSeconds` is 60s. The validator
+  checks both inequalities against the derived sum rather than against the
+  record deadline alone; it was 45s and 35s until 2026-09-03, when review found
+  two shutdown steps missing from the sum, one of which had no deadline at all.
 
 The 30s value is an explicit policy judgment. No measured delivery SLO exists
 yet. Its checkable basis is narrower: the 25s deployed schedule fits inside it,

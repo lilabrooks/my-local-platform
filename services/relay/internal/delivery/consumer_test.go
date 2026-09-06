@@ -197,7 +197,7 @@ func newConsumer(t *testing.T, r Reader, dlq Producer, subs SubscriptionSource) 
 	if err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	d := NewDeliverer(s, 2*time.Second, nil)
+	d := NewDeliverer(s, 2*time.Second, config.InterruptedAttemptWriteTimeout, nil)
 	d.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return NewConsumer(r, dlq, subs, d, 30*time.Second, slog.New(slog.DiscardHandler))
 }
