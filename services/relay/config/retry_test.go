@@ -7,6 +7,78 @@ import (
 	"time"
 )
 
+func TestShutdownSequencesDefineOrderAndBudgets(t *testing.T) {
+	tests := map[string]struct {
+		sequence  []ShutdownStep
+		wantIDs   []ShutdownStepID
+		wantTotal time.Duration
+		budget    time.Duration
+	}{
+		"deliver": {
+			sequence: DeliverShutdownSequence(),
+			wantIDs: []ShutdownStepID{
+				ShutdownDeliverRecordDrain,
+				ShutdownDeliverInterruptedAttemptWrite,
+				ShutdownHealthServer,
+				ShutdownResourceClose,
+				ShutdownTraceFlush,
+			},
+			wantTotal: 48 * time.Second,
+			budget:    DeliverDrainBudget(),
+		},
+		"ingest": {
+			sequence: IngestShutdownSequence(),
+			wantIDs: []ShutdownStepID{
+				ShutdownIngestReadinessGrace,
+				ShutdownIngestHTTPServer,
+				ShutdownResourceClose,
+				ShutdownTraceFlush,
+			},
+			wantTotal: 31 * time.Second,
+			budget:    IngestDrainBudget(),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if len(tc.sequence) != len(tc.wantIDs) {
+				t.Fatalf("sequence has %d steps, want %d", len(tc.sequence), len(tc.wantIDs))
+			}
+			for i, want := range tc.wantIDs {
+				if tc.sequence[i].ID != want {
+					t.Errorf("step %d = %q, want %q", i, tc.sequence[i].ID, want)
+				}
+				if tc.sequence[i].Timeout <= 0 {
+					t.Errorf("step %q has non-positive timeout %v", want, tc.sequence[i].Timeout)
+				}
+				if tc.sequence[i].Description == "" {
+					t.Errorf("step %q has no validator description", want)
+				}
+			}
+			if got := ShutdownDrainBudget(tc.sequence); got != tc.wantTotal {
+				t.Errorf("ShutdownDrainBudget = %v, want %v", got, tc.wantTotal)
+			}
+			if tc.budget != tc.wantTotal {
+				t.Errorf("mode budget = %v, want %v", tc.budget, tc.wantTotal)
+			}
+		})
+	}
+}
+
+func TestShutdownSequenceCopiesCannotChangeAccounting(t *testing.T) {
+	sequence := DeliverShutdownSequence()
+	sequence[0].Timeout = 24 * time.Hour
+	sequence[0].Description = "mutated"
+
+	fresh := DeliverShutdownSequence()
+	if fresh[0].Timeout != DefaultStallBudget || fresh[0].Description == "mutated" {
+		t.Fatalf("returned sequence aliases canonical accounting: %+v", fresh[0])
+	}
+	if got, want := DeliverDrainBudget(), 48*time.Second; got != want {
+		t.Errorf("DeliverDrainBudget after caller mutation = %v, want %v", got, want)
+	}
+}
+
 func TestParseRetrySchedulePresets(t *testing.T) {
 	t.Parallel()
 

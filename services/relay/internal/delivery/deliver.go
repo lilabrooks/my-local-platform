@@ -47,8 +47,9 @@ type AttemptRecorder interface {
 // Deliverer sends one event to one subscriber, retrying on the configured
 // schedule until it succeeds or the budget is spent.
 type Deliverer struct {
-	client   *http.Client
-	schedule config.RetrySchedule
+	client                  *http.Client
+	schedule                config.RetrySchedule
+	interruptedWriteTimeout time.Duration
 	// timeout bounds a single attempt. The schedule and this together are what
 	// ValidateStallBudget checks against the stall budget.
 	timeout  time.Duration
@@ -60,7 +61,12 @@ type Deliverer struct {
 
 // NewDeliverer builds a Deliverer. The schedule must already have passed
 // ValidateStallBudget.
-func NewDeliverer(schedule config.RetrySchedule, timeout time.Duration, recorder AttemptRecorder) *Deliverer {
+func NewDeliverer(
+	schedule config.RetrySchedule,
+	timeout time.Duration,
+	interruptedWriteTimeout time.Duration,
+	recorder AttemptRecorder,
+) *Deliverer {
 	return &Deliverer{
 		client: &http.Client{
 			// No shared timeout: each attempt gets its own context, so a
@@ -75,10 +81,11 @@ func NewDeliverer(schedule config.RetrySchedule, timeout time.Duration, recorder
 				return http.ErrUseLastResponse
 			},
 		},
-		schedule: schedule,
-		timeout:  timeout,
-		recorder: recorder,
-		sleep:    sleepCtx,
+		schedule:                schedule,
+		timeout:                 timeout,
+		interruptedWriteTimeout: interruptedWriteTimeout,
+		recorder:                recorder,
+		sleep:                   sleepCtx,
 	}
 }
 
@@ -117,6 +124,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // claim is corrected here rather than quietly dropped. See issue #69 and the
 // backlog entry for what is being lived with and what would change it.
 func (d *Deliverer) Deliver(ctx context.Context, sub subscriptions.Subscription, rec event.Record) (Outcome, error) {
+	if d.interruptedWriteTimeout <= 0 {
+		return Outcome{}, fmt.Errorf("interrupted attempt write timeout %s must be positive", d.interruptedWriteTimeout)
+	}
 	body, err := event.EncodePayload(rec.Payload())
 	if err != nil {
 		// A record that cannot be marshalled will never deliver, so retrying
@@ -253,7 +263,7 @@ func (d *Deliverer) recordAttempt(
 	recordCtx := ctx
 	if outcome == history.OutcomeInterrupted {
 		var cancel context.CancelFunc
-		recordCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), config.InterruptedAttemptWriteTimeout)
+		recordCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), d.interruptedWriteTimeout)
 		defer cancel()
 	}
 	record := history.Attempt{

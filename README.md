@@ -118,10 +118,12 @@ Current state:
   window, $5 maximum, evidence set, and mandatory destroy path are in
   [ADR 0010](docs/adr/0010-live-aws-relay-contract.md) and the
   [AWS relay runbook](docs/runbook-aws-relay.md).
-- [Issue #92](https://github.com/lilabrooks/my-local-platform/issues/92) is
-  complete; it added the locally tested MSK IAM transport. #93 and #101 are the
-  remaining parallel M4 foundation work before the rendered deployment in #94.
-  The later AWS run remains rehearsed, short-lived, and separately authorized.
+- [Issues #92](https://github.com/lilabrooks/my-local-platform/issues/92),
+  [#93](https://github.com/lilabrooks/my-local-platform/issues/93), and
+  [#101](https://github.com/lilabrooks/my-local-platform/issues/101) complete
+  M4's locally testable foundation. The rendered deployment in
+  [#94](https://github.com/lilabrooks/my-local-platform/issues/94) is next. The
+  later AWS run remains rehearsed, short-lived, and separately authorized.
 - The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
   RDS, and MSK validation remains future work.
 

@@ -90,9 +90,15 @@ func newTestDeliverer(t *testing.T, spec string) *Deliverer {
 	if err != nil {
 		t.Fatalf("parse schedule: %v", err)
 	}
-	d := NewDeliverer(s, 2*time.Second, nil)
+	d := NewDeliverer(s, 2*time.Second, config.InterruptedAttemptWriteTimeout, nil)
 	d.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return d
+}
+
+type attemptRecorderFunc func(context.Context, string, history.Attempt) error
+
+func (f attemptRecorderFunc) RecordAttempt(ctx context.Context, eventID string, attempt history.Attempt) error {
+	return f(ctx, eventID, attempt)
 }
 
 func TestDeliverSucceedsFirstTry(t *testing.T) {
@@ -322,6 +328,21 @@ func TestDeliverStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestDeliverRejectsNonPositiveInterruptedWriteTimeout(t *testing.T) {
+	t.Parallel()
+
+	schedule, err := config.ParseRetrySchedule("1s", false)
+	if err != nil {
+		t.Fatalf("parse schedule: %v", err)
+	}
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		deliverer := NewDeliverer(schedule, 2*time.Second, timeout, nil)
+		if _, err := deliverer.Deliver(context.Background(), subscriptions.Subscription{}, testRecord()); err == nil {
+			t.Errorf("interrupted write timeout %v was accepted", timeout)
+		}
+	}
+}
+
 func TestInterruptedAttemptIsRecordedWithDetachedContext(t *testing.T) {
 	t.Parallel()
 
@@ -349,6 +370,45 @@ func TestInterruptedAttemptIsRecordedWithDetachedContext(t *testing.T) {
 	if recorded[0].attempt.Outcome != history.OutcomeInterrupted ||
 		recorded[0].attempt.TransportError == "" {
 		t.Errorf("interrupted attempt = %+v, want transport error and interrupted outcome", recorded[0])
+	}
+}
+
+func TestInterruptedAttemptUsesConfiguredWriteTimeout(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	schedule, err := config.ParseRetrySchedule("1s", false)
+	if err != nil {
+		t.Fatalf("parse schedule: %v", err)
+	}
+	const writeTimeout = 500 * time.Millisecond
+	observed := make(chan time.Duration, 1)
+	recorder := attemptRecorderFunc(func(ctx context.Context, _ string, _ history.Attempt) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			observed <- 0
+			return nil
+		}
+		observed <- time.Until(deadline)
+		return nil
+	})
+	deliverer := NewDeliverer(schedule, 2*time.Second, writeTimeout, recorder)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	_, err = deliverer.Deliver(ctx,
+		subscriptions.Subscription{ID: 1, URL: srv.URL, Secret: "s"}, testRecord())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Deliver error = %v, want context deadline exceeded", err)
+	}
+	remaining := <-observed
+	if remaining <= writeTimeout/2 || remaining > writeTimeout {
+		t.Errorf("detached history deadline had %v remaining, want a fresh %v budget", remaining, writeTimeout)
 	}
 }
 

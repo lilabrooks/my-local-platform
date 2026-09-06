@@ -155,6 +155,73 @@ const (
 	IngestServerShutdownTimeout = IngestAcceptanceTimeout + 5*time.Second
 )
 
+// ShutdownStepID identifies one bounded part of a relay shutdown. The IDs are
+// consumed by the runtime as well as the manifest validator; their order is
+// the order in which the process performs the work.
+type ShutdownStepID string
+
+const (
+	ShutdownDeliverRecordDrain             ShutdownStepID = "deliver-record-drain"
+	ShutdownDeliverInterruptedAttemptWrite ShutdownStepID = "deliver-interrupted-attempt-write"
+	ShutdownIngestReadinessGrace           ShutdownStepID = "ingest-readiness-grace"
+	ShutdownIngestHTTPServer               ShutdownStepID = "ingest-http-server"
+	ShutdownHealthServer                   ShutdownStepID = "health-server"
+	ShutdownResourceClose                  ShutdownStepID = "resource-close"
+	ShutdownTraceFlush                     ShutdownStepID = "trace-flush"
+)
+
+// ShutdownStep is one entry in a mode's ordered shutdown sequence.
+type ShutdownStep struct {
+	ID          ShutdownStepID
+	Description string
+	Timeout     time.Duration
+}
+
+var deliverShutdownSequence = []ShutdownStep{
+	{ShutdownDeliverRecordDrain, "record work", DefaultStallBudget},
+	{ShutdownDeliverInterruptedAttemptWrite, "interrupted-attempt history write", InterruptedAttemptWriteTimeout},
+	{ShutdownHealthServer, "health-server shutdown", HealthShutdownTimeout},
+	{ShutdownResourceClose, "broker and pool closes", ResourceCloseTimeout},
+	{ShutdownTraceFlush, "trace flush", TraceFlushTimeout},
+}
+
+var ingestShutdownSequence = []ShutdownStep{
+	{ShutdownIngestReadinessGrace, "readiness grace", IngestReadinessGrace},
+	{ShutdownIngestHTTPServer, "HTTP server shutdown", IngestServerShutdownTimeout},
+	{ShutdownResourceClose, "broker and pool closes", ResourceCloseTimeout},
+	{ShutdownTraceFlush, "trace flush", TraceFlushTimeout},
+}
+
+// DeliverShutdownSequence returns relay-deliver's ordered shutdown steps.
+// The copy keeps the package's executable definition immutable to callers.
+func DeliverShutdownSequence() []ShutdownStep {
+	return append([]ShutdownStep(nil), deliverShutdownSequence...)
+}
+
+// IngestShutdownSequence returns relay-ingest's ordered shutdown steps.
+func IngestShutdownSequence() []ShutdownStep {
+	return append([]ShutdownStep(nil), ingestShutdownSequence...)
+}
+
+// ShutdownStepTimeout finds one step's bound in a shutdown sequence.
+func ShutdownStepTimeout(sequence []ShutdownStep, id ShutdownStepID) (time.Duration, bool) {
+	for _, step := range sequence {
+		if step.ID == id {
+			return step.Timeout, true
+		}
+	}
+	return 0, false
+}
+
+// ShutdownDrainBudget adds every bound in an ordered shutdown sequence.
+func ShutdownDrainBudget(sequence []ShutdownStep) time.Duration {
+	var total time.Duration
+	for _, step := range sequence {
+		total += step.Timeout
+	}
+	return total
+}
+
 // DeliverDrainBudget is the longest a relay-deliver process can take to exit
 // after SIGTERM, as the sum of every deadline it configures.
 //
@@ -168,16 +235,14 @@ const (
 // It bounds the deadlines relay sets. It cannot bound a syscall that never
 // returns, so the manifest's slack above this number is not decoration.
 func DeliverDrainBudget() time.Duration {
-	return DefaultStallBudget + InterruptedAttemptWriteTimeout +
-		HealthShutdownTimeout + ResourceCloseTimeout + TraceFlushTimeout
+	return ShutdownDrainBudget(deliverShutdownSequence)
 }
 
 // IngestDrainBudget is the same sum for relay-ingest, which has no record
 // deadline: it stops advertising readiness, drains in-flight HTTP requests,
 // closes the Kafka writer and pool, and flushes traces.
 func IngestDrainBudget() time.Duration {
-	return IngestReadinessGrace + IngestServerShutdownTimeout +
-		ResourceCloseTimeout + TraceFlushTimeout
+	return ShutdownDrainBudget(ingestShutdownSequence)
 }
 
 // ErrEmptySchedule is returned for a schedule with no delays in it. A zero

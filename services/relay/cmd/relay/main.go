@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,17 +37,6 @@ import (
 
 // Set at build time: -ldflags "-X main.version=..."
 var version = "dev"
-
-// These two were one constant until 2026-08-31, and collapsing them is what
-// produced a wrong rationale that survived two corrections. They are 30s each
-// by coincidence, not derivation, and they bound unrelated things.
-
-// stallBudget is the longest one record may occupy this consumer. Service
-// policy: head-of-line delay across every partition the member owns, and the
-// pod's termination grace period, which must also contain every shutdown step
-// that follows the drain -- see config.DeliverDrainBudget. Defined in config so
-// k8s/validate checks manifests against the same values.
-const stallBudget = config.DefaultStallBudget
 
 // rebalanceTimeout is the Kafka protocol field of that name -- how long the
 // coordinator waits for members to send JoinGroup during a rebalance. It has
@@ -69,6 +59,33 @@ func run(log *slog.Logger) error {
 	if mode != "ingest" && mode != "deliver" {
 		return fmt.Errorf("RELAY_MODE %q is not one of: ingest, deliver", mode)
 	}
+	sequence := config.IngestShutdownSequence()
+	if mode == "deliver" {
+		sequence = config.DeliverShutdownSequence()
+	}
+	resourceTimeout, err := shutdownStepTimeout(sequence, config.ShutdownResourceClose)
+	if err != nil {
+		return err
+	}
+	traceTimeout, err := shutdownStepTimeout(sequence, config.ShutdownTraceFlush)
+	if err != nil {
+		return err
+	}
+	deliverRecordBudget, err := shutdownStepTimeout(
+		config.DeliverShutdownSequence(), config.ShutdownDeliverRecordDrain,
+	)
+	if err != nil {
+		return err
+	}
+	var interruptedWriteTimeout time.Duration
+	if mode == "deliver" {
+		interruptedWriteTimeout, err = shutdownStepTimeout(
+			sequence, config.ShutdownDeliverInterruptedAttemptWrite,
+		)
+		if err != nil {
+			return err
+		}
+	}
 
 	// Validated in every mode, not just deliver. Both Deployments read the
 	// same ConfigMap, so a typo should stop the rollout rather than pass in
@@ -84,14 +101,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("RELAY_DELIVERY_TIMEOUT: %w", err)
 	}
-	if err := schedule.ValidateStallBudget(stallBudget, attemptTimeout); err != nil {
+	if err := schedule.ValidateStallBudget(deliverRecordBudget, attemptTimeout); err != nil {
 		return err
 	}
 	log.Info("retry schedule",
 		"schedule", schedule.String(),
 		"attempt_timeout", attemptTimeout,
 		"worst_case_per_record", schedule.WorstCase(attemptTimeout),
-		"stall_budget", stallBudget)
+		"stall_budget", deliverRecordBudget)
 
 	kafkaConnection, err := kafkatransport.New(
 		context.Background(),
@@ -112,28 +129,138 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("initialize tracing: %w", err)
 	}
-	// Runs last of every shutdown step, so its bound is the final term in the
-	// drain budget k8s/validate checks against terminationGracePeriodSeconds.
-	// An unreachable collector spends all of it; see config.TraceFlushTimeout.
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), config.TraceFlushTimeout)
-		defer cancel()
-		if err := shutdownTracing(ctx); err != nil {
-			log.Error("flush traces", "error", err)
-		}
-	}()
+	var traceOnce sync.Once
+	shutdownTrace := func(timeout time.Duration) error {
+		traceOnce.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				log.Error("flush traces", "error", err)
+			}
+		})
+		return nil
+	}
+	// Mode runners invoke this as their final canonical shutdown action. The
+	// defer is a fallback for setup failures before that sequence can start.
+	defer func() { _ = shutdownTrace(traceTimeout) }()
 
 	switch mode {
 	case "ingest":
-		return runIngest(log, kafkaConnection)
+		return runIngest(log, kafkaConnection, sequence, resourceTimeout, shutdownTrace)
 	case "deliver":
-		return runDeliver(log, kafkaConnection, schedule, attemptTimeout)
+		return runDeliver(
+			log, kafkaConnection, schedule, attemptTimeout, sequence,
+			resourceTimeout, deliverRecordBudget, interruptedWriteTimeout, shutdownTrace,
+		)
 	}
 	return nil
 }
 
+type shutdownAction struct {
+	steps []config.ShutdownStepID
+	run   func([]config.ShutdownStep) error
+}
+
+func ingestShutdownActions(
+	drainHTTP func([]config.ShutdownStep) error,
+	closeResources func([]config.ShutdownStep) error,
+	shutdownTrace func([]config.ShutdownStep) error,
+) []shutdownAction {
+	return []shutdownAction{
+		{
+			steps: []config.ShutdownStepID{
+				config.ShutdownIngestReadinessGrace,
+				config.ShutdownIngestHTTPServer,
+			},
+			run: drainHTTP,
+		},
+		{
+			steps: []config.ShutdownStepID{config.ShutdownResourceClose},
+			run:   closeResources,
+		},
+		{
+			steps: []config.ShutdownStepID{config.ShutdownTraceFlush},
+			run:   shutdownTrace,
+		},
+	}
+}
+
+func deliverShutdownActions(
+	drainRecord func([]config.ShutdownStep) error,
+	shutdownHealth func([]config.ShutdownStep) error,
+	closeResources func([]config.ShutdownStep) error,
+	shutdownTrace func([]config.ShutdownStep) error,
+) []shutdownAction {
+	return []shutdownAction{
+		{
+			steps: []config.ShutdownStepID{
+				config.ShutdownDeliverRecordDrain,
+				config.ShutdownDeliverInterruptedAttemptWrite,
+			},
+			run: drainRecord,
+		},
+		{
+			steps: []config.ShutdownStepID{config.ShutdownHealthServer},
+			run:   shutdownHealth,
+		},
+		{
+			steps: []config.ShutdownStepID{config.ShutdownResourceClose},
+			run:   closeResources,
+		},
+		{
+			steps: []config.ShutdownStepID{config.ShutdownTraceFlush},
+			run:   shutdownTrace,
+		},
+	}
+}
+
+// executeShutdownSequence verifies the complete execution plan before running
+// it. An action can own adjacent nested steps, but the flattened action IDs
+// must match the configured sequence exactly and in order.
+func executeShutdownSequence(sequence []config.ShutdownStep, actions []shutdownAction) error {
+	offset := 0
+	for actionIndex, action := range actions {
+		if len(action.steps) == 0 {
+			return fmt.Errorf("shutdown action %d owns no steps", actionIndex)
+		}
+		for _, id := range action.steps {
+			if offset >= len(sequence) {
+				return fmt.Errorf("shutdown execution has extra step %q at position %d", id, offset)
+			}
+			if sequence[offset].ID != id {
+				return fmt.Errorf("shutdown step %d is %q in accounting but %q in execution",
+					offset, sequence[offset].ID, id)
+			}
+			offset++
+		}
+	}
+	if offset != len(sequence) {
+		return fmt.Errorf("shutdown execution omits accounting step %q at position %d",
+			sequence[offset].ID, offset)
+	}
+
+	var errs []error
+	offset = 0
+	for _, action := range actions {
+		steps := sequence[offset : offset+len(action.steps)]
+		offset += len(action.steps)
+		if err := action.run(steps); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func shutdownStepTimeout(sequence []config.ShutdownStep, id config.ShutdownStepID) (time.Duration, error) {
+	timeout, ok := config.ShutdownStepTimeout(sequence, id)
+	if !ok {
+		return 0, fmt.Errorf("shutdown sequence has no %q step", id)
+	}
+	return timeout, nil
+}
+
 // closeBounded runs closers in reverse registration order -- the order defer
-// would have used -- and gives up after config.ResourceCloseTimeout.
+// would have used -- and gives up after the supplied sequence timeout.
 //
 // None of what it closes accepts a context. kafka-go's Reader.Close leaves the
 // consumer group, its Writer.Close flushes buffered messages, and
@@ -147,7 +274,7 @@ func run(log *slog.Logger) error {
 // On timeout the goroutine is abandoned rather than waited for. The process is
 // exiting; a goroutine parked on a dead socket outlives it by microseconds, and
 // the alternative is the SIGKILL this is avoiding.
-func closeBounded(log *slog.Logger, closers []func() error) {
+func closeBounded(log *slog.Logger, closers []func() error, timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -157,17 +284,23 @@ func closeBounded(log *slog.Logger, closers []func() error) {
 			}
 		}
 	}()
-	timer := time.NewTimer(config.ResourceCloseTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-done:
 	case <-timer.C:
 		log.Warn("shutdown closes did not finish inside their budget",
-			"budget", config.ResourceCloseTimeout)
+			"budget", timeout)
 	}
 }
 
-func runIngest(log *slog.Logger, kafkaConnection *kafkatransport.Connection) error {
+func runIngest(
+	log *slog.Logger,
+	kafkaConnection *kafkatransport.Connection,
+	sequence []config.ShutdownStep,
+	resourceTimeout time.Duration,
+	shutdownTrace func(time.Duration) error,
+) error {
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	addr := ":" + envOr("PORT", "8080")
 	metrics.BuildInfo.WithLabelValues(version, "ingest").Set(1)
@@ -186,7 +319,12 @@ func runIngest(log *slog.Logger, kafkaConnection *kafkatransport.Connection) err
 		func() error { pool.Close(); return nil },
 		kafkaConnection.Close,
 	}
-	defer func() { closeBounded(log, closers) }()
+	var closeOnce sync.Once
+	closeResources := func(timeout time.Duration) error {
+		closeOnce.Do(func() { closeBounded(log, closers, timeout) })
+		return nil
+	}
+	defer func() { _ = closeResources(resourceTimeout) }()
 	if err := pool.Ping(ctx); err != nil {
 		// Event history must exist before Kafka publication, so an ingest pod
 		// without Postgres cannot serve either API route truthfully.
@@ -248,11 +386,16 @@ func runIngest(log *slog.Logger, kafkaConnection *kafkatransport.Connection) err
 
 	log.Info("listening", "addr", addr, "topic", topic, "brokers", kafkaConnection.Brokers(),
 		"kafka_auth_mode", kafkaConnection.AuthMode(), "mode", "ingest")
-	err = serveUntilShutdown(ctx, log, srv, func() {
-		log.Info("shutdown signal received, failing readiness")
-		server.MarkReady(false)
-		time.Sleep(config.IngestReadinessGrace)
-	})
+	err = executeShutdownSequence(sequence, ingestShutdownActions(
+		func(steps []config.ShutdownStep) error {
+			return serveUntilShutdown(ctx, log, srv, steps[0].Timeout, steps[1].Timeout, func() {
+				log.Info("shutdown signal received, failing readiness")
+				server.MarkReady(false)
+			})
+		},
+		func(steps []config.ShutdownStep) error { return closeResources(steps[0].Timeout) },
+		func(steps []config.ShutdownStep) error { return shutdownTrace(steps[0].Timeout) },
+	))
 	if err != nil {
 		return err
 	}
@@ -276,9 +419,16 @@ func runIngest(log *slog.Logger, kafkaConnection *kafkatransport.Connection) err
 // from under that handler orphans the event anyway, which is the exact outcome
 // the detachment was written to prevent.
 //
-// drain runs after the signal and before the listener closes: it is where
-// readiness is failed and the load balancer given time to notice.
-func serveUntilShutdown(ctx context.Context, log *slog.Logger, srv *http.Server, drain func()) error {
+// drain runs after the signal and before the listener closes. It fails
+// readiness; readinessGrace then gives the load balancer time to notice.
+func serveUntilShutdown(
+	ctx context.Context,
+	log *slog.Logger,
+	srv *http.Server,
+	readinessGrace time.Duration,
+	shutdownTimeout time.Duration,
+	drain func(),
+) error {
 	served := make(chan error, 1)
 	go func() { served <- srv.ListenAndServe() }()
 
@@ -294,7 +444,8 @@ func serveUntilShutdown(ctx context.Context, log *slog.Logger, srv *http.Server,
 	}
 
 	drain()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.IngestServerShutdownTimeout)
+	time.Sleep(readinessGrace)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// A handler outlived the budget. Log it rather than swallow it: the
@@ -302,13 +453,23 @@ func serveUntilShutdown(ctx context.Context, log *slog.Logger, srv *http.Server,
 		// pod's grace period ends shortly after this and waiting longer only
 		// trades a cut-off request for a SIGKILL.
 		log.Error("graceful shutdown did not finish; in-flight requests may be cut off",
-			"error", err, "budget", config.IngestServerShutdownTimeout)
+			"error", err, "budget", shutdownTimeout)
 	}
 	<-served // ErrServerClosed, already sent when the listener closed
 	return nil
 }
 
-func runDeliver(log *slog.Logger, kafkaConnection *kafkatransport.Connection, schedule config.RetrySchedule, attemptTimeout time.Duration) error {
+func runDeliver(
+	log *slog.Logger,
+	kafkaConnection *kafkatransport.Connection,
+	schedule config.RetrySchedule,
+	attemptTimeout time.Duration,
+	sequence []config.ShutdownStep,
+	resourceTimeout time.Duration,
+	recordDrainTimeout time.Duration,
+	interruptedWriteTimeout time.Duration,
+	shutdownTrace func(time.Duration) error,
+) error {
 	metrics.BuildInfo.WithLabelValues(version, "deliver").Set(1)
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	dlqTopic := envOr("RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq")
@@ -329,7 +490,12 @@ func runDeliver(log *slog.Logger, kafkaConnection *kafkatransport.Connection, sc
 		func() error { pool.Close(); return nil },
 		kafkaConnection.Close,
 	}
-	defer func() { closeBounded(log, closers) }()
+	var closeOnce sync.Once
+	closeResources := func(timeout time.Duration) error {
+		closeOnce.Do(func() { closeBounded(log, closers, timeout) })
+		return nil
+	}
+	defer func() { _ = closeResources(resourceTimeout) }()
 	if err := pool.Ping(ctx); err != nil {
 		// Unlike the writer, the subscription store is needed for every
 		// record, so a database that is not there at startup is fatal rather
@@ -382,7 +548,8 @@ func runDeliver(log *slog.Logger, kafkaConnection *kafkatransport.Connection, sc
 
 	consumer := delivery.NewConsumer(
 		reader, dlq, subscriptions.New(pool),
-		delivery.NewDeliverer(schedule, attemptTimeout, history.New(pool)), stallBudget, log,
+		delivery.NewDeliverer(schedule, attemptTimeout, interruptedWriteTimeout, history.New(pool)),
+		recordDrainTimeout, log,
 	)
 
 	// Health endpoints run alongside the consume loop: a consumer has no
@@ -393,15 +560,24 @@ func runDeliver(log *slog.Logger, kafkaConnection *kafkatransport.Connection, sc
 			log.Error("health server", "error", err)
 		}
 	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), config.HealthShutdownTimeout)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
 	log.Info("consuming", "topic", topic, "dlq", dlqTopic, "group", group,
 		"brokers", kafkaConnection.Brokers(), "kafka_auth_mode", kafkaConnection.AuthMode(), "mode", "deliver")
-	return consumer.Run(ctx)
+	return executeShutdownSequence(sequence, deliverShutdownActions(
+		func(steps []config.ShutdownStep) error {
+			if steps[0].Timeout != recordDrainTimeout || steps[1].Timeout != interruptedWriteTimeout {
+				return fmt.Errorf("deliver shutdown bounds changed after consumer construction")
+			}
+			return consumer.Run(ctx)
+		},
+		func(steps []config.ShutdownStep) error {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), steps[0].Timeout)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+			return nil
+		},
+		func(steps []config.ShutdownStep) error { return closeResources(steps[0].Timeout) },
+		func(steps []config.ShutdownStep) error { return shutdownTrace(steps[0].Timeout) },
+	))
 }
 
 func healthServer(addr string, c *delivery.Consumer) *http.Server {
