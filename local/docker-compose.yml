@@ -330,6 +330,7 @@ services:
       # kafka:19092 inside this network. A container using the former resolves
       # to itself.
       KAFKA_BOOTSTRAP: kafka:19092
+      KAFKA_AUTH_MODE: none
       RELAY_TOPIC: mlp.relay.deliveries
       DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
       OTEL_SERVICE_NAME: relay-ingest
@@ -364,6 +365,7 @@ services:
     environment:
       RELAY_MODE: deliver
       KAFKA_BOOTSTRAP: kafka:19092
+      KAFKA_AUTH_MODE: none
       RELAY_TOPIC: mlp.relay.deliveries
       RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
       DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable

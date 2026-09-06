@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +28,7 @@ import (
 	"github.com/lilabrooks/my-local-platform/relay/internal/delivery"
 	"github.com/lilabrooks/my-local-platform/relay/internal/history"
 	"github.com/lilabrooks/my-local-platform/relay/internal/ingest"
+	"github.com/lilabrooks/my-local-platform/relay/internal/kafkatransport"
 	"github.com/lilabrooks/my-local-platform/relay/internal/metrics"
 	"github.com/lilabrooks/my-local-platform/relay/internal/subscriptions"
 	"github.com/lilabrooks/my-local-platform/relay/internal/telemetry"
@@ -93,6 +93,16 @@ func run(log *slog.Logger) error {
 		"worst_case_per_record", schedule.WorstCase(attemptTimeout),
 		"stall_budget", stallBudget)
 
+	kafkaConnection, err := kafkatransport.New(
+		context.Background(),
+		envOr("KAFKA_BOOTSTRAP", "localhost:9092"),
+		envOr("KAFKA_AUTH_MODE", kafkatransport.AuthNone),
+		os.Getenv("AWS_REGION"),
+	)
+	if err != nil {
+		return fmt.Errorf("kafka transport: %w", err)
+	}
+
 	shutdownTracing, err := telemetry.Init(
 		context.Background(),
 		envOr("OTEL_SERVICE_NAME", "relay-"+mode),
@@ -115,14 +125,12 @@ func run(log *slog.Logger) error {
 
 	switch mode {
 	case "ingest":
-		return runIngest(log)
+		return runIngest(log, kafkaConnection)
 	case "deliver":
-		return runDeliver(log, schedule, attemptTimeout)
+		return runDeliver(log, kafkaConnection, schedule, attemptTimeout)
 	}
 	return nil
 }
-
-func brokers() []string { return strings.Split(envOr("KAFKA_BOOTSTRAP", "localhost:9092"), ",") }
 
 // closeBounded runs closers in reverse registration order -- the order defer
 // would have used -- and gives up after config.ResourceCloseTimeout.
@@ -159,7 +167,7 @@ func closeBounded(log *slog.Logger, closers []func() error) {
 	}
 }
 
-func runIngest(log *slog.Logger) error {
+func runIngest(log *slog.Logger, kafkaConnection *kafkatransport.Connection) error {
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	addr := ":" + envOr("PORT", "8080")
 	metrics.BuildInfo.WithLabelValues(version, "ingest").Set(1)
@@ -174,7 +182,10 @@ func runIngest(log *slog.Logger) error {
 	// One bounded close for every resource, registered before the HTTP
 	// server's own shutdown so defer's LIFO order runs it after that. See
 	// closeBounded: these calls take no context and can block forever.
-	closers := []func() error{func() error { pool.Close(); return nil }}
+	closers := []func() error{
+		func() error { pool.Close(); return nil },
+		kafkaConnection.Close,
+	}
 	defer func() { closeBounded(log, closers) }()
 	if err := pool.Ping(ctx); err != nil {
 		// Event history must exist before Kafka publication, so an ingest pod
@@ -183,8 +194,9 @@ func runIngest(log *slog.Logger) error {
 	}
 
 	writer := &kafka.Writer{
-		Addr:  kafka.TCP(brokers()...),
-		Topic: topic,
+		Addr:      kafkaConnection.Addr(),
+		Topic:     topic,
+		Transport: kafkaConnection.RoundTripper(),
 		// Hash on the record key so a tenant always lands on one partition.
 		// LeastBytes would spread a tenant across partitions and lose ordering.
 		Balancer:               &kafka.Hash{},
@@ -226,14 +238,16 @@ func runIngest(log *slog.Logger) error {
 	// cluster run showed a peak of 1103 for 600 events produced; see
 	// docs/adr/0008-in-cluster-observability-for-the-demo.md.
 	go metrics.NewLagPoller(
-		brokers(),
+		kafkaConnection.Brokers(),
+		kafkaConnection.RoundTripper(),
 		envOr("RELAY_CONSUMER_GROUP", "relay-deliver"),
 		topic,
 		lagInterval(log),
 		log,
 	).Run(ctx)
 
-	log.Info("listening", "addr", addr, "topic", topic, "brokers", brokers(), "mode", "ingest")
+	log.Info("listening", "addr", addr, "topic", topic, "brokers", kafkaConnection.Brokers(),
+		"kafka_auth_mode", kafkaConnection.AuthMode(), "mode", "ingest")
 	err = serveUntilShutdown(ctx, log, srv, func() {
 		log.Info("shutdown signal received, failing readiness")
 		server.MarkReady(false)
@@ -294,7 +308,7 @@ func serveUntilShutdown(ctx context.Context, log *slog.Logger, srv *http.Server,
 	return nil
 }
 
-func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout time.Duration) error {
+func runDeliver(log *slog.Logger, kafkaConnection *kafkatransport.Connection, schedule config.RetrySchedule, attemptTimeout time.Duration) error {
 	metrics.BuildInfo.WithLabelValues(version, "deliver").Set(1)
 	topic := envOr("RELAY_TOPIC", "mlp.relay.deliveries")
 	dlqTopic := envOr("RELAY_DLQ_TOPIC", "mlp.relay.deliveries.dlq")
@@ -311,7 +325,10 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 	// One bounded close for every resource, registered before the health
 	// server's own shutdown so defer's LIFO order runs it after that. See
 	// closeBounded: these calls take no context and can block forever.
-	closers := []func() error{func() error { pool.Close(); return nil }}
+	closers := []func() error{
+		func() error { pool.Close(); return nil },
+		kafkaConnection.Close,
+	}
 	defer func() { closeBounded(log, closers) }()
 	if err := pool.Ping(ctx); err != nil {
 		// Unlike the writer, the subscription store is needed for every
@@ -321,7 +338,8 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 	}
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: brokers(),
+		Brokers: kafkaConnection.Brokers(),
+		Dialer:  kafkaConnection.Dialer(),
 		Topic:   topic,
 		GroupID: group,
 		// CommitInterval zero means CommitMessages commits synchronously,
@@ -351,8 +369,9 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 	closers = append(closers, reader.Close)
 
 	dlq := &kafka.Writer{
-		Addr:                   kafka.TCP(brokers()...),
+		Addr:                   kafkaConnection.Addr(),
 		Topic:                  dlqTopic,
+		Transport:              kafkaConnection.RoundTripper(),
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: false,
@@ -381,7 +400,7 @@ func runDeliver(log *slog.Logger, schedule config.RetrySchedule, attemptTimeout 
 	}()
 
 	log.Info("consuming", "topic", topic, "dlq", dlqTopic, "group", group,
-		"brokers", brokers(), "mode", "deliver")
+		"brokers", kafkaConnection.Brokers(), "kafka_auth_mode", kafkaConnection.AuthMode(), "mode", "deliver")
 	return consumer.Run(ctx)
 }
 

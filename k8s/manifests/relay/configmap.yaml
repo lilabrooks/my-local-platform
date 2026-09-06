@@ -12,6 +12,7 @@ data:
   # host.minikube.internal:9094 is the CLUSTER listener. Not localhost:9092 --
   # inside a pod that is the pod. See docs/runbook-k8s.md.
   KAFKA_BOOTSTRAP: host.minikube.internal:9094
+  KAFKA_AUTH_MODE: none
   RELAY_TOPIC: mlp.relay.deliveries
   RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
   RELAY_CONSUMER_GROUP: relay-deliver

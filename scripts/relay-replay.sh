@@ -27,12 +27,11 @@ set -euo pipefail
 SINCE="${SINCE:-1h}"
 GROUP="${RELAY_CONSUMER_GROUP:-relay-deliver}"
 TOPIC="${RELAY_TOPIC:-mlp.relay.deliveries}"
-BROKER_CONTAINER="${BROKER_CONTAINER:-mlp-kafka}"
-BOOTSTRAP="${KAFKA_INTERNAL_BOOTSTRAP:-localhost:19092}"
 COMPOSE_FILE="${COMPOSE_FILE:-local/docker-compose.yml}"
 CONSUMER_SERVICE="${CONSUMER_SERVICE:-relay-deliver}"
 NAMESPACE="${RELAY_NAMESPACE:-mlp}"
 MODE="${MODE:-auto}"
+LOCAL_CLUSTER_CONTEXT="${MINIKUBE_PROFILE:-mlp}"
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -62,6 +61,15 @@ if [ "$MODE" = auto ]; then
   fi
 fi
 say "mode: $MODE"
+
+if [ "$MODE" = cluster ]; then
+  current_context=$(kubectl config current-context)
+  if [ "$current_context" != "$LOCAL_CLUSTER_CONTEXT" ]; then
+    echo "MODE=cluster is limited to local context $LOCAL_CLUSTER_CONTEXT (current: $current_context)." >&2
+    echo "The AWS replay path is the relay-deliver-scoped Job rendered by issue #94." >&2
+    exit 1
+  fi
+fi
 
 # The KEDA HPA restores minReplicaCount within seconds of a manual scale to
 # zero, so `kubectl scale` is not a lever here -- the consumer rejoins the group
@@ -100,7 +108,24 @@ restore_consumer() {
   esac
 }
 
-kafka() { docker exec "$BROKER_CONTAINER" /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server "$BOOTSTRAP" "$@"; }
+replay() {
+  case "$MODE" in
+    compose)
+      # A one-off relay container inherits the same KAFKA_BOOTSTRAP and
+      # KAFKA_AUTH_MODE settings as relay-deliver. The /relay-replay binary is
+      # built into the relay image, so this path does not depend on Kafka's
+      # Java CLI or a second operational image.
+      docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+        --entrypoint /relay-replay "$CONSUMER_SERVICE" "$@"
+      ;;
+    cluster)
+      # This script's cluster mode is the local minikube demo. The live AWS
+      # overlay runs this same binary in a short-lived Job with relay-deliver's
+      # service account, because only that identity may alter group offsets.
+      kubectl -n "$NAMESPACE" exec deploy/relay-ingest -- /relay-replay "$@"
+      ;;
+  esac
+}
 
 # GNU date and BSD date disagree about relative times, and this runs on both a
 # developer's mac and an ubuntu runner. GNU rejects "-1h" outright -- it wants
@@ -123,43 +148,26 @@ utc_since() {
       return 1
       ;;
   esac
-  date -u -d "${n} ${word} ago" '+%Y-%m-%dT%H:%M:%S.000' 2>/dev/null \
-    || date -u -v"-${n}${bsd}" '+%Y-%m-%dT%H:%M:%S.000'
+  date -u -d "${n} ${word} ago" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -v"-${n}${bsd}" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
 say "stopping $CONSUMER_SERVICE so the group can be reset"
 stop_consumer
 
-# A clean shutdown leaves the group immediately; wait rather than assuming.
-say "waiting for group $GROUP to go inactive"
-for i in $(seq 1 30); do
-  # Counted from the end: the COORDINATOR column contains a space, so it splits
-  # into two fields and positions from the left do not line up. STATE is always
-  # second from the right, ahead of #MEMBERS. Reading $4 gets the assignment
-  # strategy, which is "-" on an empty group and never matches.
-  state=$(kafka --describe --group "$GROUP" --state 2>/dev/null | awk 'NR>2 && NF {print $(NF-1)}' | head -1)
-  case "$state" in
-    Empty | Dead | "") break ;;
-  esac
-  if [ "$i" = 30 ]; then
-    echo "group $GROUP is still $state after 30s; it cannot be reset while it has members" >&2
-    exit 1
-  fi
-  sleep 1
-done
-
 if [ "$SINCE" = "earliest" ]; then
   say "resetting $GROUP to the beginning of $TOPIC"
-  reset=(--to-earliest)
+  from=earliest
 else
   from=$(utc_since "$SINCE")
   say "resetting $GROUP to $from UTC (last $SINCE)"
-  reset=(--to-datetime "$from")
 fi
 
-# --execute prints the offsets it moved to, which is the receipt for this run.
-kafka --group "$GROUP" --reset-offsets "${reset[@]}" --topic "$TOPIC" --execute 2>/dev/null \
-  | awk -v t="$TOPIC" '$2 == t {printf "    partition %-3s -> offset %s\n", $3, $4}'
+# The command performs its own authenticated DescribeGroups, Metadata,
+# ListOffsets, and OffsetCommit requests. Its output is the replay receipt.
+say "waiting for group $GROUP to go inactive, then committing replay offsets"
+replay --group "$GROUP" --topic "$TOPIC" --since "$from" --wait 30s \
+  | sed 's/^/    /'
 
 say "starting $CONSUMER_SERVICE"
 restore_consumer

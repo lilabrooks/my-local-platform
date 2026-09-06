@@ -113,12 +113,15 @@ Current state:
   2026-09-05, and
   [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90) is
   closed.
-- [Issue #91](https://github.com/lilabrooks/my-local-platform/issues/91) is the
-  active M4 contract work. Its accepted topology, identity, three-hour paid
+- [Issue #91](https://github.com/lilabrooks/my-local-platform/issues/91) closed
+  with the accepted M4 contract. Its topology, identity, three-hour paid
   window, $5 maximum, evidence set, and mandatory destroy path are in
   [ADR 0010](docs/adr/0010-live-aws-relay-contract.md) and the
-  [AWS relay runbook](docs/runbook-aws-relay.md). The later AWS run is
-  rehearsed, short-lived, and separately authorized.
+  [AWS relay runbook](docs/runbook-aws-relay.md).
+- [Issue #92](https://github.com/lilabrooks/my-local-platform/issues/92) is
+  complete; it added the locally tested MSK IAM transport. #93 and #101 are the
+  remaining parallel M4 foundation work before the rendered deployment in #94.
+  The later AWS run remains rehearsed, short-lived, and separately authorized.
 - The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
   RDS, and MSK validation remains future work.
 
