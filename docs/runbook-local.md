@@ -43,6 +43,25 @@ delivery at 1, and the crash probe redelivered the same webhook id from 1 to 2
 times. The cluster half of the proof is recorded in the
 [Kubernetes runbook](runbook-k8s.md#autoscaling-on-consumer-lag).
 
+## Kafka connection modes
+
+Every relay broker operation reads one configuration surface: ingest writes,
+deliver reads, DLQ writes, the ingest lag poller, and `/relay-replay` all use
+`KAFKA_BOOTSTRAP`, `KAFKA_AUTH_MODE`, and `AWS_REGION`.
+
+Local compose and minikube set `KAFKA_AUTH_MODE=none`. That mode uses
+unauthenticated TCP and ignores `AWS_REGION`. The M4 AWS overlay sets
+`KAFKA_AUTH_MODE=aws_msk_iam`, supplies the MSK IAM bootstrap brokers, and sets
+`AWS_REGION`. IAM mode cannot be configured without TLS: relay fixes TLS 1.2
+as the minimum, uses the host's system certificate roots, and lets the Kafka
+client derive and verify the server name for each broker.
+
+`scripts/relay-replay.sh` stops the selected consumer before changing offsets.
+For compose it runs `/relay-replay` from the existing relay image; for the
+local cluster it runs the same binary in a relay pod. The command waits until
+the group is inactive, then performs the metadata, offset lookup, and offset
+commit through the same broker and authentication configuration as relay.
+
 ## Profiles
 
 Profiles exist because memory is a real constraint. An earlier note here

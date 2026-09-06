@@ -14,7 +14,10 @@ ARG VERSION=dev
 # CGO off so the binary is static and runs on scratch.
 RUN CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
-      -o /out/relay ./cmd/relay
+      -o /out/relay ./cmd/relay && \
+    CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w" \
+      -o /out/relay-replay ./cmd/relay-replay
 
 # scratch: no shell, no package manager, nothing to exploit.
 #
@@ -27,6 +30,7 @@ FROM scratch
 # scratch image has no root certificates at all.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/relay /relay
+COPY --from=build /out/relay-replay /relay-replay
 
 # Matches runAsUser in the Deployment's securityContext.
 USER 65532:65532

@@ -115,6 +115,16 @@ IAM mode requires TLS and rejects a plaintext broker address. Every other
 relay setting, event contract, topic name, consumer-group name, retry schedule,
 metric name, and trace contract stays the same.
 
+The #92 implementation keeps the unauthenticated path on kafka-go's existing
+TCP defaults. IAM mode installs one shared transport on ingest production, lag
+polling, deliver consumption, DLQ production, and replay. It uses the pinned
+AWS signer through kafka-go's per-connection SASL start boundary, so each new
+connection obtains a token from ambient identity instead of reusing a token
+created at process startup. The signer currently issues 15-minute tokens.
+TLS uses system roots, a minimum of TLS 1.2, and kafka-go's per-address server
+name inference; certificate and hostname verification cannot be disabled by
+runtime configuration.
+
 ### Secret delivery
 
 RDS manages its master password in Secrets Manager. A separate Secrets Manager
@@ -336,6 +346,23 @@ Checked on 2026-09-05 without AWS credentials or resource creation:
 
 The repository checks run for this proposal are recorded in the closing commit.
 The AWS-specific claims remain predictions until #97 records the live result.
+
+Checked on 2026-09-06 for the #92 transport implementation, without AWS
+credentials or resource creation:
+
+- `make test` passed, including an in-process fake Kafka broker that completed
+  API-version negotiation, selected `OAUTHBEARER`, matched the exact initial
+  response bytes, accepted authentication, and received a metadata request;
+- adapter tests generated a different token on each SASL `Start`, rejected an
+  expired token without putting it in the error, and checked the TLS minimum,
+  system-root configuration, and server-name inference boundary;
+- `make lint` passed all 11 repository checks;
+- `make smoke` passed every compose check with `KAFKA_AUTH_MODE=none`, and
+  `make relay-replay-verify` reset all 12 partitions through `/relay-replay`
+  before redelivering the selected events;
+- `make relay-demo` raised lag to 596, scaled `relay-deliver` from one to twelve
+  consumers, drained lag to zero, returned to one consumer at 140 seconds,
+  exercised the DLQ, and completed cluster-mode replay through the same binary.
 
 ## Sources
 

@@ -106,9 +106,10 @@ type LagPoller struct {
 // older than Prometheus's scrape interval, and long enough that it is not a
 // meaningful load on the broker. Four requests every few seconds against a
 // twelve-partition topic is nothing.
-func NewLagPoller(brokers []string, group, topic string, interval time.Duration, log *slog.Logger) *LagPoller {
+func NewLagPoller(brokers []string, transport kafka.RoundTripper, group, topic string, interval time.Duration, log *slog.Logger) *LagPoller {
 	return newLagPoller(&kafka.Client{
-		Addr: kafka.TCP(brokers...),
+		Addr:      kafka.TCP(brokers...),
+		Transport: transport,
 		// Bounded so a broker that accepts the connection and then stalls
 		// cannot wedge the poll loop. Well under the interval.
 		Timeout: 5 * time.Second,
