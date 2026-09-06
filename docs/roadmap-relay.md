@@ -2,10 +2,12 @@
 
 Date: 2026-08-24 · Last audited: 2026-09-05
 Status: **M0 through M3 are built. M3's whole-application proof passed on
-2026-09-05.** On 2026-09-01, the owner selected M3 followed by M4. M4 waits for
-[#90](https://github.com/lilabrooks/my-local-platform/issues/90) to close when
-this evidence change merges. Earlier versions called M3 and M4 optional
-alternatives; that status ended with the owner decision.
+2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
+is closed.** On 2026-09-01, the owner selected M3 followed by M4. The satisfied
+M3 gate released M4 contract work at
+[#91](https://github.com/lilabrooks/my-local-platform/issues/91). Earlier
+versions called M3 and M4 optional alternatives; that status ended with the
+owner decision.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -271,8 +273,8 @@ session.
 
 | Stage | Why it was selected | Release condition |
 |---|---|---|
-| M3 | Establish the relay's semantics and operator evidence locally. | [#90](https://github.com/lilabrooks/my-local-platform/issues/90) passes as one application. |
-| M4 | Test the same application against the live AWS surfaces local infrastructure cannot reproduce. | #90 closes, then M4 follows its dependency chain. |
+| M3 | Establish the relay's semantics and operator evidence locally. | Satisfied: [#90](https://github.com/lilabrooks/my-local-platform/issues/90) closed after the whole-application proof passed. |
+| M4 | Test the same application against the live AWS surfaces local infrastructure cannot reproduce. | Released: follow the dependency chain beginning with contract [#91](https://github.com/lilabrooks/my-local-platform/issues/91). |
 
 ---
 
@@ -395,11 +397,13 @@ healthy`.
 
 ## M4 -- Ephemeral live AWS validation
 
-**Waiting for #90 to close. The paid session is estimated at ~$1/hour and ends
-in `terraform destroy`.**
+**Contract work may begin at #91. Live AWS validation remains unverified and
+requires separate owner authorization. The paid session is estimated at
+~$1/hour and ends in `terraform destroy`.**
 
-M4 starts only after [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
-closes. Its governed sequence is:
+[#90](https://github.com/lilabrooks/my-local-platform/issues/90) closed after
+the M3 proof passed, releasing M4's contract work. Its governed sequence begins
+at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
 
 1. Settle the topology, identity, cost, evidence, and teardown contract in
    [#91](https://github.com/lilabrooks/my-local-platform/issues/91).
