@@ -22,11 +22,11 @@ observability, and smoke tests. M4 extends that path to AWS.
 | Area | Local path | AWS path |
 |---|---|---|
 | AWS APIs | floci for S3, SNS, SQS, SES, and container-backed services | S3, SNS, SQS, ECR, optional SES, RDS, and EKS |
-| Streaming | Apache Kafka in KRaft mode | MSK is planned for the live relay milestone |
+| Streaming | Apache Kafka in KRaft mode | MSK Serverless with IAM for the live relay milestone |
 | Messaging | RabbitMQ | Amazon MQ is a counterpart; Terraform does not provision it |
 | Database | Postgres 18 | RDS for PostgreSQL, opt-in |
 | Kubernetes | dedicated `mlp` minikube profile | EKS, opt-in |
-| Deployment | ArgoCD app-of-apps | planned reuse of the GitOps structure with ECR images |
+| Deployment | ArgoCD app-of-apps | the same project boundary with immutable ECR image digests |
 | Telemetry | OpenTelemetry, Prometheus, Tempo, and Grafana | OpenTelemetry with an optional Datadog exporter |
 
 Everything in `local/` runs without an AWS account. Terraform under
@@ -114,8 +114,11 @@ Current state:
   [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90) is
   closed.
 - [Issue #91](https://github.com/lilabrooks/my-local-platform/issues/91) is the
-  next M4 work: settle the live AWS contract before implementation. The later
-  AWS run is rehearsed, short-lived, and separately authorized.
+  active M4 contract work. Its accepted topology, identity, three-hour paid
+  window, $5 maximum, evidence set, and mandatory destroy path are in
+  [ADR 0010](docs/adr/0010-live-aws-relay-contract.md) and the
+  [AWS relay runbook](docs/runbook-aws-relay.md). The later AWS run is
+  rehearsed, short-lived, and separately authorized.
 - The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
   RDS, and MSK validation remains future work.
 
@@ -149,6 +152,9 @@ image loading, KEDA, the in-cluster Grafana stack, and the relay demo.
 
 Real AWS requires Terraform 1.10 or newer, AWS CLI v2, and an AWS SSO session.
 Read the [cost guide](docs/costs.md) before running any apply.
+The [AWS relay runbook](docs/runbook-aws-relay.md) adds the stricter contract
+for M4. Its contract, cheap staging, and hourly apply require separate owner
+decisions.
 
 ```bash
 make aws-login
@@ -214,6 +220,7 @@ The architecture decisions explain why the repository uses this shape:
 | [KEDA scaling from consumer lag](docs/adr/0007-keda-lag-autoscaling.md) | Accepted |
 | [In-cluster observability for the demo](docs/adr/0008-in-cluster-observability-for-the-demo.md) | Accepted |
 | [Separate ArgoCD control and workload permissions](docs/adr/0009-separate-argocd-control-and-workload-projects.md) | Accepted |
+| [Live AWS relay validation contract](docs/adr/0010-live-aws-relay-contract.md) | Accepted |
 
 GitHub Issues and milestones hold the active backlog. Start with the
 [open issues](https://github.com/lilabrooks/my-local-platform/issues) for the

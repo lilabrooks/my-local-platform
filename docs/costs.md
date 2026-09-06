@@ -2,7 +2,7 @@
 
 Everything under `local/` is free. This page is about `infra/terraform/`.
 
-Prices are `us-east-1` list rates as of August 2026 and exclude data transfer.
+Prices are `us-east-1` list rates as of September 2026 and exclude data transfer.
 Treat them as the right order of magnitude, not a quote. The authority on what
 you are actually spending is `make aws-cost`.
 
@@ -61,6 +61,13 @@ expiry rule and ECR keeps only the last 10 images, so neither grows unbounded.
 |---|---|---|
 | `enable_rds` | `db.t4g.micro`, 20 GB gp3, single-AZ | **~$15** |
 | `enable_eks` | Control plane + 2× `t3.small` spot + NAT gateway | **~$110** |
+
+M4 adds MSK Serverless only behind a separate `enable_msk` flag. The fixed
+relay-validation shape in [ADR 0010](adr/0010-live-aws-relay-contract.md) was
+rechecked on 2026-09-05 at approximately **$1.02/hour** before small usage
+charges. MSK contributes about $0.77/hour of that total. The runbook rejects a
+shape above $1.25/hour, starts destroy at 2 hours 30 minutes, ends at 3 hours,
+and requires separate approval for a $5 maximum.
 
 Breaking down `enable_eks`, because it is the one that hurts:
 
@@ -137,6 +144,8 @@ Two things `terraform destroy` will not clean up, by design:
 
 ## A note on billing alerts
 
-Nothing in this repository can stop you spending money — it only makes the
+Nothing in this repository can stop you spending money -- it only makes the
 expensive things opt-in and easy to find. A billing alarm is worth setting up
-once, in the console, at whatever threshold would annoy you.
+once, in the console, at whatever threshold would annoy you. AWS billing data
+does not update fast enough to enforce M4's three-hour window, so the resource
+shape, elapsed-time deadline, and destroy rule are the active controls.
