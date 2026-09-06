@@ -1,11 +1,11 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-03
-Status: **M0, M1 and M2 are built and their milestones closed. M3 is active.**
-On 2026-09-01, the owner selected M3 followed by M4. M4 waits for
-[#90](https://github.com/lilabrooks/my-local-platform/issues/90) to prove the
-complete local application before AWS work starts. Earlier versions called M3
-and M4 optional alternatives; that status ended with the owner decision.
+Date: 2026-08-24 · Last audited: 2026-09-05
+Status: **M0 through M3 are built. M3's whole-application proof passed on
+2026-09-05.** On 2026-09-01, the owner selected M3 followed by M4. M4 waits for
+[#90](https://github.com/lilabrooks/my-local-platform/issues/90) to close when
+this evidence change merges. Earlier versions called M3 and M4 optional
+alternatives; that status ended with the owner decision.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -278,12 +278,12 @@ session.
 
 ## M3 -- Local relay readiness
 
-**Active and free.**
+**Complete and free. The whole-application proof passed on 2026-09-05.**
 
 The work that turns a convincing demo into a service whose guarantees hold up
 when someone reads the code carefully.
 
-The active scope is truthful consumer readiness and assignment evidence
+The completed scope is truthful consumer readiness and assignment evidence
 ([#21](https://github.com/lilabrooks/my-local-platform/issues/21)), diagnosable
 poison-record dead letters
 ([#25](https://github.com/lilabrooks/my-local-platform/issues/25)), end-to-end
@@ -292,8 +292,8 @@ delivery history ([#87](https://github.com/lilabrooks/my-local-platform/issues/8
 ingest idempotency
 ([#89](https://github.com/lilabrooks/my-local-platform/issues/89)), and the
 roadmap reconciliation
-([#98](https://github.com/lilabrooks/my-local-platform/issues/98)). The completed
-and remaining pieces culminate in the whole-application local proof
+([#98](https://github.com/lilabrooks/my-local-platform/issues/98)). Those pieces
+culminated in the whole-application local proof
 ([#90](https://github.com/lilabrooks/my-local-platform/issues/90)).
 
 - **Consumer readiness and assignment evidence, built 2026-09-05.**
@@ -342,12 +342,61 @@ and remaining pieces culminate in the whole-application local proof
   when concurrently degraded `(tenant, subscriber)` pairs approach the
   partition count.
 
+### Whole-application proof, run 2026-09-05
+
+The proof used the 12-partition compose Kafka broker and compose Postgres. The
+compose phase ran relay and the controlled sink from the current source. The
+cluster phase stopped those 3 app containers, kept the brokers running, and
+used the existing 1-node, 6 GiB `mlp` profile with the current relay and sink
+images, KEDA, Prometheus, Grafana, and ArgoCD.
+
+```bash
+make lint
+make test
+make k8s-validate
+make up-apps
+make seed
+make smoke
+make up-obs
+make smoke-traces
+make relay-replay-verify
+make relay-verify-ordering
+make relay-verify-graceful-drain
+make relay-verify-duplicate-on-crash
+make monitoring-ready
+make relay-demo
+make k8s-down
+make up
+make smoke
+```
+
+Every command passed. The traced smoke event
+`evt_2f90004ddafd451a18789e98a64f794e` returned from both concurrent requests,
+produced 1 Kafka record and 1 healthy delivery, persisted 1 event row and 4
+attempt rows, and joined its ingest, produce, consume, and 4 attempt spans in
+Tempo trace `2b74c971058f50dc7219eddfce5f5cf9`. Its poison companion preserved all
+36 invalid bytes with the source topic, partition, offset, timestamp, and key.
+
+The replay check redelivered all 3 selected events; the steady-state ordering
+check delivered 40 events in accepted order. SIGTERM drained and committed an
+in-flight record with the healthy delivery count staying at 1. A forced crash
+redelivered `evt_19f42e88f57c22827a342e99f91e1c49` with the same webhook id,
+raising its healthy delivery count from 1 to 2.
+
+`make monitoring-ready` found fresh broker assignment evidence for every
+scraped relay target. The 600-event minikube demo raised lag to 598, scaled the
+group from 1 consumer to 12, drained lag to 0, and returned to 1 consumer. The
+failing-subscriber and cluster replay steps then completed. Finally, the clean
+branch passed the README's `make up` and `make smoke` path using Make's
+`.env.example` fallback. The final smoke run ended with `all components
+healthy`.
+
 ---
 
 ## M4 -- Ephemeral live AWS validation
 
-**Waiting on M3. The paid session is estimated at ~$1/hour and ends in
-`terraform destroy`.**
+**Waiting for #90 to close. The paid session is estimated at ~$1/hour and ends
+in `terraform destroy`.**
 
 M4 starts only after [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
 closes. Its governed sequence is:
@@ -483,7 +532,6 @@ belongs rather than being restated here:
 | Lag-based autoscaling beats an HPA on CPU | [ADR 0007](adr/0007-keda-lag-autoscaling.md#verification), measured 2026-08-27 |
 | In-cluster Prometheus and Grafana for the demo | [ADR 0008](adr/0008-in-cluster-observability-for-the-demo.md#verification), measured 2026-08-27 |
 
-**M3's whole-application result and all of M4 remain unverified.** The completed M3
-leaf items name their evidence above, but #90 has not run the full local proof.
-Re-check every MSK and EKS cost figure against current pricing before M4; both
-schedules change.
+**M3's whole-application result was verified on 2026-09-05. M4 remains
+unverified.** Re-check every MSK and EKS cost figure against current pricing
+before M4; both schedules change.

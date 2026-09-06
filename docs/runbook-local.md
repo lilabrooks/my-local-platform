@@ -16,6 +16,33 @@ The relay part of `make smoke` also writes an invalid value directly to
 topic, partition, offset, timestamp, key bytes and hash, and raw bytes. The same
 run still checks the normal exhausted-delivery dead letter from `/hooks/flaky`.
 
+## M3 local verification
+
+Run the state-changing relay checks sequentially because replay and both
+shutdown probes stop or kill the same delivery consumer:
+
+```bash
+make lint
+make test
+make k8s-validate
+make up-apps
+make seed
+make smoke
+make up-obs
+make smoke-traces
+make relay-replay-verify
+make relay-verify-ordering
+make relay-verify-graceful-drain
+make relay-verify-duplicate-on-crash
+```
+
+This sequence passed on 2026-09-05. The trace check joined 1 ingest, produce,
+and consume path with 4 persisted subscriber attempts. Replay returned all 3
+selected events, ordering preserved 40 accepted events, SIGTERM kept 1 healthy
+delivery at 1, and the crash probe redelivered the same webhook id from 1 to 2
+times. The cluster half of the proof is recorded in the
+[Kubernetes runbook](runbook-k8s.md#autoscaling-on-consumer-lag).
+
 ## Profiles
 
 Profiles exist because memory is a real constraint. An earlier note here
