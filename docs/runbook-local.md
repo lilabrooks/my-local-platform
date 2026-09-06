@@ -387,7 +387,8 @@ described in [costs.md](costs.md#remote-state-comes-first), then create the
 cheap tier through the guarded Make target:
 
 ```bash
-make aws-up                           # creates the cheap tier, ~$0
+make aws-plan                         # saves the exact cheap-tier plan
+make aws-up                           # applies that reviewed plan, ~$0
 
 unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_DYNAMODB AWS_ENDPOINT_URL_S3
 unset AWS_ENDPOINT_URL_STS AWS_ACCESS_KEY_ID

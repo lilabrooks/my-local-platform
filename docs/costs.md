@@ -50,7 +50,8 @@ that selects the remote backend without copying the existing state.
 | SNS topic | $0.50 per million publishes, first million free | ~$0 |
 | SQS queue + DLQ | $0.40 per million requests, first million free | ~$0 |
 | SES identity (when `ses_sender_email` is set) | $0.10 per thousand emails | ~$0 |
-| ECR repository | $0.10/GB-month | ~$0 |
+| Two ECR repositories | $0.10/GB-month | ~$0 |
+| AWS Budget, when `budget_alert_email` is set | monitoring and notifications are free | $0 |
 
 Leaving these standing costs approximately nothing. The bucket has a 30-day
 expiry rule and ECR keeps only the last 10 images, so neither grows unbounded.
@@ -60,10 +61,11 @@ expiry rule and ECR keeps only the last 10 images, so neither grows unbounded.
 | Flag | Creates | Approximate monthly cost |
 |---|---|---|
 | `enable_rds` | `db.t4g.micro`, 20 GB gp3, single-AZ | **~$15** |
-| `enable_eks` | Control plane + 2× `t3.small` spot + NAT gateway | **~$110** |
+| `enable_eks` | Control plane + 2× `t3.medium` Spot + NAT gateway | **~$115** |
+| `enable_msk` | MSK Serverless + 13 topic partitions | **~$0.77/hour** |
 
-M4 adds MSK Serverless only behind a separate `enable_msk` flag. The fixed
-relay-validation shape in [ADR 0010](adr/0010-live-aws-relay-contract.md) was
+The fixed relay-validation shape in
+[ADR 0010](adr/0010-live-aws-relay-contract.md) was
 rechecked on 2026-09-05 at approximately **$1.02/hour** before small usage
 charges. MSK contributes about $0.77/hour of that total. The runbook rejects a
 shape above $1.25/hour, starts destroy at 2 hours 30 minutes, ends at 3 hours,
@@ -74,7 +76,9 @@ Breaking down `enable_eks`, because it is the one that hurts:
 - EKS control plane: $0.10/hour = **~$73/month**, charged whether or not a
   single pod is running.
 - NAT gateway: ~$0.045/hour = **~$32/month**, plus $0.045/GB processed.
-- 2× `t3.small` on spot: **~$6/month** (on-demand would be ~$30).
+- 2× `t3.medium` Spot instances. The runtime gate deliberately models their
+  on-demand upper bound, about **$0.083/hour** together, rather than predicting
+  a changing Spot discount.
 
 ### The extended-support trap
 
@@ -99,7 +103,40 @@ aws eks describe-cluster-versions \
 Local Kubernetes has no such cliff — minikube is free. Use EKS when the goal is
 EKS specifically.
 
-Both flags default to `false`.
+All three hourly flags default to `false`.
+
+## Guarded plans and applies
+
+`make aws-plan` writes the binary plan to
+`infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan` and a redaction-safe
+summary to `.terraform/mlp-plan-summary.json`. The summary contains only
+selected resource addresses and actions, counts, flag values, the fixed
+topology, and cost arithmetic. The full plan can contain account data and stays
+ignored.
+
+Issue #93 replaces the former `mlp-dev` ECR repository with `mlp-dev/relay` and
+`mlp-dev/sink`. An old state that still owns `mlp-dev` will plan its deletion,
+including any images it contains. The safe summary includes ECR change actions
+so the operator sees that migration before apply.
+
+`make aws-up` applies that exact saved plan. It does not create a fresh plan at
+apply time. For an hourly plan, the wrapper first verifies that:
+
+- the Terraform-managed budget already exists with a notification subscriber
+  and a limit no greater than $5;
+- the configured Kubernetes version is currently in EKS standard support;
+- the plan stays within one EKS cluster, one MSK cluster, one RDS instance,
+  one NAT gateway, three maximum Spot workers, 13 topic partitions, and the
+  $1.25/hour modelled limit.
+
+The same support check runs again immediately before an hourly apply. A plan
+whose binary content changes after review is rejected.
+
+Create the budget in a separate cheap-tier plan first. In the ignored
+`terraform.tfvars`, set `budget_alert_email`, leave all hourly flags false,
+then run `make aws-plan` and the separately approved `make aws-up`. Only after
+that apply can an hourly plan pass the budget preflight. EKS additionally
+requires `eks_operator_cidr` to be the operator's current IPv4 `/32`.
 
 ## Keeping the bill at zero
 
@@ -144,8 +181,7 @@ Two things `terraform destroy` will not clean up, by design:
 
 ## A note on billing alerts
 
-Nothing in this repository can stop you spending money -- it only makes the
-expensive things opt-in and easy to find. A billing alarm is worth setting up
-once, in the console, at whatever threshold would annoy you. AWS billing data
-does not update fast enough to enforce M4's three-hour window, so the resource
-shape, elapsed-time deadline, and destroy rule are the active controls.
+The Terraform-managed $5 budget is a forgotten-resource alarm. It cannot stop
+spend, and AWS billing data does not update fast enough to enforce M4's
+three-hour window. The guarded resource shape, elapsed-time deadline, and
+destroy rule remain the active controls.

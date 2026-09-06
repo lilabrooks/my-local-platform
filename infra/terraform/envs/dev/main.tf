@@ -3,11 +3,13 @@
 # Split by cost, deliberately:
 #
 #   CHEAP TIER -- serverless, pay-per-request, ~$0/month when idle.
-#     S3, SNS, SQS and ECR are always created. SES is optional.
+#     S3, SNS, SQS and two ECR repositories are always created. SES and the
+#     forgotten-resource budget are optional.
 #
 #   FLAG-GATED -- billed per hour whether or not you use them. Default false.
 #     enable_rds  ~$15/month   db.t4g.micro, single-AZ
-#     enable_eks  ~$110/month  $73 control plane + 2x t3.small + NAT gateway
+#     enable_eks  ~$115/month  $73 control plane + 2x t3.medium + NAT gateway
+#     enable_msk  ~$0.77/hour  MSK Serverless + 13 topic partitions
 #
 # `terraform destroy` when you finish a session. See docs/costs.md.
 
@@ -157,8 +159,10 @@ resource "aws_sqs_queue_policy" "events" {
   })
 }
 
-resource "aws_ecr_repository" "app" {
-  name = local.name
+resource "aws_ecr_repository" "image" {
+  for_each = toset(["relay", "sink"])
+
+  name = "${local.name}/${each.key}"
 
   # IMMUTABLE means a tag can never be overwritten, which forces uniquely
   # tagged images. `make echo-image` already stamps the short git SHA, so this
@@ -172,8 +176,10 @@ resource "aws_ecr_repository" "app" {
   }
 }
 
-resource "aws_ecr_lifecycle_policy" "app" {
-  repository = aws_ecr_repository.app.name
+resource "aws_ecr_lifecycle_policy" "image" {
+  for_each = aws_ecr_repository.image
+
+  repository = each.value.name
   policy = jsonencode({
     rules = [{
       rulePriority = 1
@@ -186,6 +192,35 @@ resource "aws_ecr_lifecycle_policy" "app" {
       action = { type = "expire" }
     }]
   })
+}
+
+# This is a forgotten-resource alarm, not the three-hour session stop control.
+# It is intentionally in the cheap tier so #96 can create and verify it before
+# any hourly flag is accepted by the guarded plan.
+resource "aws_budgets_budget" "runtime" {
+  count = var.budget_alert_email == "" ? 0 : 1
+
+  name         = local.runtime_budget_name
+  budget_type  = "COST"
+  limit_amount = "5"
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
 }
 
 # SES identity. Verifying a domain needs DNS you control; an email identity

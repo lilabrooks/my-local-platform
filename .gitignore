@@ -27,6 +27,11 @@ dist/
 *.test
 *.out
 vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+
 # Compiled service binaries. In a module whose only package is main --
 # services/echo and services/sink -- `go build ./...` writes the executable
 # beside the source, named after the last element of the module path rather

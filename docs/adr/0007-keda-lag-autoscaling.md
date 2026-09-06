@@ -218,9 +218,14 @@ The full scale-up and drain, and the memory this costs, are recorded in
 [ADR 0008's Verification section](0008-in-cluster-observability-for-the-demo.md)
 rather than repeated here.
 
-**Not verified:** everything in the M4 paragraph. The MSK IAM configuration and
-the scaler spellings were checked against KEDA's documentation for 2.20 and its
-issue tracker, not run. `enable_msk` does not exist yet.
+**Not verified at the time of this decision:** everything in the M4 paragraph.
+The MSK IAM configuration and the scaler spellings were checked against KEDA's
+documentation for 2.20 and its issue tracker, not run.
+
+As of 2026-09-06, `enable_msk` and the three Pod Identity associations exist in
+the opt-in Terraform runtime, and #92 has locally tested the relay's IAM
+transport. The operator-owned KEDA credential path still requires #95's local
+rehearsal and remains prediction rather than evidence.
 
 ## Revisit when
 

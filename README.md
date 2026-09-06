@@ -153,7 +153,8 @@ image loading, KEDA, the in-cluster Grafana stack, and the relay demo.
 
 ## Brief AWS validation
 
-Real AWS requires Terraform 1.10 or newer, AWS CLI v2, and an AWS SSO session.
+Real AWS requires Terraform 1.10 or newer, AWS CLI v2, `jq`, Python 3, and an
+AWS SSO session.
 Read the [cost guide](docs/costs.md) before running any apply.
 The [AWS relay runbook](docs/runbook-aws-relay.md) adds the stricter contract
 for M4. Its contract, cheap staging, and hourly apply require separate owner
@@ -167,9 +168,12 @@ make aws-init
 make aws-plan
 ```
 
-The default plan creates the low-cost tier: S3, SNS, SQS, and ECR, with SES
-enabled only when a sender address is supplied. `enable_rds` and `enable_eks`
-both default to `false` because they create hourly charges.
+The default plan creates the low-cost tier: S3, SNS, SQS, and separate relay
+and sink ECR repositories, with SES and the $5 forgotten-resource budget
+enabled only when their addresses are supplied. `enable_rds`, `enable_eks`,
+and `enable_msk` all default to `false` because they create hourly charges.
+`make aws-plan` saves an exact plan plus a redaction-safe resource and cost
+summary; `make aws-up` applies only that saved plan.
 
 After reviewing the plan and deciding to create the resources:
 
