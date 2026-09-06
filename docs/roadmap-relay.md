@@ -397,9 +397,11 @@ healthy`.
 
 ## M4 -- Ephemeral live AWS validation
 
-**Contract work may begin at #91. Live AWS validation remains unverified and
-requires separate owner authorization. The paid session is estimated at
-~$1/hour and ends in `terraform destroy`.**
+**The owner accepted the contract in
+[ADR 0010](adr/0010-live-aws-relay-contract.md) on 2026-09-05. Live AWS
+validation remains unverified and requires separate owner authorization. The
+fixed paid shape is estimated at $1.02/hour, capped at $1.25/hour and $5 total,
+and ends in destroy.**
 
 [#90](https://github.com/lilabrooks/my-local-platform/issues/90) closed after
 the M3 proof passed, releasing M4's contract work. Its governed sequence begins
@@ -427,6 +429,26 @@ at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
 Approval for #96 does not authorize #97. The low-cost staging mutation and the
 hourly EKS, MSK, and RDS session are separate decisions.
 
+ADR 0010 and the [AWS relay runbook](runbook-aws-relay.md) fix the handoff
+across that sequence:
+
+| Boundary | Contract |
+|---|---|
+| Topology | private MSK Serverless and RDS; EKS runs relay, internal sink, KEDA, ArgoCD, Prometheus, Grafana, and Tempo |
+| Identity | EKS Pod Identity for separate ingest, deliver, and KEDA operator roles; the sink has no AWS role |
+| Images | immutable `mlp-dev/relay` and `mlp-dev/sink` ECR repositories, git SHA tags, digest deployments |
+| Data | 12-partition delivery topic, one-partition DLQ, two ingest replicas, deliver scales 1 to 12 |
+| Exposure | EKS API restricted to the operator; workload UIs and sink reached only by `kubectl port-forward` |
+| Session | three hours, destroy begins at 2 hours 30 minutes, $1.25/hour shape gate, $5 maximum |
+| Terminal condition | success or failure runs state-backed destroy, service-native empty inventories, and a settled cost capture |
+
+Each child issue consumes the preceding artifact: issue #92 proves IAM
+transport, issue #93 produces guarded Terraform, issue #94 renders the
+workload, issue #95 rehearses the whole runbook locally, issue #96 stages
+immutable images and the reviewed plan, and issue #97 performs the separately
+authorized paid run. A change to the table returns to the owner before it
+enters a plan.
+
 The one thing the local stack structurally cannot teach: MSK Serverless supports
 **IAM authentication only** -- no SASL/SCRAM -- so this is SASL_SSL with
 OAUTHBEARER tokens minted from IAM credentials, delivered to pods by IRSA or EKS
@@ -439,8 +461,9 @@ that shift, narrow enough to name precisely.
 
 ### Before the first apply
 
-1. An AWS Budgets alarm. The failure mode is not overspending during the session
-   -- it is forgetting to destroy afterwards, at $700+/month.
+1. An AWS Budgets alarm for forgotten resources. The active session controls
+   are the fixed resource-shape gate, the 2-hour-30-minute destroy deadline,
+   the 3-hour hard stop, and the $5 approved maximum.
 2. Confirm the EKS version is in **standard** support. Extended support bills
    $0.60/cluster-hour instead of $0.10, applied automatically:
 
@@ -448,17 +471,18 @@ that shift, narrow enough to name precisely.
    aws eks describe-cluster-versions --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
    ```
 
-3. Decide the ECR layout. `aws_ecr_repository.app` is singular
-   (`infra/terraform/envs/dev/main.tf:165`) -- either a repository per service or
-   one with prefixed tags.
+3. Create the decided ECR layout: separate immutable `mlp-dev/relay` and
+   `mlp-dev/sink` repositories, exact commit tags, and digest deployments.
 
 ### Scope
 
 - `enable_msk` variable, default `false`, alongside `enable_rds` and
   `enable_eks` in `infra/terraform/envs/dev/variables.tf`.
 - MSK Serverless in the existing VPC's private subnets.
-- IRSA or Pod Identity for relay pods **and** the KEDA operator -- both need the
-  role, which is its own lesson.
+- EKS Pod Identity for separate relay-ingest, relay-deliver, and KEDA operator
+  roles. KEDA uses operator ownership; the sink has no AWS role. IRSA is the
+  pre-staging fallback only if the pinned KEDA path fails rehearsal and the
+  owner accepts an ADR amendment.
 - KEDA. **Both** Kafka scalers support MSK IAM, by different routes, and the two
   spellings are not interchangeable:
 
@@ -478,8 +502,10 @@ that shift, narrow enough to name precisely.
   tracker.
 
 **Exit:** the same `ScaledObject` from M2 scales `relay-deliver` against MSK.
-`terraform destroy` runs clean, `make aws-cost` confirms the meter stopped, and
-an ADR records the commands and the measured result.
+Success or failure reaches the destroy path by the fixed deadline. Terraform
+state and explicit service inventories contain no M4 runtime resource, and a
+settled cost capture records the final charge. Exact filenames and redaction
+rules are in the AWS relay runbook.
 
 ---
 

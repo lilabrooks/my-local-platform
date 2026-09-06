@@ -49,6 +49,7 @@ vendor/
 
 # Local scratch
 tmp/
+.evidence/
 
 # Agent tooling caches -- machine-local indexes, not shareable state.
 # .codegraph/ has its own .gitignore that keeps only that file.
