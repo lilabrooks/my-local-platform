@@ -1,6 +1,6 @@
 # Goal: `relay`
 
-Date: 2026-08-24 · Last audited: 2026-09-03
+Date: 2026-08-24 · Last audited: 2026-09-05
 Status: **Built.** The target behaviour below was delivered by M1 and M2, and
 the demo it describes runs as `make relay-demo`. Kept as written rather than
 rewritten in the past tense: it is the thing the work was measured against, and
@@ -289,9 +289,10 @@ test asserting it carries nothing else.
 Sequencing and milestones are in [the roadmap](roadmap-relay.md). The choice of
 Kafka is in [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). M0 through M3
 are built. M3's whole-application local proof passed on 2026-09-05;
-[#90](https://github.com/lilabrooks/my-local-platform/issues/90) closes when
-the evidence change merges and then releases M4. This status records the chosen
-sequence without changing the target behaviour above.
+[#90](https://github.com/lilabrooks/my-local-platform/issues/90) is closed and
+released the M4 contract work in
+[#91](https://github.com/lilabrooks/my-local-platform/issues/91). This status
+records the chosen sequence without changing the target behaviour above.
 
 This sentence used to read "Nothing in either has been built yet." It was true
 on 2026-08-24 and survived three milestones sitting directly under a header

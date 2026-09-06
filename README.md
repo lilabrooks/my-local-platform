@@ -110,10 +110,12 @@ evidence behind it.
 Current state:
 
 - M0 through M3 are complete. The M3 whole-application proof passed locally on
-  2026-09-05; [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90)
-  closes when the evidence change merges.
-- M4 follows #90's closure with a rehearsed, short-lived AWS run on EKS, MSK,
-  and RDS.
+  2026-09-05, and
+  [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90) is
+  closed.
+- [Issue #91](https://github.com/lilabrooks/my-local-platform/issues/91) is the
+  next M4 work: settle the live AWS contract before implementation. The later
+  AWS run is rehearsed, short-lived, and separately authorized.
 - The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
   RDS, and MSK validation remains future work.
 
