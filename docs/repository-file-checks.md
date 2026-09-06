@@ -125,6 +125,8 @@ Each job installs Terraform 1.15.8 and runs:
 terraform fmt -check -recursive
 terraform init -backend=false -input=false
 terraform validate
+terraform test # dev stack only: disabled and enabled runtime plans
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests # dev only
 ```
 
 The disabled backend avoids remote state. The workflow has no AWS credentials,
@@ -644,9 +646,11 @@ terraform validate
 ```
 
 `terraform validate` checks parsing, references, types, and provider schemas.
-The disabled backend keeps the job away from remote state, and the job has no
-AWS credentials. This validation is separate from `make lint`, which runs
-Terraform formatting and TFLint.
+The dev stack's mocked tests additionally assert that the default has no
+hourly resources, the enabled plan matches ADR 0010, and missing budget or EKS
+endpoint configuration fails. The disabled backend keeps the job away from
+remote state, and the job has no AWS credentials. This validation is separate
+from `make lint`, which runs Terraform formatting and TFLint.
 
 The repository's cost guardrails still apply. Validation never authorizes
 `terraform apply`, `make aws-up`, or another command that creates AWS

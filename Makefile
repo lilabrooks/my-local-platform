@@ -11,6 +11,9 @@ COMPOSE_ENV = MLP_ENV_FILE="$(ENV_FILE)" python3 scripts/with-compose-env.py
 AWS_PROFILE_NAME ?= aws-public-change-feed
 AWS_REAL_REGION ?= us-east-1
 AWS_INIT_ARGS ?=
+AWS_TF_ARGS ?=
+AWS_PLAN_FILE ?= infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan
+AWS_PLAN_SUMMARY ?= infra/terraform/envs/dev/.terraform/mlp-plan-summary.json
 AWS_REAL_ENV = env -i \
 	HOME="$(HOME)" \
 	PATH="$(PATH)" \
@@ -206,7 +209,7 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 UNCACHED_MODULES := k8s/validate
 
 .PHONY: test
-test: ## Run Go tests across every module
+test: ## Run Go module and infrastructure guard tests
 	@for m in $(GO_MODULES); do \
 	  flags=""; \
 	  for u in $(UNCACHED_MODULES); do \
@@ -215,6 +218,7 @@ test: ## Run Go tests across every module
 	  echo "==> $$m: go test $$flags ./..."; \
 	  ( cd "$$m" && go test $$flags ./... ) || exit 1; \
 	done
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests
 
 .PHONY: tidy
 tidy: ## go mod tidy in every module
@@ -454,8 +458,11 @@ aws-init: aws-whoami ## Initialize the remote state backend for the dev environm
 	    -backend-config="encrypt=true"
 
 .PHONY: aws-plan
-aws-plan: aws-init ## Terraform plan for dev (read-only; needs the state backend)
-	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform plan
+aws-plan: aws-init ## Guard and save a reviewable Terraform plan for dev
+	$(AWS_REAL_ENV) \
+	  MLP_AWS_PLAN_FILE="$(AWS_PLAN_FILE)" \
+	  MLP_AWS_PLAN_SUMMARY="$(AWS_PLAN_SUMMARY)" \
+	  ./scripts/aws-terraform-guard.sh plan $(AWS_TF_ARGS)
 
 AWS_STATE_BACKUP ?= .terraform/mlp-last-known.tfstate
 
@@ -471,9 +478,12 @@ aws-state-backup: aws-whoami ## Save a private recovery copy of the current remo
 
 .PHONY: aws-up
 aws-up: aws-init ## Apply the dev environment to real AWS (INCURS COST)
-	@echo "This creates real, billable AWS resources. See docs/costs.md."
+	@echo "This applies the exact reviewed plan and may create billable AWS resources."
 	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
-	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform apply
+	$(AWS_REAL_ENV) \
+	  MLP_AWS_PLAN_FILE="$(AWS_PLAN_FILE)" \
+	  MLP_AWS_PLAN_SUMMARY="$(AWS_PLAN_SUMMARY)" \
+	  ./scripts/aws-terraform-guard.sh apply
 	$(MAKE) aws-state-backup
 
 .PHONY: aws-down

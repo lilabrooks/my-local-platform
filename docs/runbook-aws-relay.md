@@ -5,8 +5,9 @@ AWS mutation.
 
 This runbook implements the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md). It is the shared handoff for
-issues #92 through #97. Commands that do not exist yet are named as contracts;
-their implementing issue must keep the behavior and terminal conditions here.
+issues #92 through #97. The guarded Terraform plan and exact-plan apply now
+exist. Later deployment, rehearsal, staging, and evidence commands remain
+contracts until their implementing issues land.
 
 The live run needs three separate approvals:
 

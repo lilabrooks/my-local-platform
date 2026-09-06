@@ -2,7 +2,7 @@
 # Expensive tier -- OFF by default. Each of these bills by the hour.
 # =============================================================================
 
-# VPC is only needed by RDS and EKS, so it is created only when one is enabled.
+# VPC is only needed by RDS, EKS, and MSK, so it is created only when one is enabled.
 # On its own a VPC is free; the NAT gateway inside it is not (~$32/month plus
 # data processing), so single_nat_gateway is forced on and it is skipped
 # entirely unless EKS needs egress.
@@ -31,7 +31,7 @@ module "vpc" {
 }
 
 locals {
-  needs_vpc = var.enable_rds || var.enable_eks
+  needs_vpc = var.enable_rds || var.enable_eks || var.enable_msk
 }
 
 # -----------------------------------------------------------------------------
@@ -93,8 +93,69 @@ resource "aws_db_instance" "main" {
   apply_immediately       = true
 }
 
+# The value is staged outside Terraform so it never enters state. Terraform
+# owns only the short-lived secret container and its tags.
+resource "aws_secretsmanager_secret" "sink_signing_key" {
+  count = var.enable_eks ? 1 : 0
+
+  name                    = "${local.name}/sink-signing-key"
+  description             = "Controlled sink signing key for the M4 relay run"
+  recovery_window_in_days = 0
+}
+
 # -----------------------------------------------------------------------------
-# EKS -- roughly $110/month: $73 control plane + 2x t3.small + NAT gateway.
+# MSK Serverless -- roughly $0.77/hour for one cluster and 13 partitions.
+# Topics are created by the staging command, not by runtime pods.
+# -----------------------------------------------------------------------------
+resource "aws_security_group" "msk" {
+  count = var.enable_msk ? 1 : 0
+
+  name        = "${local.name}-msk"
+  description = "MSK IAM access from the EKS worker security group only"
+  vpc_id      = module.vpc[0].vpc_id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "msk_from_eks" {
+  count = var.enable_msk && var.enable_eks ? 1 : 0
+
+  security_group_id            = aws_security_group.msk[0].id
+  referenced_security_group_id = module.eks[0].node_security_group_id
+  description                  = "Kafka IAM from EKS workers"
+  from_port                    = 9098
+  to_port                      = 9098
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "msk_vpc" {
+  count = var.enable_msk ? 1 : 0
+
+  security_group_id = aws_security_group.msk[0].id
+  description       = "MSK traffic inside the private VPC"
+  cidr_ipv4         = module.vpc[0].vpc_cidr_block
+  ip_protocol       = "-1"
+}
+
+resource "aws_msk_serverless_cluster" "relay" {
+  count = var.enable_msk ? 1 : 0
+
+  cluster_name = local.name
+
+  vpc_config {
+    subnet_ids         = module.vpc[0].private_subnets
+    security_group_ids = [aws_security_group.msk[0].id]
+  }
+
+  client_authentication {
+    sasl {
+      iam {
+        enabled = true
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# EKS -- roughly $115/month: $73 control plane + 2x t3.medium + NAT gateway.
 # For learning Kubernetes locally, `minikube start` costs nothing. Turn this on
 # when you specifically want to learn EKS itself.
 # -----------------------------------------------------------------------------
@@ -110,12 +171,24 @@ module "eks" {
   #   aws eks describe-cluster-versions \
   #     --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
   # 1.35 is in standard support until 2027-03-27.
-  kubernetes_version = "1.35"
+  kubernetes_version = var.eks_kubernetes_version
+
+  # Kubernetes 1.35 encrypts all API data with an AWS-owned key by default.
+  # Avoid a customer-managed key that would remain pending deletion after the
+  # short-lived cluster is destroyed.
+  encryption_config = null
 
   vpc_id     = module.vpc[0].vpc_id
   subnet_ids = module.vpc[0].private_subnets
 
-  endpoint_public_access = true
+  endpoint_public_access       = true
+  endpoint_public_access_cidrs = [var.eks_operator_cidr]
+
+  addons = {
+    eks-pod-identity-agent = {
+      before_compute = true
+    }
+  }
 
   # Whoever runs `terraform apply` gets cluster admin, otherwise you apply
   # successfully and then cannot talk to your own cluster.
@@ -123,11 +196,19 @@ module "eks" {
 
   eks_managed_node_groups = {
     default = {
-      instance_types = ["t3.small"]
-      min_size       = 1
-      max_size       = 3
-      desired_size   = 2
-      capacity_type  = "SPOT" # ~70% cheaper; fine for dev
+      instance_types = [local.eks_instance_type]
+      min_size       = local.eks_node_minimum
+      max_size       = local.eks_node_maximum
+      desired_size   = local.eks_node_desired
+      capacity_type  = local.eks_node_capacity
+
+      # IMDSv2 with hop limit 1 keeps node-role credentials out of ordinary
+      # pods if a Pod Identity association is absent or broken.
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_put_response_hop_limit = 1
+        http_tokens                 = "required"
+      }
     }
   }
 }

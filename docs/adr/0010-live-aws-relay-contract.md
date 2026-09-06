@@ -41,7 +41,7 @@ stay private.
 
 | Surface | Contract |
 |---|---|
-| EKS | One Kubernetes 1.35 cluster in standard support; one managed Spot node group with two desired `t3.medium` nodes, minimum one and maximum three |
+| EKS | One Kubernetes 1.35 cluster in standard support; one managed Spot node group with two desired `t3.medium` nodes, minimum one and maximum three; default API-data envelope encryption with an AWS-owned key |
 | Relay | Two `relay-ingest` replicas and a KEDA-managed `relay-deliver` Deployment with 1 to 12 replicas; both use the same image digest |
 | Sink | One controlled sink behind a `ClusterIP` Service; no ingress or load balancer |
 | Kafka | One MSK Serverless cluster; `mlp.relay.deliveries` has 12 partitions and the DLQ has one |
@@ -67,6 +67,11 @@ The worker type differs from the current Terraform placeholder. M3 measured a
 Two `t3.small` nodes provide only 4 GiB before EKS system overhead. Two
 `t3.medium` nodes provide 8 GiB and preserve useful headroom while keeping Spot
 capacity and the three-node ceiling.
+
+Kubernetes 1.35 encrypts all Kubernetes API data with an AWS-owned key by
+default. The EKS module's optional customer-managed key is disabled because it
+would outlive this short run in `PendingDeletion`; M4 has no requirement for a
+customer-managed key.
 
 ### EKS Pod Identity
 
@@ -366,11 +371,30 @@ credentials or resource creation:
   consumers, drained lag to zero, returned to one consumer at 140 seconds,
   exercised the DLQ, and completed cluster-mode replay through the same binary.
 
+Checked on 2026-09-06 for the #93 Terraform implementation, without creating
+an AWS resource:
+
+- an isolated `terraform init -backend=false`, `terraform validate`, and
+  `terraform test` passed seven mocked runs. They checked the disabled default,
+  enabled resource counts, node and partition shape, exact MSK resource ARNs,
+  Pod Identity association names, the MSK subnet and security-group boundary,
+  both configuration refusals, and partial-state removal;
+- the plan-summary and wrapper tests passed 14 cases, including replacement and
+  incomplete-plan refusal, budget and subscriber refusal, stock-system Bash,
+  support-check ordering, stale-pair removal, and changed-plan rejection;
+- `make test` passed every Go module and the wrapper tests, and `make lint`
+  passed all 11 repository checks, including TFLint, Trivy, and Gitleaks;
+- an authenticated default `make aws-plan` stopped during backend
+  initialization because this account has no bootstrap state bucket. No live
+  plan was produced, and creating that prerequisite remains part of the
+  separately authorized #96 staging work.
+
 ## Sources
 
 - [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - [EKS Pod Identity supported SDK versions](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-minimum-sdk.html)
 - [EKS Kubernetes versions](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html)
+- [EKS default envelope encryption](https://docs.aws.amazon.com/eks/latest/userguide/envelope-encryption.html)
 - [EKS pricing](https://aws.amazon.com/eks/pricing/)
 - [MSK IAM authorization actions](https://docs.aws.amazon.com/msk/latest/developerguide/iam-access-control.html)
 - [MSK pricing](https://aws.amazon.com/msk/pricing/)
