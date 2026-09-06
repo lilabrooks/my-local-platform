@@ -592,6 +592,33 @@ record and row, and matched all 4 attempt-history rows. The relay check took
 937ms. The observability profile was not running, so the optional Tempo
 assertion was off.
 
+### M3 whole-application proof, run 2026-09-05
+
+The closure run exercised the compose broker, Postgres, relay, controlled sink,
+and Tempo together, then ran the failure-boundary checks sequentially:
+
+```bash
+make smoke-traces
+make relay-replay-verify
+make relay-verify-ordering
+make relay-verify-graceful-drain
+make relay-verify-duplicate-on-crash
+```
+
+The traced smoke event `evt_2f90004ddafd451a18789e98a64f794e` produced 1
+Kafka record, 1 healthy delivery, 1 event row, and 4 attempt rows. Its poison
+record preserved 36 invalid bytes and every source identity field. Tempo trace
+`2b74c971058f50dc7219eddfce5f5cf9` held the ingest, produce, consume, and 4
+attempt spans.
+
+Replay returned all 3 selected events from the log. The ordering check delivered
+40 same-tenant events in accepted order. SIGTERM drained the in-flight record
+and kept its healthy delivery count at 1. Killing the consumer after delivery
+and before commit redelivered `evt_19f42e88f57c22827a342e99f91e1c49`
+with the same webhook id, raising its healthy delivery count from 1 to 2. These
+results cover the checked local paths; they do not establish a failure-rate
+distribution.
+
 ## Rollback
 
 Before M1 ships, reverting is deleting `services/relay`. After it ships,

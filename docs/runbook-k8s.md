@@ -187,6 +187,14 @@ A measured run, 600 events across 16 tenants with the sink answering in 1s:
   t=150s  lag=0     replicas=1     back to idle
 ```
 
+The M3 closure run on 2026-09-05 used the existing 1-node, 6 GiB `mlp` profile
+with current relay and sink images. `make monitoring-ready` found fresh group
+member, idle-member, and unassigned-partition evidence for every scraped relay
+target. `make relay-demo` produced 600 events, raised lag to 598, scaled from 1
+consumer to 12, drained lag to 0 at 110 seconds, and returned to 1 consumer at
+140 seconds. The failing-subscriber and cluster replay steps completed before
+the script exited 0.
+
 Three things have to be true or the run does not show what it looks like it
 shows.
 

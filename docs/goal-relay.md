@@ -287,12 +287,11 @@ test asserting it carries nothing else.
 ---
 
 Sequencing and milestones are in [the roadmap](roadmap-relay.md). The choice of
-Kafka is in [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). M0, M1 and M2
-are built and their milestones closed. On 2026-09-01, the owner selected M3
-followed by M4. M3 is active; M4 waits for
-[#90's whole-application local proof](https://github.com/lilabrooks/my-local-platform/issues/90).
-This status records the chosen sequence without changing the target behaviour
-above.
+Kafka is in [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md). M0 through M3
+are built. M3's whole-application local proof passed on 2026-09-05;
+[#90](https://github.com/lilabrooks/my-local-platform/issues/90) closes when
+the evidence change merges and then releases M4. This status records the chosen
+sequence without changing the target behaviour above.
 
 This sentence used to read "Nothing in either has been built yet." It was true
 on 2026-08-24 and survived three milestones sitting directly under a header

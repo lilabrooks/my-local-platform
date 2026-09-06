@@ -80,6 +80,12 @@ The trace-id query in `docs/runbook-local.md` then confirmed the result. Event
 subscriber, and three to the failing one before it was dead-lettered — all under
 trace `4ca8d2381dc5be5e0d6660db478f11f0`.
 
+The M3 whole-application proof repeated the assertion on 2026-09-05. Event
+`evt_2f90004ddafd451a18789e98a64f794e` produced the same ingest, produce, and
+consume path plus 4 attempt spans under trace
+`2b74c971058f50dc7219eddfce5f5cf9`. `make smoke-traces` exited 0 after matching
+every attempt span to a persisted attempt row.
+
 `make smoke-traces` is what asserts this, rather than `make smoke`. Tempo is in
 the `obs` compose profile and relay is in `apps`, so the plain smoke run — and
 CI's first smoke step, which excludes `obs` deliberately to prove tracing is

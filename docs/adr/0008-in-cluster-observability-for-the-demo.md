@@ -462,6 +462,16 @@ completed the failing-subscriber and replay steps. These are two local runs.
 They establish the checked path and do not claim a rate or reliability
 distribution.
 
+The M3 whole-application proof ran the same topology again on 2026-09-05 after
+loading relay and sink images built from commit `2bf5421`. `make
+monitoring-ready` found fresh broker assignment evidence on every scraped
+target. The 600-event demo raised lag to 598, scaled from 1 consumer to 12,
+drained lag to 0 at 110 seconds, and returned to 1 at 140 seconds. The
+failing-subscriber counter then moved from 0 to 1 dead letter while healthy
+deliveries increased, and the cluster replay completed before the script
+exited 0. This third run confirms the M3 integration path; it does not add a
+rate or reliability claim.
+
 Nothing in this section is still outstanding.
 
 ### What closes this gap

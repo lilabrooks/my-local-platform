@@ -109,11 +109,11 @@ evidence behind it.
 
 Current state:
 
-- M0 through M2 are complete, including the measured KEDA lag-scaling demo.
-- M3 is active and closes with a whole-application local proof in
-  [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90).
-- M4 follows that proof with a rehearsed, short-lived AWS run on EKS, MSK, and
-  RDS.
+- M0 through M3 are complete. The M3 whole-application proof passed locally on
+  2026-09-05; [issue #90](https://github.com/lilabrooks/my-local-platform/issues/90)
+  closes when the evidence change merges.
+- M4 follows #90's closure with a rehearsed, short-lived AWS run on EKS, MSK,
+  and RDS.
 - The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
   RDS, and MSK validation remains future work.
 
