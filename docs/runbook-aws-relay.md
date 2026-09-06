@@ -87,12 +87,12 @@ metrics, and traces remain the M3 contract.
 
 The relay image contains `/relay` and the operator-only `/relay-replay`
 command. Both use the settings above for every broker operation. In IAM mode,
-the pinned AWS MSK IAM signer loads the ambient AWS SDK credential chain and
-returns a token with a 15-minute expiry. The adapter asks the signer for a new
-token from kafka-go's per-connection SASL `Start` call; it does not cache or
-log the signed token. The mechanism name is `OAUTHBEARER`, and the initial
-response is `n,,`, a control-A, `auth=Bearer <token>`, then two control-A
-bytes.
+relay loads the ambient AWS SDK credential provider once at startup and keeps
+its refresh-aware credential cache. The adapter asks the pinned AWS MSK IAM
+signer for a fresh 15-minute token from kafka-go's per-connection SASL `Start`
+call. It does not cache or log the signed token. The mechanism name is
+`OAUTHBEARER`, and the initial response is `n,,`, a control-A,
+`auth=Bearer <token>`, then two control-A bytes.
 
 IAM mode always uses TLS 1.2 or newer with system trust and per-broker server
 name verification. There is no insecure-skip or plaintext IAM setting. The

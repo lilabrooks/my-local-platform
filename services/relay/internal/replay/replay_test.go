@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,20 @@ func TestWaitInactivePollsUntilEmpty(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("describe calls = %d, want 2", calls)
+	}
+}
+
+func TestWaitInactiveTimeoutIncludesLastGroupState(t *testing.T) {
+	c := fakeClient{describe: func(context.Context, *kafka.DescribeGroupsRequest) (*kafka.DescribeGroupsResponse, error) {
+		return &kafka.DescribeGroupsResponse{Groups: []kafka.DescribeGroupsResponseGroup{{
+			GroupID: "relay-deliver", GroupState: "Stable", Members: []kafka.DescribeGroupsResponseMember{{MemberID: "one"}, {MemberID: "two"}},
+		}}}, nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err := WaitInactive(ctx, c, kafka.TCP("broker:9092"), "relay-deliver", time.Second)
+	if err == nil || !strings.Contains(err.Error(), `last state "Stable" with 2 members`) {
+		t.Fatalf("error = %v", err)
 	}
 }
 

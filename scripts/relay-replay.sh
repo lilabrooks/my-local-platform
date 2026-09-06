@@ -31,6 +31,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-local/docker-compose.yml}"
 CONSUMER_SERVICE="${CONSUMER_SERVICE:-relay-deliver}"
 NAMESPACE="${RELAY_NAMESPACE:-mlp}"
 MODE="${MODE:-auto}"
+LOCAL_CLUSTER_CONTEXT="${MINIKUBE_PROFILE:-mlp}"
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -60,6 +61,15 @@ if [ "$MODE" = auto ]; then
   fi
 fi
 say "mode: $MODE"
+
+if [ "$MODE" = cluster ]; then
+  current_context=$(kubectl config current-context)
+  if [ "$current_context" != "$LOCAL_CLUSTER_CONTEXT" ]; then
+    echo "MODE=cluster is limited to local context $LOCAL_CLUSTER_CONTEXT (current: $current_context)." >&2
+    echo "The AWS replay path is the relay-deliver-scoped Job rendered by issue #94." >&2
+    exit 1
+  fi
+fi
 
 # The KEDA HPA restores minReplicaCount within seconds of a manual scale to
 # zero, so `kubectl scale` is not a lever here -- the consumer rejoins the group

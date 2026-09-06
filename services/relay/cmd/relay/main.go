@@ -94,6 +94,7 @@ func run(log *slog.Logger) error {
 		"stall_budget", stallBudget)
 
 	kafkaConnection, err := kafkatransport.New(
+		context.Background(),
 		envOr("KAFKA_BOOTSTRAP", "localhost:9092"),
 		envOr("KAFKA_AUTH_MODE", kafkatransport.AuthNone),
 		os.Getenv("AWS_REGION"),

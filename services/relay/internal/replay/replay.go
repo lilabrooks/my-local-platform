@@ -31,18 +31,30 @@ func WaitInactive(ctx context.Context, c client, addr net.Addr, group string, po
 	if poll <= 0 {
 		poll = time.Second
 	}
+	var lastState string
+	var lastMembers int
+	var observed bool
 	for {
+		if err := ctx.Err(); err != nil {
+			return inactiveWaitError(group, lastState, lastMembers, observed, err)
+		}
 		response, err := c.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{
 			Addr:     addr,
 			GroupIDs: []string{group},
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return inactiveWaitError(group, lastState, lastMembers, observed, ctx.Err())
+			}
 			return fmt.Errorf("describe consumer group: %w", err)
 		}
 		if len(response.Groups) == 0 {
 			return nil
 		}
 		g := response.Groups[0]
+		lastState = g.GroupState
+		lastMembers = len(g.Members)
+		observed = true
 		if g.Error != nil {
 			if errors.Is(g.Error, kafka.GroupIdNotFound) {
 				return nil
@@ -57,10 +69,18 @@ func WaitInactive(ctx context.Context, c client, addr net.Addr, group string, po
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return fmt.Errorf("wait for consumer group to become inactive: %w", ctx.Err())
+			return inactiveWaitError(group, lastState, lastMembers, observed, ctx.Err())
 		case <-timer.C:
 		}
 	}
+}
+
+func inactiveWaitError(group, state string, members int, observed bool, err error) error {
+	if !observed {
+		return fmt.Errorf("wait for consumer group %q to become inactive: %w", group, err)
+	}
+	return fmt.Errorf("wait for consumer group %q to become inactive; last state %q with %d members: %w",
+		group, state, members, err)
 }
 
 // Reset commits the earliest offset, or the first offset at or after at, for

@@ -111,16 +111,18 @@ switch:
 | `DATABASE_URL` | local Postgres | private RDS endpoint and staged credentials |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | local collector | in-cluster collector |
 
-IAM mode requires TLS and rejects a plaintext broker address. Every other
-relay setting, event contract, topic name, consumer-group name, retry schedule,
-metric name, and trace contract stays the same.
+IAM mode always dials TLS. A plaintext broker fails the TLS handshake. Every
+other relay setting, event contract, topic name, consumer-group name, retry
+schedule, metric name, and trace contract stays the same.
 
 The #92 implementation keeps the unauthenticated path on kafka-go's existing
 TCP defaults. IAM mode installs one shared transport on ingest production, lag
 polling, deliver consumption, DLQ production, and replay. It uses the pinned
-AWS signer through kafka-go's per-connection SASL start boundary, so each new
-connection obtains a token from ambient identity instead of reusing a token
-created at process startup. The signer currently issues 15-minute tokens.
+AWS signer through kafka-go's per-connection SASL start boundary. Relay loads
+the ambient AWS credential provider once at startup and keeps the AWS SDK's
+refresh-aware credential cache. Each new connection signs a fresh token with
+the current cached credentials instead of reloading the provider chain. The
+signer currently issues 15-minute tokens.
 TLS uses system roots, a minimum of TLS 1.2, and kafka-go's per-address server
 name inference; certificate and hostname verification cannot be disabled by
 runtime configuration.

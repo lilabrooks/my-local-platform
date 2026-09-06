@@ -30,8 +30,11 @@ func run() error {
 	since := flag.String("since", "earliest", "earliest or an RFC3339 timestamp")
 	wait := flag.Duration("wait", 30*time.Second, "maximum time to wait for the group to become inactive")
 	flag.Parse()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	connection, err := kafkatransport.New(
+		ctx,
 		envOr("KAFKA_BOOTSTRAP", "localhost:9092"),
 		envOr("KAFKA_AUTH_MODE", kafkatransport.AuthNone),
 		os.Getenv("AWS_REGION"),
@@ -50,8 +53,6 @@ func run() error {
 		at = &parsed
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	client := &kafka.Client{
 		Addr:      connection.Addr(),
 		Transport: connection.RoundTripper(),

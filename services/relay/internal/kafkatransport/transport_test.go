@@ -110,8 +110,25 @@ func TestMSKIAMMechanismNamesTokenGenerationStage(t *testing.T) {
 	}
 }
 
+func TestNewMSKIAMMechanismSignsWithAmbientCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+	t.Setenv("AWS_SESSION_TOKEN", "test-session-token")
+	mechanism, err := newMSKIAMMechanism(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, initial, err := mechanism.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(initial), "n,,\x01auth=Bearer ") || !strings.HasSuffix(string(initial), "\x01\x01") {
+		t.Fatal("real signer returned an invalid OAUTHBEARER envelope")
+	}
+}
+
 func TestConnectionModes(t *testing.T) {
-	local, err := New("kafka-a:9092, kafka-b:9092", "", "")
+	local, err := New(context.Background(), "kafka-a:9092, kafka-b:9092", " none ", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +139,9 @@ func TestConnectionModes(t *testing.T) {
 		t.Fatalf("brokers = %v", got)
 	}
 
-	iam, err := New("broker.example:9098", AuthMSKIAM, "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+	iam, err := New(context.Background(), "broker.example:9098", AuthMSKIAM, "us-east-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +153,9 @@ func TestConnectionModes(t *testing.T) {
 	}
 	if iam.dialer.TLS.ServerName != "" || iam.transport.TLS.ServerName != "" {
 		t.Fatal("server name must remain empty for kafka-go to infer it per broker")
+	}
+	if iam.dialer.TLS.RootCAs != nil || iam.transport.TLS.RootCAs != nil {
+		t.Fatal("IAM mode replaced the system certificate pool")
 	}
 	if iam.dialer.TLS.MinVersion < tls.VersionTLS12 || iam.transport.TLS.MinVersion < tls.VersionTLS12 {
 		t.Fatal("IAM mode permits TLS older than 1.2")
@@ -160,7 +182,7 @@ func TestMSKIAMMechanismCompletesKafkaProtocolHandshake(t *testing.T) {
 	}
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- serveFakeOAUTHBEARER(listener, []byte("n,,\x01auth=Bearer fake-signed-token\x01\x01"))
+		serverErr <- serveFakeOAUTHBEARER(listener, []byte("n,,\x01auth=Bearer fake-signed-token\x01\x01"), true)
 	}()
 
 	transport := &kafka.Transport{SASL: mechanism, DialTimeout: 2 * time.Second}
@@ -174,7 +196,40 @@ func TestMSKIAMMechanismCompletesKafkaProtocolHandshake(t *testing.T) {
 	}
 }
 
-func serveFakeOAUTHBEARER(listener net.Listener, wantInitial []byte) error {
+func TestMSKIAMMechanismCompletesKafkaDialerHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	now := time.Unix(1_700_000_000, 0)
+	mechanism := &mskIAMMechanism{
+		region: "us-east-1",
+		now:    func() time.Time { return now },
+		generate: func(context.Context, string) (string, int64, error) {
+			return "fake-dialer-token", now.Add(15 * time.Minute).UnixMilli(), nil
+		},
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- serveFakeOAUTHBEARER(listener, []byte("n,,\x01auth=Bearer fake-dialer-token\x01\x01"), false)
+	}()
+
+	dialer := &kafka.Dialer{Timeout: 2 * time.Second, SASLMechanism: mechanism}
+	conn, err := dialer.DialContext(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveFakeOAUTHBEARER(listener net.Listener, wantInitial []byte, expectMetadata bool) error {
 	conn, err := listener.Accept()
 	if err != nil {
 		return err
@@ -221,6 +276,9 @@ func serveFakeOAUTHBEARER(listener net.Listener, wantInitial []byte) error {
 	if err := protocol.WriteResponse(conn, version, correlation, &saslauthenticate.Response{}); err != nil {
 		return fmt.Errorf("write SaslAuthenticate: %w", err)
 	}
+	if !expectMetadata {
+		return nil
+	}
 
 	version, correlation, _, request, err = protocol.ReadRequest(conn)
 	if err != nil {
@@ -243,7 +301,7 @@ func TestConnectionValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.brokers, tt.mode, tt.region)
+			_, err := New(context.Background(), tt.brokers, tt.mode, tt.region)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want substring %q", err, tt.want)
 			}

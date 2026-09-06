@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-msk-iam-sasl-signer-go/signer"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/segmentio/kafka-go/sasl"
 )
 
@@ -19,12 +20,18 @@ type mskIAMMechanism struct {
 	now      func() time.Time
 }
 
-func newMSKIAMMechanism(region string) sasl.Mechanism {
-	return &mskIAMMechanism{
-		region:   region,
-		generate: signer.GenerateAuthToken,
-		now:      time.Now,
+func newMSKIAMMechanism(ctx context.Context, region string) (sasl.Mechanism, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("load ambient AWS configuration: %w", err)
 	}
+	return &mskIAMMechanism{
+		region: region,
+		generate: func(ctx context.Context, region string) (string, int64, error) {
+			return signer.GenerateAuthTokenFromCredentialsProvider(ctx, region, cfg.Credentials)
+		},
+		now: time.Now,
+	}, nil
 }
 
 func (m *mskIAMMechanism) Name() string { return oauthBearerName }

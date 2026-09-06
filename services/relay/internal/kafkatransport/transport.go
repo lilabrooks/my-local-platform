@@ -2,6 +2,7 @@
 package kafkatransport
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -28,12 +29,13 @@ type Connection struct {
 // New validates the runtime connection settings. Local mode deliberately
 // leaves Dialer and Transport nil so kafka-go retains its unauthenticated TCP
 // defaults. MSK IAM mode always enables certificate and server-name checks.
-func New(bootstrap, authMode, region string) (*Connection, error) {
+func New(ctx context.Context, bootstrap, authMode, region string) (*Connection, error) {
 	brokers, err := parseBrokers(bootstrap)
 	if err != nil {
 		return nil, err
 	}
 
+	authMode = strings.TrimSpace(authMode)
 	if authMode == "" {
 		authMode = AuthNone
 	}
@@ -45,7 +47,10 @@ func New(bootstrap, authMode, region string) (*Connection, error) {
 		if strings.TrimSpace(region) == "" {
 			return nil, fmt.Errorf("AWS_REGION is required when KAFKA_AUTH_MODE=%s", AuthMSKIAM)
 		}
-		mechanism := newMSKIAMMechanism(strings.TrimSpace(region))
+		mechanism, err := newMSKIAMMechanism(ctx, strings.TrimSpace(region))
+		if err != nil {
+			return nil, err
+		}
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 		c.dialer = &kafka.Dialer{
 			Timeout:       10 * time.Second,
