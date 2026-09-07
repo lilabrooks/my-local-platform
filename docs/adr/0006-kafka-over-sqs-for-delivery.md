@@ -370,6 +370,12 @@ subscription points at `/hooks/flaky`, and since the offset commits only once
 every subscriber reaches a terminal state, each record would wait out the retry
 budget and the script would be measuring the retry schedule.
 
+The Go pilot now runs beside that shell gate as
+`go run ./cmd/relay-verify ordering` from `services/smoke`, or through
+`make relay-verify-ordering-go`. The shell implementation remains the reference
+until several CI pushes provide matching evidence. The dated evidence in this
+section still comes from the shell implementation.
+
 The assertion was checked against a deliberately reversed expectation before the
 pass was believed — it fails, names the first divergence, and exits 1.
 
