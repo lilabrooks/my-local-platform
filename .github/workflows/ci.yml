@@ -83,7 +83,7 @@ jobs:
           working-directory: ${{ matrix.module }}
           args: --config=${{ github.workspace }}/.golangci.yml --timeout 5m
       # -count=1: k8s/validate reads manifests the test cache does not track.
-      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
 
       - name: Kubernetes schema validation
         if: matrix.module == 'k8s/validate'
