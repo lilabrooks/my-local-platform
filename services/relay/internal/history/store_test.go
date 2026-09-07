@@ -92,10 +92,16 @@ func TestStoreAgainstPostgres(t *testing.T) {
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("postgres unreachable in CI (%v); the smoke job must provide it", err)
+		}
 		t.Skipf("no postgres pool (%v); run `make up` and `make seed`", err)
 	}
 	t.Cleanup(pool.Close)
 	if err := pool.Ping(ctx); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("postgres unreachable in CI (%v); the smoke job must provide it", err)
+		}
 		t.Skipf("postgres unreachable (%v); run `make up` and `make seed`", err)
 	}
 
