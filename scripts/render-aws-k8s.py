@@ -166,7 +166,8 @@ def replay_job(args: argparse.Namespace) -> dict[str, Any]:
     relay_image, _ = inputs(args)
     if args.since != "earliest":
         try:
-            datetime.datetime.strptime(args.since, "%Y-%m-%dT%H:%M:%SZ")
+            # The parsed value is discarded; the literal Z already requires UTC.
+            datetime.datetime.strptime(args.since, "%Y-%m-%dT%H:%M:%SZ")  # noqa: DTZ007
         except ValueError:
             fail("since must be earliest or an RFC3339 UTC timestamp")
     return {

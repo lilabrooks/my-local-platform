@@ -81,6 +81,8 @@ echo
 # run this matters more than the patch difference.
 YAMLLINT_IMAGE=pipelinecomponents/yamllint:0.35.10
 YAMLLINT_VERSION=1.37.1
+RUFF_IMAGE=ghcr.io/astral-sh/ruff:0.16.6
+RUFF_VERSION=0.16.6
 MARKDOWNLINT_VERSION=0.23.2
 SHELLCHECK_VERSION=0.11.0
 ACTIONLINT_VERSION=1.7.12
@@ -105,6 +107,16 @@ elif has_docker; then
         yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
 else
   skip "yamllint" "install with: pipx install yamllint==$YAMLLINT_VERSION"
+fi
+
+# --- Python -----------------------------------------------------------------
+if has ruff && pinned "$RUFF_VERSION" "$(ruff --version 2>&1)"; then
+  out=$(ruff check . 2>&1); report "ruff" $? "$out"
+elif has_docker; then
+  out=$(docker run --rm -v "$PWD":/repo -w /repo "$RUFF_IMAGE" check . 2>&1)
+  report "ruff" $? "$out"
+else
+  skip "ruff" "needs docker or ruff $RUFF_VERSION"
 fi
 
 # --- Shell ------------------------------------------------------------------

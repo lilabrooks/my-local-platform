@@ -1,0 +1,3 @@
+# Keep the selection explicit so a Ruff upgrade cannot change the gate's scope.
+[lint]
+select = ["F", "E9", "B", "DTZ"]
