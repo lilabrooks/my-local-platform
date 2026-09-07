@@ -72,8 +72,8 @@ func TestZeroStoreDoesNotPanic(t *testing.T) {
 	}
 }
 
-// Integration. Skips when the local stack is not up, so `make test` works
-// without Postgres running; CI brings the stack up before running it.
+// Integration. It skips when Postgres is down so `make test` works without the
+// local stack. The CI smoke job runs it after bootstrapping the relay schema.
 func TestForTenantAgainstPostgres(t *testing.T) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -85,10 +85,16 @@ func TestForTenantAgainstPostgres(t *testing.T) {
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
+		if os.Getenv("CI") != "" && os.Getenv("RELAY_STORE_TESTS_OPTIONAL") == "" {
+			t.Fatalf("postgres unreachable in CI (%v); the smoke job must provide it", err)
+		}
 		t.Skipf("no postgres pool (%v); run `make up` and `local/bootstrap/relay-db.sh`", err)
 	}
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
+		if os.Getenv("CI") != "" && os.Getenv("RELAY_STORE_TESTS_OPTIONAL") == "" {
+			t.Fatalf("postgres unreachable in CI (%v); the smoke job must provide it", err)
+		}
 		t.Skipf("postgres unreachable (%v); run `make up` and `local/bootstrap/relay-db.sh`", err)
 	}
 

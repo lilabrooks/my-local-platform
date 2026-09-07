@@ -20,6 +20,7 @@ MASKED_TOOLS = (
     "golangci-lint",
     "hadolint",
     "markdownlint-cli2",
+    "ruff",
     "shellcheck",
     "terraform",
     "tflint",
