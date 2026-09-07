@@ -219,8 +219,8 @@ test: ## Run Go module and infrastructure guard tests
 	  for u in $(UNCACHED_MODULES); do \
 	    if [ "$$m" = "$$u" ]; then flags="-count=1"; fi; \
 	  done; \
-	  echo "==> $$m: go test $$flags ./..."; \
-	  ( cd "$$m" && go test $$flags ./... ) || exit 1; \
+	  echo "==> $$m: go test -race $$flags ./..."; \
+	  ( cd "$$m" && go test -race $$flags ./... ) || exit 1; \
 	done
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests
 
