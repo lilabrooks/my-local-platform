@@ -83,7 +83,10 @@ jobs:
           working-directory: ${{ matrix.module }}
           args: --config=${{ github.workspace }}/.golangci.yml --timeout 5m
       # -count=1: k8s/validate reads manifests the test cache does not track.
-      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
+        env:
+          # Relay's SQL tests are mandatory in the smoke job, which has Postgres.
+          RELAY_STORE_TESTS_OPTIONAL: "1"
 
       - name: Kubernetes schema validation
         if: matrix.module == 'k8s/validate'
@@ -204,6 +207,13 @@ jobs:
 
       - name: Seed AWS resources, Kafka topics and relay subscriptions
         run: make seed ENV_FILE=.env.example
+
+      # These two packages carry SQL no other job executes. The `go` job has no
+      # Postgres, so both tests skipped on every run and the packages sat at
+      # 14.5% and 34.4% coverage. This is the only place the stack is already up.
+      - name: Relay store integration tests
+        working-directory: services/relay
+        run: go test -count=1 ./internal/subscriptions ./internal/history
 
       # relay-ingest and relay-deliver use the same relay:dev image, so building
       # relay-ingest is sufficient for both containers. Separate cache scopes
