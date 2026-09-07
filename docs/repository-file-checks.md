@@ -363,19 +363,36 @@ ineffassign. CI runs the same linter version once per Go module through
 
 ### Security: Trivy 0.74.0
 
-Trivy uses a cache under `${TMPDIR:-/tmp}/mlp-trivy-cache`. Before scanning,
-the lint script downloads 2 versioned inputs:
+Trivy uses a cache under
+`${TMPDIR:-/tmp}/mlp-trivy-cache-<checks-digest>`. Before scanning, the lint
+script prepares 2 inputs:
 
 1. The vulnerability database, through `trivy image --download-db-only`.
-2. The misconfiguration checks bundle, through a harmless `trivy config` run
-   against an empty cache input directory.
+2. The misconfiguration checks bundle, through a harmless `trivy config` scan
+   against an empty input directory. The bundle repository is pinned to an OCI
+   digest in `scripts/lint.sh`.
 
-Each download is retried up to 3 times. A failure after all 3 attempts fails
-the Trivy check. The final repository scan runs:
+The default bundle tag is mutable, and Trivy checks a cached bundle for
+registry updates at most once every 24 hours. Pinning the digest gives local and
+CI runs the same policy for a given commit. Updating the rules requires changing
+that pin. The digest also namespaces the cache, so a pin change starts a new
+cache while repeat runs keep the downloaded database and bundle.
+Changing the pin re-downloads the vulnerability database, and the script does
+not automatically remove older digest-named cache directories.
+
+Each download is retried up to 3 times. Trivy can exit successfully after a
+failed bundle pull by using its embedded checks, so the script requires both
+at least one Rego policy below `policy/content` and the pinned digest in
+`policy/metadata.json` before scanning. A refresh failure after all 3 attempts
+fails the Trivy check.
+
+The final repository scan runs:
 
 ```bash
 trivy fs \
   --scanners vuln,misconfig,secret \
+  --checks-bundle-repository mirror.gcr.io/aquasec/trivy-checks@sha256:... \
+  --ignorefile .trivyignore.yaml \
   --severity MEDIUM,HIGH,CRITICAL \
   --skip-dirs '**/.terraform' \
   --skip-db-update \
@@ -410,20 +427,25 @@ writable by that user.
 
 #### Accepted Trivy findings
 
-The repository has no `.trivyignore` file. All 4 active suppressions are
-attached to their Terraform resources:
+The repository has 4 inline Terraform suppressions and 3 entries in
+`.trivyignore.yaml`. The file-based entries cover 5 Kubernetes manifest paths.
 
-| Stack and resource | Rule | Recorded reason |
+| Location | Rule | Recorded reason |
 |---|---|---|
 | `envs/dev`, artifacts S3 bucket | `AWS-0132` | SSE-S3 is sufficient for disposable artifacts; a customer-managed KMS key adds a monthly cost. |
 | `envs/dev`, artifacts S3 bucket | `AWS-0090` | Versioning is disabled for disposable objects that expire after 30 days; the state bucket is versioned. |
 | `envs/dev`, SNS topic | `AWS-0136` | The AWS-managed SNS key encrypts the topic; a customer-managed key adds a monthly cost. |
 | `bootstrap`, state-bucket encryption configuration | `AWS-0132` | State uses SSE-S3 AES-256; a customer-managed key adds a monthly cost for this personal development stack. |
+| Relay and sink base Deployments | `KSV-0125` | Their non-routable digest fixtures are replaced by validated local or AWS overlays. |
+| AWS OpenTelemetry Collector Deployment | `KSV-0125` | This versioned upstream image is already exercised by the local stack; the project has no private image mirror. |
+| AWS Tempo Deployment | `KSV-0125` | This versioned upstream image is already exercised by the local stack; the project has no private image mirror. |
 
 The first 3 directives are in
 [`infra/terraform/envs/dev/main.tf`](../infra/terraform/envs/dev/main.tf). The
 bootstrap directive is in
 [`infra/terraform/bootstrap/main.tf`](../infra/terraform/bootstrap/main.tf).
+The Kubernetes entries and their exact paths are in
+[`.trivyignore.yaml`](../.trivyignore.yaml).
 
 Accepted Terraform findings carry inline `#trivy:ignore:` directives with the
 reason. A directive must sit on the resource Trivy reports and must be the last
