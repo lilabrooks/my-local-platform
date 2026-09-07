@@ -192,7 +192,7 @@ this repository to the Helm release name chosen in the Makefile.
 `max`, never `sum`.** This was found by running it, on 2026-08-27.
 
 The reasoning for putting the poller in ingest included the claim that ingest is
-single-replica. It is not: `k8s/manifests/relay/deployment-ingest.yaml` runs two,
+single-replica. It is not: `k8s/base/relay/deployment-ingest.yaml` runs two,
 both poll the broker for the same consumer group, and both publish the same
 numbers. The compose stack runs one, which is why nothing showed there.
 

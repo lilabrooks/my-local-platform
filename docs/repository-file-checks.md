@@ -19,8 +19,10 @@ make k8s-validate
 make smoke
 ```
 
-`make smoke` needs the local stack. The first 3 commands are free and do not
-contact AWS. See [costs.md](costs.md) before running any real-AWS target.
+`make smoke` needs the local stack. None of these commands creates cloud
+resources or contacts AWS. `make k8s-validate` needs Docker, Helm, kubectl, and
+network access on its first run to fetch pinned validation inputs. See
+[costs.md](costs.md) before running any real-AWS target.
 
 ## Full CI workflow
 
@@ -539,13 +541,27 @@ Run:
 make k8s-validate
 ```
 
-This executes `go test -count=1 ./...` in `k8s/validate`. Always keep
-`-count=1`: the tests read YAML and shell files that Go's test cache does not
-track.
+This executes `go test -count=1 ./...` in `k8s/validate`, then runs
+`scripts/validate-k8s-schema.sh`. Always keep `-count=1`: the tests read YAML
+and shell files that Go's test cache does not track.
 
 The tests discover every directory under `k8s/manifests` containing a
 `kustomization.yaml`. Each directory is rendered with `kubectl kustomize`, and
 the rendered YAML must parse and contain at least 1 document.
+
+The schema script separately discovers every Kustomize root under
+`k8s/manifests`, `k8s/aws`, and `k8s/apps/aws`. It renders those roots, the
+generated runtime, replay, and AWS root Application, and the pinned
+kube-prometheus-stack chart. Pinned kubeconform schemas validate the built-in
+Kubernetes kinds; focused Go tests cover custom resources. Because Kubernetes
+schema validation cannot parse configuration embedded inside ConfigMaps, the
+script also asks the exact pinned Tempo and OpenTelemetry Collector images to
+validate their own configuration files.
+
+This gate needs Docker, Helm, and kubectl. The first run contacts container,
+chart, and schema registries to download pinned inputs; later runs may use
+local caches. It never contacts a Kubernetes cluster or AWS and creates no
+cloud resources.
 
 The rendered-manifest tests assert:
 

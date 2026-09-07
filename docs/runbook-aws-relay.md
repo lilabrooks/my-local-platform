@@ -1,13 +1,15 @@
 # Live AWS relay validation runbook
 
-Status: Contract accepted on 2026-09-05. No command on this page authorizes an
-AWS mutation.
+Status: Contract accepted on 2026-09-05. The deployment render is implemented;
+the local rehearsal and live AWS validation are not. No command on this page
+authorizes an AWS mutation.
 
 This runbook implements the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md). It is the shared handoff for
-issues #92 through #97. The guarded Terraform plan and exact-plan apply now
-exist. Later deployment, rehearsal, staging, and evidence commands remain
-contracts until their implementing issues land.
+issues #92 through #97. The IAM transport, guarded Terraform plan, shutdown
+budgets, and locally validated deployment render now exist. Rehearsal, staging,
+and live evidence commands remain contracts until their implementing issues
+land.
 
 The live run needs three separate approvals:
 
@@ -120,6 +122,72 @@ controlled sink signing key. The staging helper must:
 Do not copy secret values into git, images, Terraform variables or outputs,
 shell history, screenshots, or evidence files.
 
+## Rendered deployment
+
+`k8s/base/` is the shared workload definition. `k8s/manifests/` adds the local
+ConfigMap, Secret, image tags, and unauthenticated Kafka scaler. `k8s/aws/`
+adds the AWS service accounts, MSK IAM scaler, internal Tempo and OpenTelemetry
+collector, and references to the two stable runtime objects. A workload change
+therefore has one base instead of separate local and AWS copies.
+
+The AWS root Application is deliberately untracked. #96 records the approved
+commit and two ECR digests. Render the bundle during #97 only after its
+separately authorized apply has also produced the MSK IAM broker endpoint:
+
+```bash
+make aws-k8s-render \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit" \
+  AWS_RELAY_IMAGE="$relay_image_by_digest" \
+  AWS_SINK_IMAGE="$sink_image_by_digest" \
+  AWS_MSK_BOOTSTRAP="$msk_iam_brokers"
+```
+
+The command writes only beneath ignored `.evidence/m4/<run-id>/rendered/`. It
+does not contact Kubernetes or mutate AWS. Its outputs are:
+
+| File | Role |
+|---|---|
+| `root-app.json` | pins every child Application to the approved commit, replaces the relay and sink image fixtures with ECR digests, and supplies KEDA's MSK endpoint |
+| `relay-runtime.json` | creates the non-secret runtime ConfigMap consumed by both relay roles |
+| `relay-replay.json` | defines an operator-run Job using `/relay-replay` and the `relay-deliver` identity |
+| `monitoring.yaml` | renders kube-prometheus-stack 88.5.4 with private Services, authenticated Grafana, and the Tempo datasource |
+
+The populated `relay-secrets` object is not rendered to disk. The #97 run
+streams it from Secrets Manager as described above. Before registering the
+root Application, create the `mlp` namespace, apply `relay-runtime` and the
+streamed Secret, create the delivery and DLQ topics, then create the RDS schema
+and seed its subscription row with that same signing key. The helper built by
+Issue #96 owns those broker and database initialization steps; it runs only
+after #97's separately authorized infrastructure apply has produced the
+endpoints.
+Install KEDA and the AWS monitoring values before the child Applications sync,
+then pass the generated root directly to the installer:
+
+```bash
+kubectl apply -f k8s/manifests/namespace.yaml
+kubectl apply -f ".evidence/m4/$run_id/rendered/relay-runtime.json"
+# Stream relay-secrets here; do not write it to disk.
+# Run the #96 staging helper to create both topics, the RDS schema, and the
+# subscription before any workload starts.
+make keda-install
+make monitoring-install-aws
+make argocd-install-aws \
+  AWS_ROOT_APPLICATION=".evidence/m4/$run_id/rendered/root-app.json"
+```
+
+Those commands target the current Kubernetes context. Their presence is not
+permission to run them. #95 rehearses their ordering locally, #96 stages the
+inputs with separate owner approval, and #97 is the only issue authorized to
+use the paid EKS cluster after a new approval.
+
+All rendered workload Services are `ClusterIP`; no AWS overlay contains an
+Ingress. Grafana and ArgoCD are reached through `kubectl port-forward`. Tempo
+is queried through Grafana's in-cluster datasource. `make k8s-validate` renders
+both environments, checks the application-specific invariants, and runs the
+rendered built-in objects through pinned kubeconform schemas without using a
+cluster.
+
 ## Before staging
 
 The #96 staging issue must capture these files under the raw evidence directory:
@@ -155,6 +223,45 @@ The paid run repeats M3's outcome on the fixed AWS topology:
 6. Capture exhausted and poison records from the DLQ with their source
    coordinates.
 7. Replay selected records and match their resulting deliveries.
+
+Replay uses the same consumer group as `relay-deliver`. Kafka refuses the
+offset reset while that group has an active member, and KEDA's minimum of one
+means `kubectl scale` cannot hold the Deployment at zero. Pause the
+ScaledObject, wait for every delivery pod to leave the group, create the
+generated Job, and always remove the pause annotation afterward:
+
+```bash
+(
+set -euo pipefail
+
+restore_relay() {
+  kubectl -n mlp annotate scaledobject relay-deliver \
+    autoscaling.keda.sh/paused-replicas-
+}
+trap restore_relay EXIT INT TERM
+
+kubectl -n mlp annotate scaledobject relay-deliver \
+  autoscaling.keda.sh/paused-replicas=0 --overwrite
+kubectl -n mlp wait --for=delete pod \
+  -l app.kubernetes.io/name=relay-deliver --timeout=120s
+
+replay_job=$(kubectl -n mlp create \
+  -f ".evidence/m4/$run_id/rendered/relay-replay.json" -o name)
+kubectl -n mlp wait --for=condition=complete "$replay_job" --timeout=90s
+kubectl -n mlp logs "$replay_job" \
+  | tee ".evidence/m4/$run_id/16-replay.txt"
+
+restore_relay
+trap - EXIT INT TERM
+)
+```
+
+Use `kubectl create`, not `kubectl apply`: the Job deliberately uses
+`generateName` so every replay has a distinct evidence source. Preserve its
+stdout before deleting the Job; it is the raw offset-reset input that #97
+correlates with event and delivery results in `16-replay.json`. If pausing,
+waiting, replay, or evidence capture fails, the trap still restores normal
+delivery; keep the failure as evidence rather than extending the paid run.
 
 Save the machine-readable results as `10-event.json`, `11-attempts.json`,
 `12-metrics.txt`, `13-trace.json`, `14-keda.txt`, `15-dlq.json`, and
@@ -209,7 +316,7 @@ endpoints, and secret values. Any match blocks the commit.
 | #91 | owner accepts ADR 0010 and this runbook |
 | #92 | IAM/TLS transport passes local tests |
 | #93 | disabled and enabled Terraform plans pass their resource-shape checks |
-| #94 | rendered workloads preserve this topology, identity, and evidence path |
+| #94 | rendered workloads preserve this topology, identity, and evidence path (implemented; merge closes the issue) |
 | #95 | the full runbook, including abort and cleanup, passes locally |
 | #96 | cheap staging, images, budget alarm, current prices, and exact plan are separately approved and captured |
 | #97 | paid proof ends in destroy, empty inventories, and a settled final cost |

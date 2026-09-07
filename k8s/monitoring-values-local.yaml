@@ -1,0 +1,11 @@
+# Local-only Grafana access. This file is never passed to the AWS install.
+grafana:
+  # Anonymous admin matches compose and keeps the three-minute local demo from
+  # stopping at a generated-password login prompt. Grafana is reachable only
+  # through a minikube port-forward.
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Admin
+    users:
+      home_dashboard_uid: relay-delivery

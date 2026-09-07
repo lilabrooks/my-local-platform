@@ -17,6 +17,9 @@ KEY_PATH="${KEY_PATH:-$HOME/.ssh/argocd_${REPO_SLUG##*/}}"
 NAMESPACE=argocd
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_APP="${ROOT_APPLICATION_FILE:-$HERE/root-app.yaml}"
+
+[ -f "$ROOT_APP" ] || { echo "root Application not found: $ROOT_APP" >&2; exit 2; }
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -58,10 +61,14 @@ SSH_URL="git@github.com:${REPO_SLUG}.git"
 # app, then narrow the workload and default projects.
 for f in \
   "$HERE/root-project.yaml" \
-  "$HERE/root-app.yaml" \
+  "$ROOT_APP" \
   "$HERE/project.yaml" \
   "$HERE/default-project.yaml"; do
-  sed "s|__REPO_URL__|${SSH_URL}|g" "$f" | kubectl apply -f - >/dev/null
+  sed \
+    -e "s|__REPO_URL__|${SSH_URL}|g" \
+    -e "s|https://github.com/${REPO_SLUG}.git|${SSH_URL}|g" \
+    -e "s|https://github.com/${REPO_SLUG}|${SSH_URL}|g" \
+    "$f" | kubectl apply -f - >/dev/null
 done
 
 say "done -- forcing a refresh"

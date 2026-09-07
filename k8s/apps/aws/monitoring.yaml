@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: mlp
+  source:
+    repoURL: https://github.com/lilabrooks/my-local-platform.git
+    targetRevision: __GIT_COMMIT__
+    path: k8s/manifests/monitoring
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m

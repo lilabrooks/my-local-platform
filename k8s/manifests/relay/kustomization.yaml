@@ -4,19 +4,18 @@ kind: Kustomization
 namespace: mlp
 
 resources:
+  - ../../base/relay
   - configmap.yaml
   - secret.yaml
-  - deployment-ingest.yaml
-  - deployment-deliver.yaml
-  - service-ingest.yaml
-  - service-deliver.yaml
   - scaledobject.yaml
 
-# 'commonLabels' is deprecated in kustomize; 'labels' with includeSelectors
-# false adds the label without rewriting the Deployment's selector, which is
-# immutable once created.
+images:
+  - name: example.invalid/mlp-dev/relay
+    newName: relay
+    newTag: dev
+
 labels:
-  - includeSelectors: false   # the Deployment selector is immutable once created
-    includeTemplates: true    # but pods should still carry the label
+  - includeSelectors: false
+    includeTemplates: true
     pairs:
       app.kubernetes.io/managed-by: argocd

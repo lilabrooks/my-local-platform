@@ -85,6 +85,11 @@ jobs:
       # -count=1: k8s/validate reads manifests the test cache does not track.
       - run: go test -count=1 ./...
 
+      - name: Kubernetes schema validation
+        if: matrix.module == 'k8s/validate'
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/validate-k8s-schema.sh
+
   terraform:
     name: terraform fmt and validate
     runs-on: ubuntu-latest

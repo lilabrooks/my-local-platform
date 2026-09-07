@@ -1,0 +1,21 @@
+misconfigurations:
+  - id: KSV-0125
+    paths:
+      - k8s/base/relay/deployment-deliver.yaml
+      - k8s/base/relay/deployment-ingest.yaml
+      - k8s/base/sink/deployment.yaml
+    statement: >-
+      These bases are not deployed directly. Their non-routable digest fixtures
+      are replaced by validated local or AWS overlays.
+  - id: KSV-0125
+    paths:
+      - k8s/aws/telemetry/collector-deployment.yaml
+    statement: >-
+      This is the versioned upstream OpenTelemetry Collector image already
+      exercised by the local stack; the project has no private image mirror.
+  - id: KSV-0125
+    paths:
+      - k8s/aws/telemetry/tempo-deployment.yaml
+    statement: >-
+      This is the versioned upstream Tempo image already exercised by the local
+      stack; the project has no private image mirror.

@@ -299,6 +299,7 @@ if has trivy && pinned "$TRIVY_VERSION" "$(trivy --version 2>&1 | head -1)"; the
         --exit-code 0 --quiet "$TRIVY_CHECKS_INPUT"); then
       out=$(trivy fs --scanners vuln,misconfig,secret \
             --cache-dir "$TRIVY_CACHE" --skip-db-update --skip-check-update \
+            --ignorefile .trivyignore.yaml \
             --severity MEDIUM,HIGH,CRITICAL \
             --skip-dirs '**/.terraform' \
             --exit-code 1 --quiet . 2>&1)
@@ -321,6 +322,7 @@ elif has_docker; then
             -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
             -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
             --skip-db-update --skip-check-update --scanners vuln,misconfig,secret \
+            --ignorefile .trivyignore.yaml \
             --severity MEDIUM,HIGH,CRITICAL --skip-dirs '**/.terraform' \
             --exit-code 1 --quiet . 2>&1)
       report "trivy" $? "$out"

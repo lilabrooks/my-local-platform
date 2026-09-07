@@ -339,10 +339,22 @@ monitoring-install: ## Install kube-prometheus-stack into the cluster (pinned; t
 	  --version $(KPS_VERSION) \
 	  --namespace $(MONITORING_NS) --create-namespace \
 	  --values k8s/monitoring-values.yaml \
+	  --values k8s/monitoring-values-local.yaml \
 	  --wait --timeout 10m
 	@echo
 	@echo "  next:  make monitoring-ready   (asserts the demo's panel will have data)"
 	@echo "         make monitoring-ui      (Grafana on :3001, not 3000)"
+
+.PHONY: monitoring-install-aws
+monitoring-install-aws: ## Install the pinned private evidence stack on the current EKS cluster
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update prometheus-community
+	helm upgrade --install $(MONITORING_RELEASE) prometheus-community/kube-prometheus-stack \
+	  --version $(KPS_VERSION) \
+	  --namespace $(MONITORING_NS) --create-namespace \
+	  --values k8s/monitoring-values.yaml \
+	  --values k8s/monitoring-values-aws.yaml \
+	  --wait --timeout 10m
 
 .PHONY: monitoring-ready
 monitoring-ready: ## Assert Prometheus is actually scraping relay-deliver
@@ -364,7 +376,7 @@ monitoring-password: ## Print the in-cluster Grafana admin password
 monitoring-ui: ## Port-forward the in-cluster Grafana to http://localhost:3001
 	@echo "http://localhost:3001/d/relay-delivery   (no login -- anonymous admin)"
 	@echo
-	@echo "  Anonymous access comes from k8s/monitoring-values.yaml, matching the"
+	@echo "  Anonymous access comes from k8s/monitoring-values-local.yaml, matching"
 	@echo "  compose Grafana. The login form still works for admin-only pages:"
 	@echo "  user admin, password from: make monitoring-password"
 	@echo "  (NOT prom-operator -- this chart version generates a random one.)"
@@ -375,9 +387,17 @@ monitoring-ui: ## Port-forward the in-cluster Grafana to http://localhost:3001
 argocd-install: ## Install ArgoCD and register the app-of-apps
 	REPO_URL=$(REPO_URL) ./k8s/argocd/install.sh
 
+AWS_ROOT_APPLICATION ?=
+
+.PHONY: argocd-install-aws
+argocd-install-aws: ## Install ArgoCD using the generated AWS root Application
+	@test -n "$(AWS_ROOT_APPLICATION)" || { echo "AWS_ROOT_APPLICATION is required" >&2; exit 2; }
+	@test -f "$(AWS_ROOT_APPLICATION)" || { echo "not found: $(AWS_ROOT_APPLICATION)" >&2; exit 2; }
+	REPO_URL=$(REPO_URL) ROOT_APPLICATION_FILE="$(AWS_ROOT_APPLICATION)" ./k8s/argocd/install.sh
+
 .PHONY: argocd-repo-creds
 argocd-repo-creds: ## Give ArgoCD read access to a private fork (deploy key)
-	./k8s/argocd/repo-creds.sh
+	ROOT_APPLICATION_FILE="$(AWS_ROOT_APPLICATION)" ./k8s/argocd/repo-creds.sh
 
 .PHONY: argocd-password
 argocd-password: ## Print the initial ArgoCD admin password
@@ -419,6 +439,44 @@ k8s-apply-local: ## Apply manifests directly, bypassing git and ArgoCD
 .PHONY: k8s-validate
 k8s-validate: ## Assert manifest invariants (selector immutability, probes, endpoints)
 	cd k8s/validate && go test -count=1 ./...
+	./scripts/validate-k8s-schema.sh
+
+AWS_RUN_ID          ?=
+AWS_APPROVED_COMMIT ?=
+AWS_RELAY_IMAGE     ?=
+AWS_SINK_IMAGE      ?=
+AWS_MSK_BOOTSTRAP   ?=
+AWS_K8S_RENDER_DIR  ?= .evidence/m4/$(AWS_RUN_ID)/rendered
+
+.PHONY: aws-k8s-render
+aws-k8s-render: ## Render the untracked AWS deployment bundle (no cluster mutation)
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	@test -n "$(AWS_RELAY_IMAGE)" || { echo "AWS_RELAY_IMAGE digest is required" >&2; exit 2; }
+	@test -n "$(AWS_SINK_IMAGE)" || { echo "AWS_SINK_IMAGE digest is required" >&2; exit 2; }
+	@test -n "$(AWS_MSK_BOOTSTRAP)" || { echo "AWS_MSK_BOOTSTRAP is required" >&2; exit 2; }
+	mkdir -p "$(AWS_K8S_RENDER_DIR)"
+	python3 scripts/render-aws-k8s.py application \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --relay-image "$(AWS_RELAY_IMAGE)" \
+	  --sink-image "$(AWS_SINK_IMAGE)" \
+	  --msk-bootstrap "$(AWS_MSK_BOOTSTRAP)" \
+	  --repo-url "$(REPO_URL)" >"$(AWS_K8S_RENDER_DIR)/root-app.json"
+	python3 scripts/render-aws-k8s.py runtime \
+	  --msk-bootstrap "$(AWS_MSK_BOOTSTRAP)" \
+	  >"$(AWS_K8S_RENDER_DIR)/relay-runtime.json"
+	python3 scripts/render-aws-k8s.py replay \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --relay-image "$(AWS_RELAY_IMAGE)" \
+	  >"$(AWS_K8S_RENDER_DIR)/relay-replay.json"
+	helm template $(MONITORING_RELEASE) kube-prometheus-stack \
+	  --repo https://prometheus-community.github.io/helm-charts \
+	  --version $(KPS_VERSION) \
+	  --namespace $(MONITORING_NS) \
+	  --values k8s/monitoring-values.yaml \
+	  --values k8s/monitoring-values-aws.yaml \
+	  >"$(AWS_K8S_RENDER_DIR)/monitoring.yaml"
+	@echo "rendered $(AWS_K8S_RENDER_DIR) (no cluster mutation)"
 
 .PHONY: k8s-status
 k8s-status: ## Show ArgoCD applications and the mlp namespace

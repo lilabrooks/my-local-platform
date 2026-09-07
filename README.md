@@ -121,9 +121,11 @@ Current state:
 - [Issues #92](https://github.com/lilabrooks/my-local-platform/issues/92),
   [#93](https://github.com/lilabrooks/my-local-platform/issues/93), and
   [#101](https://github.com/lilabrooks/my-local-platform/issues/101) complete
-  M4's locally testable foundation. The rendered deployment in
-  [#94](https://github.com/lilabrooks/my-local-platform/issues/94) is next. The
-  later AWS run remains rehearsed, short-lived, and separately authorized.
+  M4's locally testable foundation. [Issue
+  #94](https://github.com/lilabrooks/my-local-platform/issues/94) adds the
+  offline-validated AWS deployment render. The local rehearsal in
+  [#95](https://github.com/lilabrooks/my-local-platform/issues/95) is next. The
+  later AWS run remains short-lived and separately authorized.
 - The live S3 and SNS-to-SQS path has already been tested and destroyed. EKS,
   RDS, and MSK validation remains future work.
 
@@ -207,7 +209,9 @@ services/
 k8s/
   argocd/              ArgoCD install, projects, and root Application
   apps/                one ArgoCD Application per workload
-  manifests/           Kubernetes workload resources
+  base/                shared relay and sink workload definitions
+  manifests/           local Kubernetes overlays and workload resources
+  aws/                 AWS workload, identity, and telemetry overlays
 infra/terraform/
   bootstrap/           account-scoped remote state bucket
   envs/dev/            low-cost resources and opt-in RDS/EKS
@@ -242,9 +246,13 @@ Run the checks that cover your change:
 
 ```bash
 make test          # Go tests across all modules
-make k8s-validate  # manifest and GitOps invariants
+make k8s-validate  # rendered manifests, runtime configs, and GitOps invariants
 make lint          # Go, YAML, shell, Markdown, docs, Actions, Docker, Terraform, security, secrets
 ```
+
+`make k8s-validate` needs Docker, Helm, and kubectl. Its first run downloads
+pinned images, chart data, and schemas, but it does not use a cluster or contact
+AWS.
 
 `make smoke` is the local end-to-end gate and needs the Compose stack running.
 CI runs the same tests, linters, image builds, Terraform validation, and smoke

@@ -6,9 +6,6 @@ metadata:
     app.kubernetes.io/name: sink
     app.kubernetes.io/part-of: my-local-platform
 spec:
-  # One replica on purpose. The sink keeps what it received in memory, so a
-  # second replica would answer /received with half the story and the demo's
-  # assertions would flake.
   replicas: 1
   selector:
     matchLabels:
@@ -26,17 +23,16 @@ spec:
           type: RuntimeDefault
       containers:
         - name: sink
-          image: sink:dev
+          # This base is not deployed directly. Its non-routable digest fixture
+          # is replaced by the local or AWS overlay, which validation asserts.
+          image: example.invalid/mlp-dev/sink@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           env:
-            # Must match what relay signs with and what the subscriptions table
-            # holds. Same Secret, so they cannot drift apart.
             - name: RELAY_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: relay
+                  name: relay-secrets
                   key: RELAY_SIGNING_SECRET
-            # /hooks/flaky always fails, so the dead-letter path is deterministic.
             - name: SINK_FLAKY_FAIL_RATE
               value: "1"
             - name: PORT
@@ -54,9 +50,6 @@ spec:
               cpu: 10m
               memory: 16Mi
             limits:
-              # SINK_RETAIN bounds what the sink holds (#23); this is the
-              # backstop if that is ever set too high. 10000 deliveries is
-              # ~1.8MB, so the headroom here is deliberate rather than tight.
               memory: 128Mi
           livenessProbe:
             httpGet:
