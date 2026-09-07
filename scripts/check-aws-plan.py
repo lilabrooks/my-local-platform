@@ -15,15 +15,15 @@ import tempfile
 from typing import Any, Iterable
 
 
-HOURLY_RESOURCE_LIMITS = {
-    "aws_db_instance": 1,
-    "aws_eks_cluster": 1,
-    "aws_eks_node_group": 1,
-    "aws_msk_serverless_cluster": 1,
-    "aws_nat_gateway": 1,
+HOURLY_RESOURCE_TYPES = {
+    "aws_db_instance",
+    "aws_eks_cluster",
+    "aws_eks_node_group",
+    "aws_msk_serverless_cluster",
+    "aws_nat_gateway",
 }
 
-REVIEWED_RESOURCE_TYPES = set(HOURLY_RESOURCE_LIMITS) | {
+REVIEWED_RESOURCE_TYPES = HOURLY_RESOURCE_TYPES | {
     "aws_ecr_repository",
     "aws_kms_alias",
     "aws_kms_key",
@@ -81,7 +81,7 @@ def create_resource_type_counts(plan: dict[str, Any]) -> dict[str, int]:
 def hourly_counts(type_counts: dict[str, int]) -> dict[str, int]:
     return {
         resource_type: type_counts.get(resource_type, 0)
-        for resource_type in HOURLY_RESOURCE_LIMITS
+        for resource_type in HOURLY_RESOURCE_TYPES
     }
 
 
@@ -106,7 +106,7 @@ def selected_changes(
 
 
 def hourly_changes(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    return selected_changes(plan, set(HOURLY_RESOURCE_LIMITS))
+    return selected_changes(plan, HOURLY_RESOURCE_TYPES)
 
 
 def required_output(plan: dict[str, Any], name: str) -> Any:
@@ -131,11 +131,7 @@ def gate_failures(
         "aws_nat_gateway": bool(shape["enable_eks"]),
     }
 
-    for resource_type, limit in HOURLY_RESOURCE_LIMITS.items():
-        if planned[resource_type] > limit:
-            failures.append(
-                f"{resource_type} planned count {planned[resource_type]} exceeds {limit}"
-            )
+    for resource_type in HOURLY_RESOURCE_TYPES:
         if enabled[resource_type] and planned[resource_type] != 1:
             failures.append(
                 f"{resource_type} planned count {planned[resource_type]} must be 1 when enabled"

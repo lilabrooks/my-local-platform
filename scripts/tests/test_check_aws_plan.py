@@ -80,11 +80,11 @@ class PlanShapeTest(unittest.TestCase):
         self.assertNotIn("aws_db_instance", creates)
 
     def test_default_shape_passes_with_no_hourly_resources(self):
-        counts = {resource_type: 0 for resource_type in CHECK.HOURLY_RESOURCE_LIMITS}
+        counts = {resource_type: 0 for resource_type in CHECK.HOURLY_RESOURCE_TYPES}
         self.assertEqual(CHECK.gate_failures(shape(), counts, counts, []), [])
 
     def test_disabled_resource_creation_fails(self):
-        planned = {resource_type: 0 for resource_type in CHECK.HOURLY_RESOURCE_LIMITS}
+        planned = {resource_type: 0 for resource_type in CHECK.HOURLY_RESOURCE_TYPES}
         creates = planned.copy()
         planned["aws_msk_serverless_cluster"] = 1
         creates["aws_msk_serverless_cluster"] = 1
@@ -101,7 +101,7 @@ class PlanShapeTest(unittest.TestCase):
         )
 
     def test_cost_partition_and_node_limits_fail_closed(self):
-        counts = {resource_type: 0 for resource_type in CHECK.HOURLY_RESOURCE_LIMITS}
+        counts = {resource_type: 0 for resource_type in CHECK.HOURLY_RESOURCE_TYPES}
         runtime = shape(
             enable_eks=True,
             expected_hourly_usd=1.26,
