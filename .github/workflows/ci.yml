@@ -286,6 +286,12 @@ jobs:
       - name: Verify per-tenant delivery ordering
         run: ./scripts/verify-ordering.sh
 
+      # Keep the pilot beside the established shell gate until repeated CI
+      # runs show that both implementations observe the same contract.
+      - name: Verify per-tenant delivery ordering (Go pilot)
+        working-directory: services/smoke
+        run: go run ./cmd/relay-verify ordering
+
       # relay-deliver has 60s of termination grace because SIGTERM stops fetches
       # and lets the current record finish under its 30s record deadline, then
       # runs four more bounded shutdown steps. This makes the relationship

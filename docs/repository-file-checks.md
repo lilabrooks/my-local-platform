@@ -152,11 +152,12 @@ The smoke job has an ordered setup and verification path:
 10. Run the smoke program again with tracing required, checking one Tempo trace
     across ingest, Kafka, and every delivery attempt.
 11. Verify replay of acknowledged events.
-12. Verify steady-state per-tenant ordering.
-13. Verify graceful shutdown drains and commits the current record.
-14. Verify a crash in the delivery-to-commit window causes redelivery.
-15. On failure, print the final 100 lines from each Compose service.
-16. Always stop the Compose stack and delete its volumes.
+12. Verify steady-state per-tenant ordering with the established shell gate.
+13. Run the Go ordering pilot against the same live stack and contract.
+14. Verify graceful shutdown drains and commits the current record.
+15. Verify a crash in the delivery-to-commit window causes redelivery.
+16. On failure, print the final 100 lines from each Compose service.
+17. Always stop the Compose stack and delete its volumes.
 
 The initial no-observability run and the later trace-required run test 2
 different contracts. The first proves the application continues without a
@@ -696,9 +697,11 @@ starts relay and the sink. It runs these checks in order:
 3. `scripts/verify-replay.sh`, proving acknowledged events can be replayed.
 4. `scripts/verify-ordering.sh`, proving per-tenant delivery order in steady
    state.
-5. `scripts/verify-graceful-drain.sh`, proving SIGTERM drains and commits the
+5. `go run ./cmd/relay-verify ordering` from `services/smoke`, running the Go
+   pilot of the same steady-state ordering contract.
+6. `scripts/verify-graceful-drain.sh`, proving SIGTERM drains and commits the
    current record before exit.
-6. `scripts/verify-duplicate-on-crash.sh`, proving a crash after delivery and
+7. `scripts/verify-duplicate-on-crash.sh`, proving a crash after delivery and
    before commit redelivers the event and preserves it.
 
 The job dumps container logs on failure and removes its containers and volumes
@@ -716,6 +719,7 @@ focused verification:
 | `make monitoring-ready` | Prometheus is scraping `relay-deliver` and the demo query has data. |
 | `make relay-replay-verify` | Delivery, history removal, replay, and return of the same event IDs. |
 | `make relay-verify-ordering` | One tenant's events arrive in acceptance order. |
+| `make relay-verify-ordering-go` | The Go pilot checks the same steady-state ordering contract. |
 | `make relay-verify-graceful-drain` | SIGTERM drains, commits, and exits cleanly during an in-flight record. |
 | `make relay-verify-duplicate-on-crash` | SIGKILL during the commit window redelivers the same webhook ID. |
 | `make relay-verify-head-of-line` | Head-of-line blocking stays member-scoped; the measurement identifies its partition effect. |

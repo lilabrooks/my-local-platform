@@ -169,6 +169,10 @@ relay-replay-verify: ## Prove replay works: deliver, wipe, replay, assert the sa
 relay-verify-ordering: ## Assert one tenant's events are delivered in the order accepted
 	./scripts/verify-ordering.sh
 
+.PHONY: relay-verify-ordering-go
+relay-verify-ordering-go: ## Run the Go pilot of the steady-state ordering assertion
+	cd services/smoke && go run ./cmd/relay-verify ordering
+
 .PHONY: relay-verify-duplicate-on-crash
 relay-verify-duplicate-on-crash: ## Kill the consumer mid-record; assert the same webhook-id is redelivered
 	./scripts/verify-duplicate-on-crash.sh
