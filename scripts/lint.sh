@@ -289,51 +289,100 @@ fi
 # overlap not at all -- trivy found six issues tflint passed clean.
 # --skip-dirs matters: .terraform/ holds vendored upstream modules whose
 # example manifests are not ours to fix.
-TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache"
+TRIVY_CHECKS_DIGEST=sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c
+TRIVY_CHECKS_REPOSITORY="mirror.gcr.io/aquasec/trivy-checks@$TRIVY_CHECKS_DIGEST"
+TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache-${TRIVY_CHECKS_DIGEST#sha256:}"
 TRIVY_CHECKS_INPUT="$TRIVY_CACHE/checks-prefetch-input"
 mkdir -p "$TRIVY_CACHE" "$TRIVY_CHECKS_INPUT"
+
+# retry_net_until_checks <attempts> <command...>
+# Trivy returns zero when its checks pull fails and it falls back to embedded
+# checks. Require at least one downloaded policy and the repository-pinned
+# digest.
+retry_net_until_checks() {
+  local attempts="$1"; shift
+  local i out code
+  for i in $(seq 1 "$attempts"); do
+    out=$("$@" 2>&1); code=$?
+    if [ "$code" -eq 0 ] && \
+       find "$TRIVY_CACHE/policy/content" -name '*.rego' -type f \
+         -print -quit 2>/dev/null | grep -q . && \
+       grep -Fq "\"Digest\":\"$TRIVY_CHECKS_DIGEST\"" \
+         "$TRIVY_CACHE/policy/metadata.json" 2>/dev/null; then
+      printf '%s' "$out"
+      return 0
+    fi
+    if [ "$code" -eq 0 ]; then
+      out="${out}${out:+
+}Trivy returned success without a complete pinned checks bundle; unverified checks rejected"
+    fi
+    [ "$i" -lt "$attempts" ] && sleep $((i * 5))
+  done
+  printf '%s' "$out"
+  return 1
+}
+
+TRIVY_MODE=
 if has trivy && pinned "$TRIVY_VERSION" "$(trivy --version 2>&1 | head -1)"; then
+  TRIVY_MODE=native
+elif has_docker; then
+  TRIVY_MODE=container
+else
+  skip "trivy" "needs docker or trivy $TRIVY_VERSION"
+fi
+
+if [ "$TRIVY_MODE" = native ]; then
   if db_out=$(retry_net 3 trivy image --download-db-only \
       --cache-dir "$TRIVY_CACHE"); then
-    if checks_out=$(retry_net 3 trivy config --cache-dir "$TRIVY_CACHE" \
-        --exit-code 0 --quiet "$TRIVY_CHECKS_INPUT"); then
+    if checks_out=$(retry_net_until_checks 3 \
+        trivy config --cache-dir "$TRIVY_CACHE" \
+        --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
+        --exit-code 0 --quiet \
+        "$TRIVY_CHECKS_INPUT"); then
       out=$(trivy fs --scanners vuln,misconfig,secret \
             --cache-dir "$TRIVY_CACHE" --skip-db-update --skip-check-update \
             --ignorefile .trivyignore.yaml \
+            --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
             --severity MEDIUM,HIGH,CRITICAL \
             --skip-dirs '**/.terraform' \
             --exit-code 1 --quiet . 2>&1)
       report "trivy" $? "$out"
     else
-      report "trivy" 1 "checks bundle download failed after 3 attempts:\n$checks_out"
+      report "trivy" 1 "checks bundle refresh failed after 3 attempts:
+$checks_out"
     fi
   else
-    report "trivy" 1 "vulnerability database download failed after 3 attempts:\n$db_out"
+    report "trivy" 1 "vulnerability database download failed after 3 attempts:
+$db_out"
   fi
-elif has_docker; then
+elif [ "$TRIVY_MODE" = container ]; then
   if db_out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
       -v "$TRIVY_CACHE":/trivy-cache "aquasec/trivy:$TRIVY_VERSION" \
       image --download-db-only --cache-dir /trivy-cache); then
-    if checks_out=$(retry_net 3 docker run --rm --user "$(id -u):$(id -g)" \
+    if checks_out=$(retry_net_until_checks 3 \
+        docker run --rm --user "$(id -u):$(id -g)" \
         -v "$TRIVY_CACHE":/trivy-cache "aquasec/trivy:$TRIVY_VERSION" \
-        config --cache-dir /trivy-cache --exit-code 0 --quiet \
+        config --cache-dir /trivy-cache \
+        --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
+        --exit-code 0 --quiet \
         /trivy-cache/checks-prefetch-input); then
       out=$(docker run --rm --user "$(id -u):$(id -g)" \
             -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
             -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
             --skip-db-update --skip-check-update --scanners vuln,misconfig,secret \
             --ignorefile .trivyignore.yaml \
+            --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
             --severity MEDIUM,HIGH,CRITICAL --skip-dirs '**/.terraform' \
             --exit-code 1 --quiet . 2>&1)
       report "trivy" $? "$out"
     else
-      report "trivy" 1 "checks bundle download failed after 3 attempts:\n$checks_out"
+      report "trivy" 1 "checks bundle refresh failed after 3 attempts:
+$checks_out"
     fi
   else
-    report "trivy" 1 "vulnerability database download failed after 3 attempts:\n$db_out"
+    report "trivy" 1 "vulnerability database download failed after 3 attempts:
+$db_out"
   fi
-else
-  skip "trivy" "needs docker or trivy $TRIVY_VERSION"
 fi
 
 # --- Secrets ----------------------------------------------------------------
