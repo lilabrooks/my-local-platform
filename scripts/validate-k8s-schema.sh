@@ -73,9 +73,9 @@ docker run --rm -i "$KUBECONFORM_IMAGE" \
 # Ask the exact binaries used by the Deployments to parse those files too.
 docker run --rm --read-only --user 10001:10001 \
   -v "$ROOT/k8s/aws/telemetry/config/tempo.yaml:/etc/tempo.yaml:ro" \
-  grafana/tempo:3.0.3 \
+  docker.io/grafana/tempo:3.0.3 \
   -config.file=/etc/tempo.yaml -config.verify=true
 docker run --rm --read-only --user 10001:10001 \
   -v "$ROOT/k8s/aws/telemetry/config/collector.yaml:/etc/otel.yaml:ro" \
-  otel/opentelemetry-collector-contrib:0.159.0 \
+  docker.io/otel/opentelemetry-collector-contrib:0.159.0 \
   validate --config=/etc/otel.yaml

@@ -22,8 +22,10 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
+        # This is the versioned upstream collector image already exercised by
+        # the local stack; the project has no private image mirror.
         - name: collector
-          image: otel/opentelemetry-collector-contrib:0.159.0
+          image: docker.io/otel/opentelemetry-collector-contrib:0.159.0
           args: ["--config=/etc/otel/config.yaml"]
           imagePullPolicy: IfNotPresent
           ports:

@@ -24,7 +24,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: tempo
-          image: grafana/tempo:3.0.3
+          # This is the versioned upstream Tempo image already exercised by the
+          # local stack; the project has no private image mirror.
+          image: docker.io/grafana/tempo:3.0.3
           args: ["-config.file=/etc/tempo/tempo.yaml"]
           imagePullPolicy: IfNotPresent
           ports:

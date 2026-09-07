@@ -32,8 +32,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: relay
-          # Overlays replace this non-routable fixture with relay:dev locally
-          # or an ECR digest in AWS.
+          # This base is not deployed directly. Its non-routable digest fixture
+          # is replaced by the local or AWS overlay, which validation asserts.
           image: example.invalid/mlp-dev/relay@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           env:

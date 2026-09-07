@@ -23,6 +23,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: sink
+          # This base is not deployed directly. Its non-routable digest fixture
+          # is replaced by the local or AWS overlay, which validation asserts.
           image: example.invalid/mlp-dev/sink@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           env:
