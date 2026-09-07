@@ -32,6 +32,9 @@ CONSUMER_SERVICE="${CONSUMER_SERVICE:-relay-deliver}"
 NAMESPACE="${RELAY_NAMESPACE:-mlp}"
 MODE="${MODE:-auto}"
 LOCAL_CLUSTER_CONTEXT="${MINIKUBE_PROFILE:-mlp}"
+active_replay_pid=""
+replay_output=""
+consumer_stopped=0
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -85,28 +88,47 @@ stop_consumer() {
     cluster)
       # Paused, not scaled: removing the annotation later hands scaling back to
       # KEDA rather than leaving a Deployment someone has to remember to fix.
-      kubectl -n "$NAMESPACE" annotate scaledobject "$CONSUMER_SERVICE" \
+      kubectl --request-timeout=15s -n "$NAMESPACE" annotate \
+        scaledobject "$CONSUMER_SERVICE" \
         "$PAUSE_ANNOTATION=0" --overwrite >/dev/null
       ;;
   esac
-  # Both modes. An interrupted run leaves the consumer stopped otherwise, and
-  # the topic silently stops draining -- a stack left broken by a script that
-  # looked like it merely stopped.
-  trap restore_consumer EXIT INT TERM
+  consumer_stopped=1
 }
 
-# Restarts the consumer, and is also the EXIT trap set by stop_consumer.
+# Restarts the consumer. The EXIT trap calls it after any failure or signal.
 restore_consumer() {
   case "$MODE" in
     compose)
       docker compose -f "$COMPOSE_FILE" start "$CONSUMER_SERVICE" >/dev/null
       ;;
     cluster)
-      kubectl -n "$NAMESPACE" annotate scaledobject "$CONSUMER_SERVICE" \
-        "$PAUSE_ANNOTATION-" >/dev/null 2>&1 || true
+      kubectl --request-timeout=15s -n "$NAMESPACE" annotate \
+        scaledobject "$CONSUMER_SERVICE" "$PAUSE_ANNOTATION-" \
+        >/dev/null
       ;;
   esac
 }
+
+cleanup() {
+  if [ -n "$active_replay_pid" ] && kill -0 "$active_replay_pid" 2>/dev/null; then
+    kill "$active_replay_pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$active_replay_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$active_replay_pid" 2>/dev/null; then
+      kill -KILL "$active_replay_pid" 2>/dev/null || true
+    fi
+    wait "$active_replay_pid" 2>/dev/null || true
+  fi
+  if [ "$consumer_stopped" -eq 1 ]; then restore_consumer || true; fi
+  if [ -n "$replay_output" ]; then rm -f -- "$replay_output"; fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 replay() {
   case "$MODE" in
@@ -115,14 +137,14 @@ replay() {
       # KAFKA_AUTH_MODE settings as relay-deliver. The /relay-replay binary is
       # built into the relay image, so this path does not depend on Kafka's
       # Java CLI or a second operational image.
-      docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+      exec docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
         --entrypoint /relay-replay "$CONSUMER_SERVICE" "$@"
       ;;
     cluster)
       # This script's cluster mode is the local minikube demo. The live AWS
       # overlay runs this same binary in a short-lived Job with relay-deliver's
       # service account, because only that identity may alter group offsets.
-      kubectl -n "$NAMESPACE" exec deploy/relay-ingest -- /relay-replay "$@"
+      exec kubectl -n "$NAMESPACE" exec deploy/relay-ingest -- /relay-replay "$@"
       ;;
   esac
 }
@@ -166,12 +188,21 @@ fi
 # The command performs its own authenticated DescribeGroups, Metadata,
 # ListOffsets, and OffsetCommit requests. Its output is the replay receipt.
 say "waiting for group $GROUP to go inactive, then committing replay offsets"
+umask 077
+replay_output=$(mktemp "${TMPDIR:-/tmp}/mlp-relay-replay.XXXXXX")
 replay --group "$GROUP" --topic "$TOPIC" --since "$from" --wait 30s \
-  | sed 's/^/    /'
+  >"$replay_output" &
+active_replay_pid=$!
+if wait "$active_replay_pid"; then replay_status=0; else replay_status=$?; fi
+active_replay_pid=""
+sed 's/^/    /' "$replay_output"
+[ "$replay_status" -eq 0 ] || exit "$replay_status"
+rm -f -- "$replay_output"
+replay_output=""
 
 say "starting $CONSUMER_SERVICE"
 restore_consumer
-trap - EXIT INT TERM
+consumer_stopped=0
 
 say "replaying. every event after that point is being delivered again"
 if [ "$MODE" = cluster ]; then

@@ -146,12 +146,13 @@ the relay roles and the sink, and the dashboard `ConfigMap`.
   resets, then unpauses. `make relay-replay-verify` keeps running compose mode
   in CI.
 - **`make relay-demo` is the watchable path**: no hands, eyes on Grafana. It
-  asserts its own *preconditions* -- see the preflight in Consequences -- but
-  not its outcomes; what the six steps demonstrate is read off the panel by a
-  human. The self-checking path is a separate target shaped like the existing
-  `relay-replay-verify`. The distinction is worth keeping: a demo that judged
-  its own success would need to encode what "lag drained" means, and the
-  argument it exists to make is visual.
+  must remain legible as a visual sequence: lag rises and drains, the replica
+  line scales out and back, and delivery and dead-letter counters move during
+  the narrated steps. Machine-readable guards require the first delivery, lag
+  growth, scale-out, drain to zero, return to one consumer, fresh delivery and
+  dead-letter increments, and a delivery after replay. Prometheus transport,
+  response, empty-vector, and freshness failures stop the run.
+  `relay-replay-verify` carries the deeper replay assertion.
 - **`make monitoring-install` calls Helm directly, and Helm joins the
   requirements.** The alternative was rendering the chart to a pinned manifest
   in the repository, which would have kept the toolchain unchanged and made the
@@ -472,7 +473,21 @@ deliveries increased, and the cluster replay completed before the script
 exited 0. This third run confirms the M3 integration path; it does not add a
 rate or reliability claim.
 
-Nothing in this section is still outstanding.
+Checked on 2026-09-07 for the first issue #95 script slice, without starting
+the local runtime:
+
+- `make test` passed every Go module and 30 Python tests. The new HTTP-level
+  cases returned one sample from a valid Prometheus response and rejected a
+  503 response, malformed JSON, and an empty result vector without producing a
+  fallback zero.
+- `make lint` passed all 12 repository checks.
+- `minikube status -p mlp` reported the profile stopped, `kubectl` had no
+  current context, and the Compose project had no running service. This check
+  records no live result for the stronger assertions or their wait budgets.
+
+The M3 evidence in this section is complete. Issue #95 still requires the
+visual minikube rehearsal of the stronger script from the exact commit whose
+images will be staged.
 
 ### What closes this gap
 
