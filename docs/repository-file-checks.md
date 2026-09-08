@@ -44,7 +44,7 @@ The workflow applies these controls to every job:
 
 ### CI topology
 
-A flowchart is useful here because the workflow fans out into 7 prerequisite
+A flowchart is useful here because the workflow fans out into 8 prerequisite
 job groups and then folds their results into 1 branch-protection result. GitHub
 [renders Mermaid diagrams in Markdown files](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-diagrams),
 so the diagram stays editable beside the workflow it describes.
@@ -54,6 +54,7 @@ flowchart TD
     event[Pull request or manual dispatch]
     event --> go[Go: 5-module matrix]
     event --> terraform[Terraform: 2-stack matrix]
+    event --> python[Python tests and M4 repository preflight]
     event --> smoke[Smoke: ordered runtime suite]
     event --> image[Images: 3-service matrix]
     event --> modules[Go-module coverage]
@@ -62,6 +63,7 @@ flowchart TD
 
     go --> required[Required checks aggregate]
     terraform --> required
+    python --> required
     smoke --> required
     image --> required
     modules --> required
@@ -72,10 +74,10 @@ flowchart TD
     push[Push to protected branch] -. documented GitHub setup .-> codeql[CodeQL default setup]
 ```
 
-The 3 matrices expand the 8 tracked job definitions into 15 job instances on a
-pull request: 5 Go jobs, 2 Terraform jobs, 1 smoke job, 3 image jobs, module
-coverage, lint, dependency review, and the aggregate. A manual run shows the
-same shape with dependency review skipped.
+The 3 matrices expand the 9 tracked job definitions into 16 job instances on a
+pull request: 5 Go jobs, 2 Terraform jobs, Python, smoke, 3 image jobs, module
+coverage, lint, dependency review, and the aggregate. A manual run has the same
+shape with dependency review skipped.
 
 ### Job inventory
 
@@ -83,8 +85,9 @@ same shape with dependency review skipped.
 |---|---:|---:|---|
 | `go` | 5 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
 | `terraform` | 2 stacks | 15 minutes | Format, backend-free initialization, and configuration validation. |
+| `python` | 1 | 5 minutes | Python tests plus the account-independent M4 repository preflight. |
 | `smoke` | 1 | 30 minutes | Start the local platform and run smoke, trace, replay, ordering, drain, and crash checks. |
-| `image` | 3 services | 20 minutes | Pull each pinned build base with retries, then build the service image. |
+| `image` | 3 services | 20 minutes | Pull each pinned build base, build the service image, and verify its commit label. |
 | `go-modules-covered` | 1 | 5 minutes | Compare discovered `go.mod` files with the Go matrix. |
 | `lint` | 1 | 20 minutes | Run format, documentation, infrastructure, and security checks in strict mode against a full-history checkout; the Go matrix supplies golangci-lint. |
 | `dependency-review` | 1 | 10 minutes | Inspect pull-request dependency changes; skip on manual dispatch. |
@@ -128,7 +131,6 @@ terraform fmt -check -recursive
 terraform init -backend=false -input=false
 terraform validate
 terraform test # dev stack only: disabled and enabled runtime plans
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests # dev only
 ```
 
 The disabled backend avoids remote state. The workflow has no AWS credentials,
@@ -695,16 +697,62 @@ The repository's cost guardrails still apply. Validation never authorizes
 `terraform apply`, `make aws-up`, or another command that creates AWS
 resources.
 
+## M4 preflight checks in CI
+
+The Python job runs every test under `scripts/tests`, then runs
+`make aws-preflight-check` from a full-history checkout. That check requires
+the recorded M3 closure commit in `HEAD`'s history, rejects an enabled hourly
+Terraform flag, renders the AWS Application, runtime ConfigMap, and replay Job,
+checks the tracked AWS manifests for local endpoints and floating image tags,
+checks the raw and sanitized evidence roots, and dry-runs `make aws-down` to
+verify the state-backed destroy path. It also checks the fixed evidence order,
+the provisional and final file sets, the required visual sequence, and the rule
+that optional AWS-console screenshots yield to the destroy deadline.
+
+The Python tests exercise the M4 evidence publisher with a local fixture. They
+require a human review record for the 4 visual captures, reject malformed or
+small screenshots, redact known and structural sensitive values, preserve
+commit and image identifiers, hash each published file, and detect edits after
+publication. No test reads an AWS account.
+
+They also exercise the minikube SIGTERM receipt helpers without a cluster.
+Those cases require application readiness to fail before a clean container
+exit, reject explicit signals and grace-period overruns, accept completed or
+safe at-least-once delivery, normalize Kubernetes' omitted signal field, and
+keep local rehearsal receipts outside the exact live-packet allowlist.
+
+The local abort tests send a real SIGTERM to a child holding mode-0600
+credential files and simulated hourly state. They require destroy, explicit
+inventory, immediate cost capture, and credential removal in order; reject a
+destroy recipe without its state backup; and keep the receipt outside the live
+packet. The child never receives an AWS credential or contacts AWS.
+
+The local demo tests keep rehearsal output in its private, canonical run
+directory, require provenance for every ready relay and sink pod, and reject a
+fixed replica count. Relay demo tests also pin the deployed runtime ConfigMap
+name and ensure lag freshness excludes the default-zero gauge exported by
+non-ingest relay processes. The live runner refuses the wrong context, running
+Compose app containers, missing pods, mismatched image revisions, or leftover
+KEDA pause state before it produces an event.
+
+The other account-independent parts of `make aws-preflight` stay in their
+existing CI jobs: Go and Python tests, strict lint, both Terraform stacks, the
+3 service-image builds, and rendered Kubernetes validation. Presence checks
+for operator tools remain local because the hosted jobs install only what each
+job uses. The workflow receives no AWS credentials and creates no local
+cluster.
+
 ## Container-image checks
 
 CI has an image-build matrix for `echo`, `relay`, and `sink`. Each job:
 
 1. Reads the build-stage base image from the service's Dockerfile.
 2. Retries that image pull up to 3 times.
-3. Runs `docker build -t <service>:ci services/<service>`.
+3. Builds with `VERSION=$GITHUB_SHA`.
+4. Reads the OCI revision label back from the image and requires the same SHA.
 
-This proves that each service's pinned Dockerfile can produce an image. The
-separate Hadolint check covers static Dockerfile rules.
+This proves that each service's pinned Dockerfile can produce an image tied to
+the source commit. The separate Hadolint check covers static Dockerfile rules.
 
 ## End-to-end CI checks
 
@@ -773,11 +821,11 @@ updates for:
 Dependabot creates update proposals and reports no pass/fail result. Proposed
 updates still pass through the pull-request gates described in this document.
 
-The `required checks` CI job depends on the Go, Terraform, smoke, image,
-Go-module coverage, lint, and dependency-review jobs. It fails unless every
-required predecessor reaches an accepted result. Branch protection can depend
-on this one aggregate result while the individual jobs retain their specific
-failure output.
+The `required checks` CI job depends on the Go, Terraform, Python, smoke,
+image, Go-module coverage, lint, and dependency-review jobs. It fails unless
+every required predecessor reaches an accepted result. Branch protection can
+depend on this one aggregate result while the individual jobs retain their
+specific failure output.
 
 The tracked workflow also limits its token to `contents: read`, passes no AWS
 credentials, initializes Terraform with its backend disabled, disables checkout

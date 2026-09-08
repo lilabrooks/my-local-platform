@@ -17,6 +17,8 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 # scratch: no shell, no package manager, nothing to exploit.
 FROM scratch
+ARG VERSION=dev
+LABEL org.opencontainers.image.revision="${VERSION}"
 COPY --from=build /out/echo /echo
 
 # Matches runAsUser in the Deployment's securityContext.

@@ -56,6 +56,24 @@ class PrometheusStub:
 
 
 class RelayDemoOutcomeTest(unittest.TestCase):
+    def test_demo_reads_timeout_from_the_deployed_runtime_configmap(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("get cm relay-runtime", source)
+        self.assertNotIn("get cm relay \\\n", source)
+
+    def test_lag_freshness_excludes_zero_gauges_from_non_ingest_processes(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "relay_lag_refreshed_timestamp_seconds and on(instance) "
+            'relay_build_info{role="ingest"}',
+            source,
+        )
+        self.assertNotIn(
+            "max(time() - relay_lag_refreshed_timestamp_seconds)", source
+        )
+
     def test_scaling_requires_backlog_growth_scale_out_drain_and_scale_in(self):
         passed = sourced("scale_succeeded 1 0 1 598 12")
 
@@ -117,9 +135,7 @@ class RelayDemoOutcomeTest(unittest.TestCase):
         }
         for name, (status, body) in cases.items():
             with self.subTest(name=name), PrometheusStub(status, body) as port:
-                result = sourced(
-                    "promq 'sum(example_total)'", DEMO_PROM_PORT=str(port)
-                )
+                result = sourced("promq 'sum(example_total)'", DEMO_PROM_PORT=str(port))
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
 

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "milestone": "M3",
+  "run_date": "2026-09-05",
+  "result": "passed",
+  "closure": {
+    "issue": 90,
+    "pull_request": 113,
+    "merge_commit": "5fdb41fc69cc899561701ef58a95d40c90ce8c4e"
+  },
+  "commands": [
+    "make lint",
+    "make test",
+    "make k8s-validate",
+    "make up-apps",
+    "make seed",
+    "make smoke",
+    "make up-obs",
+    "make smoke-traces",
+    "make relay-replay-verify",
+    "make relay-verify-ordering",
+    "make relay-verify-graceful-drain",
+    "make relay-verify-duplicate-on-crash",
+    "make monitoring-ready",
+    "make relay-demo",
+    "make k8s-down",
+    "make up",
+    "make smoke"
+  ],
+  "measurements": {
+    "produced_events": 600,
+    "peak_lag": 598,
+    "peak_consumers": 12,
+    "final_lag": 0,
+    "final_consumers": 1
+  },
+  "recorded_in": [
+    "docs/runbook-local.md",
+    "docs/runbook-k8s.md",
+    "docs/roadmap-relay.md",
+    "docs/adr/0006-kafka-over-sqs-for-delivery.md",
+    "docs/adr/0008-in-cluster-observability-for-the-demo.md"
+  ]
+}

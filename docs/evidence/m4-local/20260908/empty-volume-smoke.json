@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "completed_at": "2026-09-08T02:24:29Z",
+  "result": "passed",
+  "source_commit": "6e0ae4314e770838c7008e5cefab1a94e8b3e6cd",
+  "worktree_clean_at_start": true,
+  "aws_calls": 0,
+  "preflight": {
+    "run_id": "20260908T022035Z",
+    "result": "passed",
+    "python_tests": 73,
+    "terraform_contract_tests": 7
+  },
+  "operator_steps": 3,
+  "elapsed_seconds": 30.542,
+  "commands": [
+    {
+      "command": "make clean",
+      "elapsed_seconds": 0.221,
+      "result": "passed"
+    },
+    {
+      "command": "make up",
+      "elapsed_seconds": 22.668,
+      "result": "passed"
+    },
+    {
+      "command": "make smoke",
+      "elapsed_seconds": 7.653,
+      "result": "passed"
+    }
+  ],
+  "volumes_removed": [
+    "mlp_floci-data",
+    "mlp_grafana-data",
+    "mlp_kafka-data",
+    "mlp_postgres-data",
+    "mlp_prom-data",
+    "mlp_rabbit-data",
+    "mlp_tempo-data"
+  ],
+  "smoke": {
+    "components_passed": 7,
+    "event_id": "evt_d8bc44f97449ef7bc7d071b96b9cc30a",
+    "idempotent_requests": 2,
+    "kafka_records": 1,
+    "healthy_deliveries": 1,
+    "persisted_attempts": 4,
+    "dead_lettered": true,
+    "kafka_event_offset": 0,
+    "relay_poison_offset": 0,
+    "postgres_row": 1
+  }
+}

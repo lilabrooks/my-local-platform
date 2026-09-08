@@ -19,6 +19,7 @@ override.tf.json
 terraform.rc
 # tfvars often carry account ids / real values; commit .example instead
 *.tfvars
+*.tfvars.json
 !*.tfvars.example
 
 # Go

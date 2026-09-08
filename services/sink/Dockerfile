@@ -19,6 +19,8 @@ RUN CGO_ENABLED=0 go build -trimpath \
 # scratch: no shell, no package manager, nothing to exploit. No container
 # HEALTHCHECK for the same reason; /healthz and /readyz are for Kubernetes.
 FROM scratch
+ARG VERSION=dev
+LABEL org.opencontainers.image.revision="${VERSION}"
 COPY --from=build /out/sink /sink
 
 USER 65532:65532

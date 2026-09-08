@@ -451,6 +451,75 @@ AWS_RELAY_IMAGE     ?=
 AWS_SINK_IMAGE      ?=
 AWS_MSK_BOOTSTRAP   ?=
 AWS_K8S_RENDER_DIR  ?= .evidence/m4/$(AWS_RUN_ID)/rendered
+AWS_EVIDENCE_PHASE  ?= provisional
+AWS_REDACTIONS_FILE ?=
+AWS_BILLABLE_STARTED_AT ?=
+M4_OPERATOR         ?=
+M4_LOCAL_RUN_ID     ?=
+M4_SIGTERM_EVIDENCE ?= .evidence/m4-local/$(M4_LOCAL_RUN_ID)/k8s-sigterm.json
+M4_ABORT_EVIDENCE   ?= .evidence/m4-local/$(M4_LOCAL_RUN_ID)/abort-rehearsal.json
+M4_DEMO_EVIDENCE    ?= .evidence/m4-local/$(M4_LOCAL_RUN_ID)/demo-rehearsal.json
+M4_SOURCE_COMMIT    ?= $(shell git rev-parse HEAD)
+
+.PHONY: m4-images
+m4-images: ## Build the relay and sink images from the exact M4 source commit
+	docker build --build-arg "VERSION=$(M4_SOURCE_COMMIT)" -t relay:dev services/relay
+	docker build --build-arg "VERSION=$(M4_SOURCE_COMMIT)" -t sink:dev services/sink
+
+.PHONY: aws-preflight-check
+aws-preflight-check: ## Check the account-independent M4 repository contract
+	python3 scripts/m4-preflight.py check-repository
+	python3 scripts/m4-evidence.py check-protocol
+
+.PHONY: aws-preflight
+aws-preflight: ## Run the complete local M4 preflight and write its receipt
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required (UTC YYYYMMDDTHHMMSSZ)" >&2; exit 2; }
+	AWS_RUN_ID="$(AWS_RUN_ID)" python3 scripts/m4-preflight.py run
+	AWS_RUN_ID="$(AWS_RUN_ID)" python3 scripts/m4-evidence.py init
+
+.PHONY: aws-evidence-session
+aws-evidence-session: ## Record the M4 paid-window deadlines
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_BILLABLE_STARTED_AT)" || { echo "AWS_BILLABLE_STARTED_AT is required" >&2; exit 2; }
+	@test -n "$(M4_OPERATOR)" || { echo "M4_OPERATOR is required" >&2; exit 2; }
+	python3 scripts/m4-evidence.py start-session \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --started-at "$(AWS_BILLABLE_STARTED_AT)" \
+	  --operator "$(M4_OPERATOR)" \
+	  --region "$(AWS_REAL_REGION)"
+
+.PHONY: aws-evidence-publish
+aws-evidence-publish: ## Sanitize and verify the provisional or final M4 packet
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_REDACTIONS_FILE)" || { echo "AWS_REDACTIONS_FILE is required" >&2; exit 2; }
+	python3 scripts/m4-evidence.py publish \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --phase "$(AWS_EVIDENCE_PHASE)" \
+	  --redactions-file "$(AWS_REDACTIONS_FILE)"
+
+.PHONY: aws-evidence-verify
+aws-evidence-verify: ## Recheck a published M4 evidence packet
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_REDACTIONS_FILE)" || { echo "AWS_REDACTIONS_FILE is required" >&2; exit 2; }
+	python3 scripts/m4-evidence.py verify \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --phase "$(AWS_EVIDENCE_PHASE)" \
+	  --redactions-file "$(AWS_REDACTIONS_FILE)"
+
+.PHONY: m4-k8s-sigterm
+m4-k8s-sigterm: ## Terminate live minikube relay pods and record drain evidence
+	@test -n "$(M4_LOCAL_RUN_ID)" || { echo "M4_LOCAL_RUN_ID is required" >&2; exit 2; }
+	python3 scripts/verify-k8s-sigterm.py --output "$(M4_SIGTERM_EVIDENCE)"
+
+.PHONY: m4-local-abort
+m4-local-abort: ## Rehearse SIGTERM, destroy-first ordering, audit, and temp cleanup
+	@test -n "$(M4_LOCAL_RUN_ID)" || { echo "M4_LOCAL_RUN_ID is required" >&2; exit 2; }
+	python3 scripts/m4-local-abort.py rehearse --output "$(M4_ABORT_EVIDENCE)"
+
+.PHONY: m4-local-demo
+m4-local-demo: ## Run the machine-checked minikube demo and record local evidence
+	@test -n "$(M4_LOCAL_RUN_ID)" || { echo "M4_LOCAL_RUN_ID is required" >&2; exit 2; }
+	python3 scripts/m4-local-demo.py --output "$(M4_DEMO_EVIDENCE)"
 
 .PHONY: aws-k8s-render
 aws-k8s-render: ## Render the untracked AWS deployment bundle (no cluster mutation)

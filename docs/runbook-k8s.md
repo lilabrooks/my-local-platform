@@ -224,6 +224,56 @@ kubectl -n mlp annotate scaledobject relay-deliver \
 
 Remove the annotation to hand scaling back.
 
+## Rehearse controlled relay termination
+
+Run the M4 shutdown rehearsal before AWS staging, while a correction still
+costs only local time. It requires the Compose Postgres and Kafka containers,
+the seeded relay schema, KEDA, and the relay and sink workloads in minikube.
+The Compose relay and sink containers must be stopped so they cannot join the
+same consumer group.
+
+```bash
+make up-core
+make up-messaging
+make seed
+make k8s-up
+make relay-image sink-image
+make keda-install
+make k8s-apply-local
+kubectl -n mlp rollout restart \
+  deployment/relay-ingest deployment/relay-deliver deployment/sink
+kubectl -n mlp rollout status deployment/relay-ingest --timeout=120s
+kubectl -n mlp rollout status deployment/relay-deliver --timeout=120s
+kubectl -n mlp rollout status deployment/sink --timeout=120s
+
+local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
+make m4-k8s-sigterm M4_LOCAL_RUN_ID="$local_run_id"
+```
+
+The verifier refuses any current context other than `mlp`. It pauses
+`relay-deliver` at one replica, then restores the prior KEDA annotation on both
+success and failure. Use a new run id for every attempt because receipts are
+write-once. Before changing a pod, it reads the revision label from that pod's
+running image inside minikube and requires the label to match the current Git
+commit. This makes a missed rollout fail before the rehearsal can claim a
+result.
+
+For ingest, the verifier holds an actual database insert behind a PostgreSQL
+table lock, sends normal pod termination, requires `/readyz` to return 503,
+releases the lock, and requires the same request to return 202, publish, and
+reach the sink. For delivery, it parks one subscriber request in the sink,
+terminates the owning pod, and accepts either completion by that pod or safe
+at-least-once redelivery by its replacement. Either result must retain the
+successful and exhausted attempt outcomes. Both old containers must exit with
+code 0 and no signal before their Deployment grace periods expire.
+
+The private receipt is
+`.evidence/m4-local/<run-id>/k8s-sigterm.json`. This separate root is
+intentional. Adding a local-only file to `.evidence/m4/<aws-run-id>/` would
+make the live evidence publisher reject that packet as unexpected. The receipt
+records the source commit, dirty-worktree state, running image ids, pod ids,
+timings, delivery result, and every cleanup check.
+
 ## Two Grafanas, and knowing which one you are looking at
 
 There are two complete observability stacks, and they show different data. This

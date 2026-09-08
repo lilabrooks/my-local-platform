@@ -1,0 +1,59 @@
+{
+  "cleanup": {
+    "keda_pause_absent": true,
+    "sink_baseline_restored": true,
+    "verification_port_forward_stopped": true
+  },
+  "commands": [
+    "make monitoring-ready",
+    "make relay-demo"
+  ],
+  "elapsed_seconds": 203.12,
+  "finished_at": "2026-09-08T01:39:33Z",
+  "provenance": {
+    "relay-deliver": [
+      {
+        "image_id": "docker://sha256:3bb03449038249ef47de016cbae7aef83e0234a4b26d747d3f4e17e9b01dcbd2",
+        "image_revision": "84566a7",
+        "pod": "relay-deliver-755f8b8c67-szb42",
+        "pod_uid": "ff110ac6-1848-4b8f-be59-9691a1cc0e6f"
+      }
+    ],
+    "relay-ingest": [
+      {
+        "image_id": "docker://sha256:3bb03449038249ef47de016cbae7aef83e0234a4b26d747d3f4e17e9b01dcbd2",
+        "image_revision": "84566a7",
+        "pod": "relay-ingest-67f77f858d-w6xx9",
+        "pod_uid": "22829811-9892-4893-aa30-488e3a3002c6"
+      },
+      {
+        "image_id": "docker://sha256:3bb03449038249ef47de016cbae7aef83e0234a4b26d747d3f4e17e9b01dcbd2",
+        "image_revision": "84566a7",
+        "pod": "relay-ingest-67f77f858d-xlwzf",
+        "pod_uid": "223245fc-eea4-4db4-bbdb-c440d0dc621f"
+      }
+    ],
+    "sink": [
+      {
+        "image_id": "docker://sha256:0796efc5d5b1e822e74d235b05cb34ee8dfd2e63362a57e0e5247033b16c03b8",
+        "image_revision": "84566a7",
+        "pod": "sink-594d95c988-w6226",
+        "pod_uid": "0bdbc83e-6416-4336-b1d1-873a7a0dfd71"
+      }
+    ]
+  },
+  "required_visual_order": [
+    "argocd-apps.png",
+    "terminal-demo.png",
+    "grafana-lag.png",
+    "tempo-trace.png"
+  ],
+  "result": "passed",
+  "run_id": "20260908T014300Z",
+  "schema_version": 1,
+  "source_commit": "84566a70702b180b9a884fe2b78bada44544ad0b",
+  "started_at": "2026-09-08T01:36:10Z",
+  "transcript": "demo-transcript.txt",
+  "visual_capture_status": "pending-human-capture",
+  "worktree_clean": false
+}
