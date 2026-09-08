@@ -105,6 +105,12 @@ Both ECR repositories use immutable tags and scan-on-push. A build pushes the
 commit SHA tag once, records the returned digest, and deploys only that digest.
 The ingest and deliver Deployments must name the same relay digest.
 
+The EKS node group uses `t3.medium`, so the staged relay and sink images use
+`linux/amd64` even when the operator's Docker host is `arm64`. The staging
+helper checks a new local image before push. If the immutable commit tag already
+exists, it pulls that digest for `linux/amd64` instead. Both paths check the OCI
+revision label and repository controls.
+
 The local and AWS paths keep one application image. #92 adds only this runtime
 switch:
 
@@ -202,11 +208,12 @@ lives under `docs/evidence/m4/<run-id>/` and uses these names:
 | File | Required content |
 |---|---|
 | `00-session.json` | run id, approved commit, region, start/deadline/destroy times, and contract limits |
-| `01-identity.txt` | redacted caller identity and EKS standard-support result |
+| `01-identity.txt` | redacted repository and caller identity, state backend, budget, quota capacity, regional offerings, and EKS support |
 | `02-prices.md` | dated source URLs, rates, quantities, arithmetic, and $1.25/hour gate result |
-| `03-plan-summary.json` | resource addresses, types, counts, and enforced topology result; no secret values |
+| `03-plan-summary.json` | capture time, Terraform input hash, resource addresses, types, counts, and enforced topology result; no secret values |
 | `04-inventory-before.json` | tagged inventory plus service-native EKS, MSK, RDS, EC2, EBS, ELB, ECR, NAT, and log-group queries |
 | `05-images.json` | source commit, both immutable tags, and deployed digests |
+| `06-go-no-go.json` | one run-and-commit-bound decision over identity, prices, plan, empty inventory, images, capture order, limits, and cleanup owner |
 | `10-event.json` | accepted event, idempotent repeat, and persisted event identity |
 | `11-attempts.json` | successful and exhausted subscriber attempt histories |
 | `12-metrics.txt` | lag, group members, assignments, idle members, and KEDA replica series |
@@ -526,17 +533,59 @@ new volumes; relay returned one idempotent event for 2 concurrent requests,
 published one Kafka record at the first topic offset, delivered once to the
 healthy subscriber, persisted 4 attempts, and produced a fresh DLQ record.
 
+The 2026-09-08 #96 staging slices remained outside the paid window:
+
+- local relay and sink builds for commit
+  `c899375d5017247b6840ee295c37077574f14663` were inspected as
+  `linux/amd64` with that exact OCI revision label;
+- the inventory helper's ten service-native and tagged query paths were tested,
+  including an empty runtime with cheap-tier ECR repositories still present;
+- reviewed plans and inventory receipts now carry the run id and source commit,
+  and plan or apply refuses a dirty worktree or a different HEAD;
+- the price helper requires a reviewer, official source URLs, a check no older
+  than 24 hours, and decimal-string rates. Its test fixture recomputed the fixed
+  topology as $1.021850684931506849315068493/hour and refused a total over
+  $1.25/hour;
+- the release gate rebuilt that arithmetic, matched it to Terraform's cost
+  model, checked the fixed hourly resource counts, empty runtime inventory,
+  identity gates, two distinct digest-pinned images, capture order, deadlines,
+  and cleanup owner, then hashed all eight inputs;
+- the account helper was exercised against local fakes for repository and SSO
+  identity, state-bucket controls, budget subscribers, five remaining-capacity
+  checks, EKS standard support, and the fixed RDS and EC2 offerings. It refused
+  an account mismatch, missing public-access block, missing budget subscriber,
+  insufficient Elastic IP or six-vCPU Spot capacity, an unfulfilled Spot
+  request, and a missing fixed RDS zone;
+- the apply wrapper now consumes the final decision, compares its plan and
+  summary hashes, rejects Terraform CLI environment arguments, and preserves
+  the last-moment EKS support check. It checks the fixed plan, summary, and
+  decision-packet paths before removing or reading them. The AWS renderer checks
+  both supplied image digests against the same decision packet;
+- `make aws-preflight-check` accepted 19 ordered captures, 17 provisional text
+  files, 18 final text files, and the required visual sequence;
+- `make test` passed every Go module and 121 Python tests, and `make lint`
+  passed all 12 checks.
+
+No AWS command ran for these checks. Real account identity, state, budget,
+quota, regional availability, inventory, ECR, and price evidence still belong
+to the separately authorized staging run.
+
 ## Sources
 
 - [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - [EKS Pod Identity supported SDK versions](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-minimum-sdk.html)
 - [EKS Kubernetes versions](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html)
+- [EKS service quotas](https://docs.aws.amazon.com/eks/latest/userguide/service-quotas.html)
 - [EKS default envelope encryption](https://docs.aws.amazon.com/eks/latest/userguide/envelope-encryption.html)
 - [EKS pricing](https://aws.amazon.com/eks/pricing/)
 - [MSK IAM authorization actions](https://docs.aws.amazon.com/msk/latest/developerguide/iam-access-control.html)
+- [MSK Serverless regions](https://docs.aws.amazon.com/msk/latest/developerguide/serverless.html)
+- [MSK service quotas](https://docs.aws.amazon.com/msk/latest/developerguide/limits.html)
 - [MSK pricing](https://aws.amazon.com/msk/pricing/)
 - [Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/)
 - [RDS for PostgreSQL pricing](https://aws.amazon.com/rds/postgresql/pricing/)
 - [ECR tag immutability](https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html)
+- [ECR `DescribeImages`](https://docs.aws.amazon.com/AmazonECR/latest/APIReference/API_DescribeImages.html)
+- [Docker build platform option](https://docs.docker.com/reference/cli/docker/buildx/build/#set-the-target-platforms-for-the-build---platform)
 - [AWS Budgets data refresh](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html)
 - [Resource Groups Tagging API `GetResources`](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/API_GetResources.html)

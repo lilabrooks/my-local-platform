@@ -1,16 +1,17 @@
 # Live AWS relay validation runbook
 
 Status: Contract accepted on 2026-09-05. The deployment render, local
-preflight, capture order, and evidence sanitizer are implemented. The cluster
-rehearsal and live AWS validation remain open. No command on this page
-authorizes an AWS mutation.
+rehearsal, staging gates, capture order, and evidence sanitizer are
+implemented. The account-check helper is implemented; its real-account receipt
+and the live AWS validation remain open. No command on this page authorizes an
+AWS mutation.
 
 This runbook implements the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md). It is the shared handoff for
 issues #92 through #97. The IAM transport, guarded Terraform plan, shutdown
-budgets, and locally validated deployment render now exist. Rehearsal, staging,
-and live evidence commands remain contracts until their implementing issues
-land.
+budgets, local rehearsal, and deployment render now exist. The remaining
+real-account checks and live evidence commands remain subject to their issue
+gates.
 
 The live run needs three separate approvals:
 
@@ -145,7 +146,8 @@ make aws-k8s-render \
 ```
 
 The command writes only beneath ignored `.evidence/m4/<run-id>/rendered/`. It
-does not contact Kubernetes or mutate AWS. Its outputs are:
+does not contact Kubernetes or mutate AWS. It also requires both image values
+to match `06-go-no-go.json` for this run and commit. Its outputs are:
 
 | File | Role |
 |---|---|
@@ -212,6 +214,7 @@ commit whose images will be staged:
 
 ```bash
 run_id=$(date -u +%Y%m%dT%H%M%SZ)
+commit=$(git rev-parse HEAD)
 make aws-preflight AWS_RUN_ID="$run_id"
 ```
 
@@ -224,10 +227,10 @@ identity or create a cluster. A pass writes the private receipt
 `capture-plan.json`. A failed run writes the preflight receipt with the failed
 check and returns non-zero. Use a new run id after fixing a failure.
 
-The capture plan puts account, price, plan, inventory, and image work before
-the paid window. Prepare the terminal commands and browser layout before the
-apply. Start the conservative session clock immediately before the separately
-authorized `make aws-up`, then record both deadlines:
+The capture plan puts account, price, plan, inventory, image, and final decision
+work before the paid window. Prepare the terminal commands and browser layout
+before the apply. Start the conservative session clock immediately before the
+separately authorized `make aws-up`, then record both deadlines:
 
 ```bash
 make aws-evidence-session \
@@ -242,16 +245,127 @@ the export order and Prometheus queries recorded in `capture-plan.json`.
 
 The #96 staging issue must capture these files under the raw evidence directory:
 
-- `01-identity.txt`: caller identity with the account id redacted in the
-  sanitized copy, plus the EKS standard-support result;
+- `01-identity.txt`: repository and caller identity, state-backend controls,
+  budget notification, remaining quotas, regional offerings, and EKS support;
 - `02-prices.md`: date, official URLs, rates, quantities, arithmetic, and gate;
 - `03-plan-summary.json`: resource types, addresses, counts, and shape result;
 - `04-inventory-before.json`: tagged and service-native inventories;
-- `05-images.json`: commit SHA, immutable tags, and ECR digests.
+- `05-images.json`: commit SHA, immutable tags, and ECR digests;
+- `06-go-no-go.json`: one cross-check of every staged gate, the cleanup owner,
+  image digests, capture order, and stop limits.
+
+Capture the account gates before changing any AWS resource:
+
+```bash
+make aws-account-check \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit"
+```
+
+This target makes read-only GitHub and AWS requests. It requires the intended
+repository, a caller account matching the selected SSO profile, and the
+account-scoped state bucket with versioning, AES256 encryption, and all four
+public-access blocks. If that bucket is absent, stop and follow the documented
+`make aws-bootstrap` path under the separate #96 staging approval.
+
+The same receipt requires the `mlp-dev-live-runtime` budget, a notification
+destination, and enough remaining capacity for one EKS cluster, one MSK
+Serverless cluster, one RDS instance, six Standard Spot vCPUs, and one Elastic
+IP. The Spot check reserves six vCPUs for the 3-node maximum and subtracts both
+running instances and unfulfilled requests. It checks Kubernetes 1.35 standard
+support, published MSK service presence,
+the two fixed RDS offerings, and `t3.medium` offerings in `us-east-1a` and
+`us-east-1b`. The MSK check combines the account-visible Kafka region with the
+linked AWS Serverless region table; the API does not expose a separate
+Serverless availability operation.
+
+The private `01-identity.txt` receipt has mode `0600`. It contains the account
+id, caller ARN, and budget subscriber address, so never stage it. Publication
+uses the sanitizer described below. The final decision rejects an account
+receipt older than 24 hours or one whose backend controls changed.
+
+Create the private pricing worksheet, recheck every linked AWS page, and edit
+the worksheet with the current `us-east-1` rates. Set `checked_at` to the UTC
+review time, name `checked_by`, and set `confirmed` to `true` only after every
+rate has been checked. The generated rate fields are blank:
+
+```bash
+make aws-price-template \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit"
+
+${EDITOR:-vi} ".evidence/m4/$run_id/price-input.json"
+
+make aws-prices \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit"
+```
+
+The validator refuses a review older than 24 hours, a changed source list, an
+unknown or missing rate, a different run or commit, and a recomputed total over
+$1.25/hour. It writes itemized `02-prices.md` plus a private JSON sidecar used by
+the release gate. This step reads local files only.
 
 The inventory combines `resourcegroupstaggingapi get-resources` with explicit
 EKS, MSK, RDS, EC2, EBS, ELB, ECR, NAT gateway, and CloudWatch log-group
-queries. The tagging API alone is insufficient.
+queries. The tagging API alone is insufficient. Capture the pre-apply inventory
+with the account selected for staging:
+
+```bash
+make aws-inventory-empty \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit" \
+  AWS_INVENTORY_FILE=".evidence/m4/$run_id/04-inventory-before.json"
+```
+
+The helper writes only to the ignored run directory with mode `0600`. It checks
+project tags, names, Kubernetes cluster tags, and service-native results. ECR
+repositories are allowed because they belong to the cheap tier. Any matching
+EKS, MSK, RDS, EC2, EBS, load balancer, NAT gateway, or log group makes the
+command fail after preserving the receipt. Reuse the same command after
+destroy with `AWS_INVENTORY_FILE` set to `21-inventory-after.json`.
+
+Build and stage the EKS images after the cheap tier has created both ECR
+repositories:
+
+```bash
+make aws-stage-images \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit"
+```
+
+This builds `linux/amd64` images for the `t3.medium` node group. The helper
+requires a passing preflight receipt for the same run and commit, then checks
+that the worktree still has that clean HEAD. It reads the repository URLs from
+Terraform state and requires immutable tags plus scan-on-push. Each missing
+40-character commit tag is pushed once. An existing tag is pulled by digest
+and its platform and OCI revision label are checked. The resulting
+`05-images.json` records both digest references with mode `0600`.
+
+Use `aws-inspect-images` for a read-only repeat:
+
+```bash
+make aws-inspect-images \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit"
+```
+
+After identity, budget, quota, availability, plan, inventory, and image
+receipts all pass, write the final staging decision:
+
+```bash
+make aws-go-no-go \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit" \
+  M4_OPERATOR="$USER"
+```
+
+The target makes no AWS request. It checks that every input names this run,
+commit, and region, requires a clean exact HEAD, recomputes the price comparison,
+checks both digest-pinned `linux/amd64` images, and records SHA-256 hashes of its
+inputs. `make aws-up` reads this packet again and compares its plan and summary
+hashes immediately before the apply. Any missing, stale, or mixed receipt
+leaves the paid apply blocked.
 
 Trace one image and configuration value through its producer, generated AWS
 Application, ArgoCD load, Deployment, running pod, and evidence output. Trace

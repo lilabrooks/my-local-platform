@@ -387,8 +387,10 @@ described in [costs.md](costs.md#remote-state-comes-first), then create the
 cheap tier through the guarded Make target:
 
 ```bash
-make aws-plan                         # saves the exact cheap-tier plan
-make aws-up                           # applies that reviewed plan, ~$0
+run_id=$(date -u +%Y%m%dT%H%M%SZ)
+commit=$(git rev-parse HEAD)
+make aws-plan AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit"
+make aws-up AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit" # separately approved
 
 unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_DYNAMODB AWS_ENDPOINT_URL_S3
 unset AWS_ENDPOINT_URL_STS AWS_ACCESS_KEY_ID

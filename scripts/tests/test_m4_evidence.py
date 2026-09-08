@@ -134,6 +134,25 @@ class M4EvidenceTest(unittest.TestCase):
                 i for i, item in enumerate(captures) if item["phase"] == "after_destroy"
             ),
         )
+        image_capture = next(
+            item for item in captures if item["output"] == "05-images.json"
+        )
+        self.assertIn("make aws-stage-images", image_capture["command"])
+        self.assertIn("AWS_APPROVED_COMMIT", image_capture["command"])
+        plan_capture = next(
+            item for item in captures if item["output"] == "03-plan-summary.json"
+        )
+        self.assertIn("make aws-plan", plan_capture["command"])
+        account_capture = next(
+            item for item in captures if item["output"] == "01-identity.txt"
+        )
+        self.assertIn("make aws-account-check", account_capture["command"])
+        self.assertIn("AWS_APPROVED_COMMIT", account_capture["command"])
+        self.assertIn("AWS_APPROVED_COMMIT", plan_capture["command"])
+        release_capture = next(
+            item for item in captures if item["output"] == "06-go-no-go.json"
+        )
+        self.assertIn("make aws-go-no-go", release_capture["command"])
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
