@@ -13,7 +13,13 @@ AWS_REAL_REGION ?= us-east-1
 AWS_INIT_ARGS ?=
 AWS_TF_ARGS ?=
 AWS_PLAN_FILE ?= infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan
-AWS_PLAN_SUMMARY ?= infra/terraform/envs/dev/.terraform/mlp-plan-summary.json
+AWS_PLAN_SUMMARY ?= .evidence/m4/$(AWS_RUN_ID)/03-plan-summary.json
+AWS_ACCOUNT_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/01-identity.txt
+AWS_INVENTORY_FILE ?= .evidence/m4/$(AWS_RUN_ID)/04-inventory-before.json
+AWS_IMAGE_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/05-images.json
+AWS_PRICE_INPUT ?= .evidence/m4/$(AWS_RUN_ID)/price-input.json
+AWS_PRICE_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/02-prices.md
+AWS_GO_NO_GO ?= .evidence/m4/$(AWS_RUN_ID)/06-go-no-go.json
 AWS_REAL_ENV = env -i \
 	HOME="$(HOME)" \
 	PATH="$(PATH)" \
@@ -466,6 +472,16 @@ m4-images: ## Build the relay and sink images from the exact M4 source commit
 	docker build --build-arg "VERSION=$(M4_SOURCE_COMMIT)" -t relay:dev services/relay
 	docker build --build-arg "VERSION=$(M4_SOURCE_COMMIT)" -t sink:dev services/sink
 
+.PHONY: m4-aws-images
+m4-aws-images: ## Build linux/amd64 M4 images for the t3.medium node group
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	docker build --platform linux/amd64 \
+	  --build-arg "VERSION=$(AWS_APPROVED_COMMIT)" \
+	  -t relay:m4-aws services/relay
+	docker build --platform linux/amd64 \
+	  --build-arg "VERSION=$(AWS_APPROVED_COMMIT)" \
+	  -t sink:m4-aws services/sink
+
 .PHONY: aws-preflight-check
 aws-preflight-check: ## Check the account-independent M4 repository contract
 	python3 scripts/m4-preflight.py check-repository
@@ -476,6 +492,79 @@ aws-preflight: ## Run the complete local M4 preflight and write its receipt
 	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required (UTC YYYYMMDDTHHMMSSZ)" >&2; exit 2; }
 	AWS_RUN_ID="$(AWS_RUN_ID)" python3 scripts/m4-preflight.py run
 	AWS_RUN_ID="$(AWS_RUN_ID)" python3 scripts/m4-evidence.py init
+
+.PHONY: aws-inventory-empty
+aws-inventory-empty: ## Capture service-native AWS inventory and require no M4 runtime
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	$(AWS_REAL_ENV) python3 scripts/m4-aws-inventory.py \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --region "$(AWS_REAL_REGION)" \
+	  --output "$(AWS_INVENTORY_FILE)" \
+	  --require-no-runtime
+
+.PHONY: aws-account-check
+aws-account-check: ## Capture identity, backend, budget, quota, and availability gates
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	$(AWS_REAL_ENV) python3 scripts/m4-aws-account.py \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --profile "$(AWS_PROFILE_NAME)" \
+	  --region "$(AWS_REAL_REGION)" \
+	  --output "$(AWS_ACCOUNT_EVIDENCE)"
+
+.PHONY: aws-price-template
+aws-price-template: ## Write the private input for a current AWS price review
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	python3 scripts/m4-stage.py price-template \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --output "$(AWS_PRICE_INPUT)"
+
+.PHONY: aws-prices
+aws-prices: ## Validate reviewed AWS rates and write fixed-topology cost evidence
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	python3 scripts/m4-stage.py prices \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --region "$(AWS_REAL_REGION)" \
+	  --input "$(AWS_PRICE_INPUT)" \
+	  --output "$(AWS_PRICE_EVIDENCE)"
+
+.PHONY: aws-stage-images
+aws-stage-images: m4-aws-images ## Push missing commit images to ECR and record digests
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	$(AWS_REAL_ENV) python3 scripts/m4-stage.py stage-images \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --region "$(AWS_REAL_REGION)" \
+	  --output "$(AWS_IMAGE_EVIDENCE)"
+
+.PHONY: aws-inspect-images
+aws-inspect-images: ## Recheck staged ECR tags, digests, provenance, and platform
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	$(AWS_REAL_ENV) python3 scripts/m4-stage.py images \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --region "$(AWS_REAL_REGION)" \
+	  --output "$(AWS_IMAGE_EVIDENCE)"
+
+.PHONY: aws-go-no-go
+aws-go-no-go: ## Require one consistent staged packet before the paid window
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	@test -n "$(M4_OPERATOR)" || { echo "M4_OPERATOR is required" >&2; exit 2; }
+	python3 scripts/m4-stage.py go-no-go \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --region "$(AWS_REAL_REGION)" \
+	  --cleanup-owner "$(M4_OPERATOR)" \
+	  --output "$(AWS_GO_NO_GO)"
 
 .PHONY: aws-evidence-session
 aws-evidence-session: ## Record the M4 paid-window deadlines
@@ -533,6 +622,8 @@ aws-k8s-render: ## Render the untracked AWS deployment bundle (no cluster mutati
 	  --commit "$(AWS_APPROVED_COMMIT)" \
 	  --relay-image "$(AWS_RELAY_IMAGE)" \
 	  --sink-image "$(AWS_SINK_IMAGE)" \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --go-no-go "$(AWS_GO_NO_GO)" \
 	  --msk-bootstrap "$(AWS_MSK_BOOTSTRAP)" \
 	  --repo-url "$(REPO_URL)" >"$(AWS_K8S_RENDER_DIR)/root-app.json"
 	python3 scripts/render-aws-k8s.py runtime \
@@ -541,6 +632,8 @@ aws-k8s-render: ## Render the untracked AWS deployment bundle (no cluster mutati
 	python3 scripts/render-aws-k8s.py replay \
 	  --commit "$(AWS_APPROVED_COMMIT)" \
 	  --relay-image "$(AWS_RELAY_IMAGE)" \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --go-no-go "$(AWS_GO_NO_GO)" \
 	  >"$(AWS_K8S_RENDER_DIR)/relay-replay.json"
 	helm template $(MONITORING_RELEASE) kube-prometheus-stack \
 	  --repo https://prometheus-community.github.io/helm-charts \
@@ -589,10 +682,16 @@ aws-init: aws-whoami ## Initialize the remote state backend for the dev environm
 	    -backend-config="encrypt=true"
 
 .PHONY: aws-plan
-aws-plan: aws-init ## Guard and save a reviewable Terraform plan for dev
+aws-plan: ## Guard and save a reviewable Terraform plan for dev
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	$(MAKE) aws-init
 	$(AWS_REAL_ENV) \
+	  AWS_RUN_ID="$(AWS_RUN_ID)" \
+	  MLP_AWS_APPROVED_COMMIT="$(AWS_APPROVED_COMMIT)" \
 	  MLP_AWS_PLAN_FILE="$(AWS_PLAN_FILE)" \
 	  MLP_AWS_PLAN_SUMMARY="$(AWS_PLAN_SUMMARY)" \
+	  MLP_AWS_GO_NO_GO="$(AWS_GO_NO_GO)" \
 	  ./scripts/aws-terraform-guard.sh plan $(AWS_TF_ARGS)
 
 AWS_STATE_BACKUP ?= .terraform/mlp-last-known.tfstate
@@ -608,12 +707,18 @@ aws-state-backup: aws-whoami ## Save a private recovery copy of the current remo
 	  echo "saved infra/terraform/envs/dev/$(AWS_STATE_BACKUP)"
 
 .PHONY: aws-up
-aws-up: aws-init ## Apply the dev environment to real AWS (INCURS COST)
+aws-up: ## Apply the dev environment to real AWS (INCURS COST)
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
 	@echo "This applies the exact reviewed plan and may create billable AWS resources."
 	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
+	$(MAKE) aws-init
 	$(AWS_REAL_ENV) \
+	  AWS_RUN_ID="$(AWS_RUN_ID)" \
+	  MLP_AWS_APPROVED_COMMIT="$(AWS_APPROVED_COMMIT)" \
 	  MLP_AWS_PLAN_FILE="$(AWS_PLAN_FILE)" \
 	  MLP_AWS_PLAN_SUMMARY="$(AWS_PLAN_SUMMARY)" \
+	  MLP_AWS_GO_NO_GO="$(AWS_GO_NO_GO)" \
 	  ./scripts/aws-terraform-guard.sh apply
 	$(MAKE) aws-state-backup
 

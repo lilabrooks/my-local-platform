@@ -4,19 +4,14 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
 SCRIPT = Path(__file__).parents[1] / "render-aws-k8s.py"
 COMMIT = "a" * 40
-RELAY = (
-    "123456789012.dkr.ecr.us-east-1.amazonaws.com/mlp-dev/relay@sha256:"
-    + "a" * 64
-)
-SINK = (
-    "123456789012.dkr.ecr.us-east-1.amazonaws.com/mlp-dev/sink@sha256:"
-    + "b" * 64
-)
+RELAY = "123456789012.dkr.ecr.us-east-1.amazonaws.com/mlp-dev/relay@sha256:" + "a" * 64
+SINK = "123456789012.dkr.ecr.us-east-1.amazonaws.com/mlp-dev/sink@sha256:" + "b" * 64
 MSK = "boot-example.c1.kafka-serverless.us-east-1.amazonaws.com:9098"
 
 
@@ -89,6 +84,45 @@ class RendererTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
                 self.assertNotEqual(result.stderr.strip(), "")
+
+    def test_live_render_images_must_match_the_go_packet(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = Path(temporary) / "06-go-no-go.json"
+            packet.write_text(
+                json.dumps(
+                    {
+                        "run_id": "20260908T050000Z",
+                        "source_commit": COMMIT,
+                        "decision": "go",
+                        "gate": {"passed": True},
+                        "image_references": {"relay": RELAY, "sink": SINK},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            approved = run_renderer(
+                *self.application_args(),
+                "--run-id",
+                "20260908T050000Z",
+                "--go-no-go",
+                str(packet),
+            )
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+
+            arguments = self.application_args()
+            arguments[arguments.index("--relay-image") + 1] = (
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/mlp-dev/relay@sha256:"
+                + "c" * 64
+            )
+            refused = run_renderer(
+                *arguments,
+                "--run-id",
+                "20260908T050000Z",
+                "--go-no-go",
+                str(packet),
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("does not match", refused.stderr)
 
     def test_replay_validates_timestamp_and_preserves_evidence(self):
         base = [

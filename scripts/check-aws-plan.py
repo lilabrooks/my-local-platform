@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,10 @@ REVIEWED_RESOURCE_TYPES = HOURLY_RESOURCE_TYPES | {
     "aws_kms_alias",
     "aws_kms_key",
 }
+RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+ROOT = Path(__file__).resolve().parent.parent
+SUMMARY_NAME = "03-plan-summary.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,7 +41,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("plan", type=Path)
     parser.add_argument("summary", type=Path)
     parser.add_argument("--terraform-directory", type=Path, required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--terraform-input-sha256", required=True)
+    parser.add_argument("--verification-output", action="store_true")
     return parser.parse_args()
+
+
+def validate_summary_destination(
+    run_id: str, path: Path, verification_output: bool
+) -> Path:
+    expected_parent = ROOT / ".evidence" / "m4" / run_id
+    current = expected_parent
+    while current != ROOT:
+        if current.is_symlink():
+            raise SystemExit(f"evidence path contains a symlink: {current}")
+        if ROOT not in current.parents:
+            raise SystemExit("evidence path escapes the repository")
+        current = current.parent
+    destination = path.absolute()
+    valid_name = destination.name == SUMMARY_NAME
+    if verification_output:
+        valid_name = destination.name.startswith(f"{SUMMARY_NAME}.verify.")
+    if destination.parent != expected_parent.absolute() or not valid_name:
+        raise SystemExit(
+            f"summary must be {SUMMARY_NAME} directly under .evidence/m4/{run_id}"
+        )
+    if destination.is_symlink():
+        raise SystemExit(f"summary must not be a symlink: {destination}")
+    return destination
 
 
 def terraform_plan_json(terraform_directory: Path, plan: Path) -> dict[str, Any]:
@@ -169,8 +203,11 @@ def gate_failures(
 
 
 def write_summary(path: Path, summary: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
@@ -187,6 +224,15 @@ def write_summary(path: Path, summary: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        raise SystemExit("run id must use UTC YYYYMMDDTHHMMSSZ")
+    if not COMMIT_RE.fullmatch(args.source_commit):
+        raise SystemExit("source commit must be a full lowercase git SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.terraform_input_sha256):
+        raise SystemExit("Terraform input digest must be a lowercase SHA-256")
+    summary_path = validate_summary_destination(
+        args.run_id, args.summary, args.verification_output
+    )
     plan_path = args.plan.resolve()
     plan = terraform_plan_json(args.terraform_directory.resolve(), plan_path)
     if plan.get("complete") is not True:
@@ -202,6 +248,12 @@ def main() -> int:
 
     summary = {
         "schema_version": 1,
+        "run_id": args.run_id,
+        "source_commit": args.source_commit,
+        "terraform_input_sha256": args.terraform_input_sha256,
+        "captured_at": datetime.fromtimestamp(
+            plan_path.stat().st_mtime, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
         "budget_name": budget_name,
         "shape": shape,
@@ -212,12 +264,10 @@ def main() -> int:
         "planned_hourly_resource_counts": planned,
         "created_hourly_resource_counts": creates,
         "hourly_resource_changes": changed_hourly_resources,
-        "reviewed_resource_changes": selected_changes(
-            plan, REVIEWED_RESOURCE_TYPES
-        ),
+        "reviewed_resource_changes": selected_changes(plan, REVIEWED_RESOURCE_TYPES),
         "gate": {"passed": not failures, "failures": failures},
     }
-    write_summary(args.summary.resolve(), summary)
+    write_summary(summary_path, summary)
 
     if failures:
         for failure in failures:

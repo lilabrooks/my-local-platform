@@ -39,6 +39,7 @@ PROVISIONAL_TEXT = (
     "03-plan-summary.json",
     "04-inventory-before.json",
     "05-images.json",
+    "06-go-no-go.json",
     "10-event.json",
     "11-attempts.json",
     "12-metrics.txt",
@@ -149,6 +150,8 @@ def read_json_object(path: Path, description: str) -> dict[str, Any]:
 
 def write_json_exclusive(path: Path, payload: Mapping[str, Any], mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if mode == 0o600:
+        path.parent.chmod(0o700)
     temporary = path.with_name(f".{path.name}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
@@ -164,6 +167,8 @@ def write_json_exclusive(path: Path, payload: Mapping[str, Any], mode: int) -> N
 
 def write_json_atomic(path: Path, payload: Mapping[str, Any], mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if mode == 0o600:
+        path.parent.chmod(0o700)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent
     )
@@ -184,25 +189,19 @@ def capture_steps() -> list[dict[str, Any]]:
     """Return the fixed export order used by staging and the live run."""
     return [
         {
-            "order": 0,
-            "phase": "before_paid_window",
-            "output": "00-session.json",
-            "source": "session controller",
-            "command": "python3 scripts/m4-evidence.py start-session --run-id $AWS_RUN_ID --started-at $BILLABLE_STARTED_AT --operator $M4_OPERATOR",
-        },
-        {
             "order": 1,
             "phase": "before_paid_window",
             "output": "01-identity.txt",
-            "source": "AWS STS and EKS support APIs",
-            "command": "make aws-whoami; aws eks describe-cluster-versions --region us-east-1 --cluster-versions 1.35 --version-status STANDARD_SUPPORT --output json",
+            "source": "repository identity plus read-only AWS account APIs",
+            "command": "make aws-account-check AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT",
+            "implemented_by": "#96",
         },
         {
             "order": 2,
             "phase": "before_paid_window",
             "output": "02-prices.md",
             "source": "dated official AWS price sources and checked arithmetic",
-            "command": "python3 scripts/m4-stage.py prices --output $RAW_EVIDENCE/02-prices.md",
+            "command": "make aws-prices AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT",
             "implemented_by": "#96",
         },
         {
@@ -210,23 +209,38 @@ def capture_steps() -> list[dict[str, Any]]:
             "phase": "before_paid_window",
             "output": "03-plan-summary.json",
             "source": "reviewed Terraform plan",
-            "command": "python3 scripts/check-aws-plan.py $AWS_PLAN_FILE $RAW_EVIDENCE/03-plan-summary.json --terraform-directory infra/terraform/envs/dev",
+            "command": "make aws-plan AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_PLAN_SUMMARY=$RAW_EVIDENCE/03-plan-summary.json",
         },
         {
             "order": 4,
             "phase": "before_paid_window",
             "output": "04-inventory-before.json",
             "source": "tagged and service-native AWS inventory helper owned by #96",
-            "command": "python3 scripts/m4-aws-inventory.py --output $RAW_EVIDENCE/04-inventory-before.json",
+            "command": "make aws-inventory-empty AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_INVENTORY_FILE=$RAW_EVIDENCE/04-inventory-before.json",
             "implemented_by": "#96",
         },
         {
             "order": 5,
             "phase": "before_paid_window",
             "output": "05-images.json",
-            "source": "ECR image inspection helper owned by #96",
-            "command": "python3 scripts/m4-stage.py images --output $RAW_EVIDENCE/05-images.json",
+            "source": "ECR image staging and inspection helper owned by #96",
+            "command": "make aws-stage-images AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_IMAGE_EVIDENCE=$RAW_EVIDENCE/05-images.json",
             "implemented_by": "#96",
+        },
+        {
+            "order": 6,
+            "phase": "before_paid_window",
+            "output": "06-go-no-go.json",
+            "source": "cross-checked release packet bound to one run and commit",
+            "command": "make aws-go-no-go AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT M4_OPERATOR=$M4_OPERATOR",
+            "implemented_by": "#96",
+        },
+        {
+            "order": 7,
+            "phase": "before_paid_window",
+            "output": "00-session.json",
+            "source": "session controller",
+            "command": "python3 scripts/m4-evidence.py start-session --run-id $AWS_RUN_ID --started-at $BILLABLE_STARTED_AT --operator $M4_OPERATOR",
         },
         {
             "order": 10,
@@ -310,7 +324,7 @@ def capture_steps() -> list[dict[str, Any]]:
             "phase": "after_destroy",
             "output": "21-inventory-after.json",
             "source": "same inventory helper and query set as 04-inventory-before.json",
-            "command": "python3 scripts/m4-aws-inventory.py --output $RAW_EVIDENCE/21-inventory-after.json",
+            "command": "make aws-inventory-empty AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_INVENTORY_FILE=$RAW_EVIDENCE/21-inventory-after.json",
             "implemented_by": "#96",
         },
         {

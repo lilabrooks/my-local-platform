@@ -18,6 +18,12 @@ make aws-init
 
 Terraform 1.10 or newer uses the S3 backend's native lockfile here.
 
+For M4 staging, `make aws-account-check` confirms this bucket exists and still
+has versioning, AES256 encryption, and all four public-access blocks before any
+paid resource can enter the final decision packet. If the check cannot confirm
+the bucket, inspect the caller's access first; use `make aws-bootstrap` only
+when the bucket is actually absent and #96 staging has been authorized.
+
 If this checkout previously ran `make aws-init` with DynamoDB locking, update
 its saved backend configuration once:
 
@@ -109,18 +115,24 @@ All three hourly flags default to `false`.
 
 `make aws-plan` writes the binary plan to
 `infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan` and a redaction-safe
-summary to `.terraform/mlp-plan-summary.json`. The summary contains only
-selected resource addresses and actions, counts, flag values, the fixed
-topology, and cost arithmetic. The full plan can contain account data and stays
-ignored.
+summary to `.evidence/m4/<run-id>/03-plan-summary.json`. Both `AWS_RUN_ID` and
+`AWS_APPROVED_COMMIT` are required. The guard requires a clean worktree at that
+exact commit for tracked and ordinary untracked files. Terraform's ignored
+variable files can still feed the plan, so the summary records a SHA-256 over
+the command arguments and every automatically or explicitly loaded variable
+file. The summary also records its capture time, selected resource addresses
+and actions, counts, flag values, the fixed topology, and cost arithmetic. The
+full plan can contain account data and stays ignored.
 
 Issue #93 replaces the former `mlp-dev` ECR repository with `mlp-dev/relay` and
 `mlp-dev/sink`. An old state that still owns `mlp-dev` will plan its deletion,
 including any images it contains. The safe summary includes ECR change actions
 so the operator sees that migration before apply.
 
-`make aws-up` applies that exact saved plan. It does not create a fresh plan at
-apply time. For an hourly plan, the wrapper first verifies that:
+`make aws-up` applies that exact saved plan for the same run and commit. It does
+not create a fresh plan at apply time. An hourly apply requires a fresh
+`06-go-no-go.json`, checks that packet against the binary plan and safe summary,
+then repeats the account-sensitive guards. The wrapper verifies that:
 
 - the Terraform-managed budget already exists with a notification subscriber
   and a limit no greater than $5;

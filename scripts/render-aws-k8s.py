@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+from pathlib import Path
 import re
 import sys
 from typing import Any
@@ -45,6 +46,33 @@ def inputs(args: argparse.Namespace) -> tuple[str, str]:
         _, sink_account = image(args.sink_image, "sink")
         if sink_account != relay_account:
             fail("relay and sink images must come from the same ECR registry")
+    packet_path = getattr(args, "go_no_go", None)
+    run_id = getattr(args, "run_id", None)
+    if (packet_path is None) != (run_id is None):
+        fail("run id and go/no-go packet must be supplied together")
+    if packet_path is not None:
+        if packet_path.is_symlink():
+            fail("go/no-go packet must not be a symlink")
+        try:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError) as error:
+            fail(f"cannot read go/no-go packet: {error}")
+        if (
+            not isinstance(packet, dict)
+            or packet.get("run_id") != run_id
+            or packet.get("source_commit") != args.commit
+            or packet.get("decision") != "go"
+            or packet.get("gate", {}).get("passed") is not True
+        ):
+            fail("go/no-go packet does not approve this run and commit")
+        references = packet.get("image_references")
+        if not isinstance(references, dict) or references.get("relay") != relay_image:
+            fail("relay image does not match the go/no-go packet")
+        if (
+            getattr(args, "sink_image", None)
+            and references.get("sink") != args.sink_image
+        ):
+            fail("sink image does not match the go/no-go packet")
     return relay_image, relay_account
 
 
@@ -52,14 +80,20 @@ def root_application(args: argparse.Namespace) -> dict[str, Any]:
     relay_image, _ = inputs(args)
     sink_image, _ = image(args.sink_image, "sink")
     if not MSK_RE.fullmatch(args.msk_bootstrap):
-        fail("MSK bootstrap must be one or more us-east-1 Serverless IAM brokers on port 9098")
+        fail(
+            "MSK bootstrap must be one or more us-east-1 Serverless IAM brokers on port 9098"
+        )
     if not REPO_RE.fullmatch(args.repo_url):
         fail("repo URL must be an HTTPS GitHub repository URL")
 
     revision_patch = json.dumps(
         [
             {"op": "replace", "path": "/spec/source/repoURL", "value": args.repo_url},
-            {"op": "replace", "path": "/spec/source/targetRevision", "value": args.commit},
+            {
+                "op": "replace",
+                "path": "/spec/source/targetRevision",
+                "value": args.commit,
+            },
         ],
         separators=(",", ":"),
     )
@@ -142,7 +176,8 @@ def root_application(args: argparse.Namespace) -> dict[str, Any]:
                                         "path": "/spec/source/kustomize",
                                         "value": {
                                             "images": [
-                                                "example.invalid/mlp-dev/sink=" + sink_image
+                                                "example.invalid/mlp-dev/sink="
+                                                + sink_image
                                             ]
                                         },
                                     }
@@ -232,7 +267,9 @@ def replay_job(args: argparse.Namespace) -> dict[str, Any]:
 
 def runtime_config(args: argparse.Namespace) -> dict[str, Any]:
     if not MSK_RE.fullmatch(args.msk_bootstrap):
-        fail("MSK bootstrap must be one or more us-east-1 Serverless IAM brokers on port 9098")
+        fail(
+            "MSK bootstrap must be one or more us-east-1 Serverless IAM brokers on port 9098"
+        )
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -263,6 +300,8 @@ def parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--commit", required=True)
     common.add_argument("--relay-image", required=True)
+    common.add_argument("--run-id")
+    common.add_argument("--go-no-go", type=Path)
 
     root = sub.add_parser("application", parents=[common])
     root.add_argument("--sink-image", required=True)
