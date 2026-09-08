@@ -477,9 +477,9 @@ The next 2026-09-08 slice exercised the abort controller without AWS:
 This is evidence for local controller behavior only. Partial-resource removal
 and empty service-native inventories remain live #97 outcomes. A clean-commit
 preflight and the full local deploy, demo, evidence, and empty-volume bootstrap
-run still remain for #95.
+run still remained for #95 at this point.
 
-The 2026-09-08 integrated local rehearsal then ran
+The 2026-09-08 full local rehearsal then ran
 `make m4-local-demo M4_LOCAL_RUN_ID=20260908T014300Z`. The
 [tracked receipt](../evidence/m4-local/20260908/demo-rehearsal.json) records a
 203.12-second pass against minikube. Its private transcript records broker lag
@@ -513,6 +513,18 @@ Grafana Explore visibly joined `relay.ingest`, `kafka.produce`,
 `relay.consume`, and all 4 `relay.webhook.attempt` spans. Keeping minikube
 stopped during this phase prevented the Kubernetes and Compose consumers from
 sharing the same consumer group.
+
+The final #95 closure rehearsal ran from clean commit
+`6e0ae4314e770838c7008e5cefab1a94e8b3e6cd`. Preflight run
+`20260908T022035Z` passed lint, 73 tests, commit-labelled image builds, both
+Terraform validations, 7 Terraform contract tests, and rendered Kubernetes
+validation without an AWS account call. The
+[empty-volume receipt](../evidence/m4-local/20260908/empty-volume-smoke.json)
+records the next 3 operator commands: `make clean`, `make up`, and `make smoke`.
+They took 30.542 seconds of command runtime. All 7 smoke components passed from
+new volumes; relay returned one idempotent event for 2 concurrent requests,
+published one Kafka record at the first topic offset, delivered once to the
+healthy subscriber, persisted 4 attempts, and produced a fresh DLQ record.
 
 ## Sources
 
