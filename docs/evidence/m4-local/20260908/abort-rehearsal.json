@@ -1,0 +1,48 @@
+{
+  "abort_outputs": [
+    "20-destroy.txt",
+    "21-inventory-after.json",
+    "22-cost-immediate.txt"
+  ],
+  "capture_count": 18,
+  "credential_canary_absent": true,
+  "destroy_recipe": "make --dry-run aws-down",
+  "events": [
+    "deployment_started",
+    "sigterm_received",
+    "destroy_first",
+    "after_destroy_inventory",
+    "after_destroy_cost",
+    "temporary_credentials_removed"
+  ],
+  "finished_at": "2026-09-08T01:18:55Z",
+  "resource_audit_empty": true,
+  "result": "passed",
+  "schema_version": 1,
+  "signal": "SIGTERM",
+  "skipped_live_outputs": [
+    "10-event.json",
+    "11-attempts.json",
+    "12-metrics.txt",
+    "13-trace.json",
+    "14-keda.txt",
+    "15-dlq.json",
+    "16-replay.json",
+    "application-logs.txt"
+  ],
+  "skipped_screenshots": [
+    "argocd-apps.png",
+    "terminal-demo.png",
+    "grafana-lag.png",
+    "tempo-trace.png",
+    "aws-console-eks.png",
+    "aws-console-msk.png",
+    "aws-console-rds.png",
+    "aws-console-cost.png"
+  ],
+  "source_commit": "84566a70702b180b9a884fe2b78bada44544ad0b",
+  "started_at": "2026-09-08T01:18:55Z",
+  "temporary_credentials_removed": true,
+  "temporary_workspace_removed": true,
+  "worktree_clean": false
+}

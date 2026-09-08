@@ -216,7 +216,7 @@ fi
 #
 # It reads as KEDA misbehaving. Nothing is wrong with the autoscaling.
 # Prose was not enough, so it is a precondition now.
-timeout_spec="$(kubectl --request-timeout=15s -n "$NAMESPACE" get cm relay \
+timeout_spec="$(kubectl --request-timeout=15s -n "$NAMESPACE" get cm relay-runtime \
   -o jsonpath='{.data.RELAY_DELIVERY_TIMEOUT}' 2>/dev/null || true)"
 case "$timeout_spec" in
   *ms)
@@ -393,7 +393,7 @@ for _ in $(seq 1 "$SCALE_POLL_ATTEMPTS"); do
   fi
   if [ "$released" -eq 1 ] && [ "$lag" -eq 0 ] && [ "$reps" -eq 1 ]; then
     require_fresh_metric \
-      'max(time() - relay_lag_refreshed_timestamp_seconds)' \
+      'time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role="ingest"})' \
       "relay broker lag measurement"
     require_fresh_metric \
       'max(time() - timestamp(relay_build_info{role="deliver"}))' \

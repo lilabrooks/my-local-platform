@@ -32,6 +32,9 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=build /out/relay /relay
 COPY --from=build /out/relay-replay /relay-replay
 
+ARG VERSION=dev
+LABEL org.opencontainers.image.revision="${VERSION}"
+
 # Matches runAsUser in the Deployment's securityContext.
 USER 65532:65532
 EXPOSE 8080

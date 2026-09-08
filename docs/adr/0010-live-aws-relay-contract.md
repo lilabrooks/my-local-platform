@@ -389,6 +389,131 @@ an AWS resource:
   plan was produced, and creating that prerequisite remains part of the
   separately authorized #96 staging work.
 
+Checked on 2026-09-07 for the first #95 preflight slice, without AWS
+credentials or a Kubernetes cluster:
+
+- `make aws-preflight-check` accepted the recorded M3 closure commit, disabled
+  hourly flags, generated AWS objects, tracked AWS manifests, evidence roots,
+  and the dry-run destroy sequence;
+- the same Make target exited non-zero when `AWS_TF_ARGS` set
+  `enable_eks=true`;
+- a full preflight attempt from the dirty implementation branch stopped before
+  lint, tests, or image builds and wrote a mode-0600 failed receipt in its
+  mode-0700 run directory;
+- disposable relay and sink image builds returned the supplied 40-character
+  revision from `org.opencontainers.image.revision`;
+- `make test` passed every Go module and 41 Python tests, `make lint` passed all
+  12 checks, and `make k8s-validate` parsed 161 objects with no invalid object
+  or error.
+
+The next #95 slice fixed the capture order before the local rehearsal:
+
+- `scripts/m4-evidence.py check-protocol` checked 16 provisional text files,
+  17 final text files, 4 required visual captures, and 4 optional AWS-console
+  captures that must yield to destroy;
+- the capture plan puts identity, price, plan, inventory, and image work before
+  the billable start, then orders event, attempt, Prometheus, trace, Kubernetes,
+  DLQ, replay, log, destroy, inventory, and cost exports; its failure transition
+  skips unfinished live captures and jumps directly to destroy;
+- the local evidence fixture redacted account, ECR, RDS, MSK, email, public-IP,
+  operator, and secret values while preserving commit SHAs, image digests,
+  timestamps, and private addresses;
+- publication required the 4 reviewed screenshots, checked their complete PNG
+  chunk streams and dimensions, hashed every output, and detected a later file
+  edit;
+- provisional publication completed without the delayed final-cost file, then
+  final publication added and verified `23-cost-final.txt`;
+- `make test` passed every Go module and 51 Python tests, and `make lint`
+  passed all 12 checks.
+
+The 2026-09-08 #95 slice added and ran the controlled minikube SIGTERM
+rehearsal:
+
+- `make m4-k8s-sigterm M4_LOCAL_RUN_ID=20260908T010013Z` passed against the
+  `mlp` context and wrote the private receipt under `.evidence/m4-local/`; the
+  [sanitized tracked receipt](../evidence/m4-local/20260908/k8s-sigterm.json)
+  preserves the result;
+- relay-ingest returned readiness failure before exiting cleanly in 6.305
+  seconds of its 45-second grace period; its blocked request then returned 202,
+  published, and reached the sink;
+- relay-deliver returned readiness failure before exiting cleanly in 25.278
+  seconds of its 60-second grace period; the owned record completed with one
+  healthy delivery and retained both successful and exhausted subscriber
+  outcomes;
+- cleanup released the database lock, restored the sink baseline and the prior
+  KEDA annotation, and stopped every port-forward;
+- the receipt binds both terminated pods and the sink to running-image revision
+  `84566a7`, a prefix of its recorded source commit;
+- the receipt recorded source commit
+  `84566a70702b180b9a884fe2b78bada44544ad0b` and `worktree_clean: false`, so
+  this is implementation evidence rather than the required clean-commit
+  closure run.
+
+A second independent review found five reachable gaps. The follow-up added
+`terraform.tfvars.json` to both hourly-flag discovery and gitignore, bound the
+SIGTERM receipt to the revision labels of the images actually running in
+minikube, made identifier preservation yield to any overlapping declared
+secret, moved tracked local evidence outside `docs/evidence/m4/`, and replaced
+header-only PNG checks and fixtures with complete chunk, CRC, image-data, and
+end-marker checks. The enabled-EKS JSON fixture was refused before any AWS
+command. `make test` then passed every Go module and 61 Python tests, and
+`make lint` passed all 12 checks.
+
+The next 2026-09-08 slice exercised the abort controller without AWS:
+
+- `make m4-local-abort M4_LOCAL_RUN_ID=20260908T011847Z` sent SIGTERM after
+  simulated deployment began; the
+  [tracked receipt](../evidence/m4-local/20260908/abort-rehearsal.json) records
+  the six resulting transitions;
+- the interruption skipped all eight live exports and all four required plus
+  four optional screenshots, then ran destroy, explicit after-inventory, and
+  immediate cost capture in order;
+- the rehearsal removed mode-0600 temporary credential files and their private
+  workspace, found no simulated hourly resource, and wrote no credential value
+  or derivative to its receipt;
+- it validated `make --dry-run aws-down` contains identity, initialized-state,
+  Terraform destroy, and state-backup checks in that order.
+
+This is evidence for local controller behavior only. Partial-resource removal
+and empty service-native inventories remain live #97 outcomes. A clean-commit
+preflight and the full local deploy, demo, evidence, and empty-volume bootstrap
+run still remain for #95.
+
+The 2026-09-08 integrated local rehearsal then ran
+`make m4-local-demo M4_LOCAL_RUN_ID=20260908T014300Z`. The
+[tracked receipt](../evidence/m4-local/20260908/demo-rehearsal.json) records a
+203.12-second pass against minikube. Its private transcript records broker lag
+peaking at 596, relay-deliver scaling from 1 to 12 and returning to 1 after lag
+drained to zero, the healthy subscriber advancing while the failing subscriber
+produced a fresh DLQ record, and replay completing. Its provenance inventory
+bound every ready relay and sink pod to image revision `84566a7`, matching the
+recorded source commit. Future receipts extract those observations from the
+transcript and fail if any terminal outcome is absent.
+
+Two failed rehearsals were useful evidence before that pass. The first found
+that `relay-demo.sh` still read the retired `relay` ConfigMap after #94 moved
+runtime values to `relay-runtime`. The second found that its lag-freshness query
+included default-zero gauges from deliver processes. The corrected query joins
+the freshness gauge to `relay_build_info{role="ingest"}` by scrape instance,
+matching the readiness check. Regression tests cover both boundaries.
+
+The ArgoCD view showed all 5 Applications Healthy and Synced. Grafana retained
+the full run with maximum lag 596, maximum delivery instances 12, and final
+values 0 and 1. Those views were inspected in the required order, but the
+receipt remains `pending-human-capture`: the clean live run still owns the
+reviewed screenshot files. The receipt also says `worktree_clean: false`, so it
+is implementation evidence rather than the clean-commit closure run.
+
+After minikube stopped, `make smoke-traces` passed against the unchanged
+Compose path. Event `evt_39ef79d26d8ece21f23f17e3b1d97711` was returned by
+2 concurrent requests, appeared once in Kafka, reached the healthy subscriber
+once, and preserved a poison record plus 4 persisted attempts. Tempo trace
+`1fb6a506089da44360c3f2fdbeac04fd` contained 16 spans across 3 services;
+Grafana Explore visibly joined `relay.ingest`, `kafka.produce`,
+`relay.consume`, and all 4 `relay.webhook.attempt` spans. Keeping minikube
+stopped during this phase prevented the Kubernetes and Compose consumers from
+sharing the same consumer group.
+
 ## Sources
 
 - [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)

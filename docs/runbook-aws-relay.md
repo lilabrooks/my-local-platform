@@ -1,7 +1,8 @@
 # Live AWS relay validation runbook
 
-Status: Contract accepted on 2026-09-05. The deployment render is implemented;
-the local rehearsal and live AWS validation are not. No command on this page
+Status: Contract accepted on 2026-09-05. The deployment render, local
+preflight, capture order, and evidence sanitizer are implemented. The cluster
+rehearsal and live AWS validation remain open. No command on this page
 authorizes an AWS mutation.
 
 This runbook implements the contract in
@@ -190,6 +191,55 @@ cluster.
 
 ## Before staging
 
+First run the controlled Kubernetes shutdown rehearsal from the candidate
+commit. Keep its receipt outside the live packet:
+
+```bash
+local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
+make m4-k8s-sigterm M4_LOCAL_RUN_ID="$local_run_id"
+```
+
+This deliberately terminates one local ingest pod and one local delivery pod.
+It proves that an in-flight ingest is accepted, published, and delivered after
+readiness falls, and that an owned delivery completes or is safely redelivered
+inside the configured grace period. See
+[Rehearse controlled relay termination](runbook-k8s.md#rehearse-controlled-relay-termination)
+for prerequisites and the exact checks. A passing local receipt is not AWS
+authorization.
+
+Create a UTC run id, then run the account-independent preflight from the exact
+commit whose images will be staged:
+
+```bash
+run_id=$(date -u +%Y%m%dT%H%M%SZ)
+make aws-preflight AWS_RUN_ID="$run_id"
+```
+
+The command requires a clean worktree. It checks the recorded M3 closure,
+disabled hourly flags, AWS render inputs, the state-backed destroy command,
+required local tools, repository tests, both commit-labelled workload images,
+Terraform validation, and rendered Kubernetes objects. It does not read AWS
+identity or create a cluster. A pass writes the private receipt
+`.evidence/m4/<run-id>/00-preflight.json` and the fixed
+`capture-plan.json`. A failed run writes the preflight receipt with the failed
+check and returns non-zero. Use a new run id after fixing a failure.
+
+The capture plan puts account, price, plan, inventory, and image work before
+the paid window. Prepare the terminal commands and browser layout before the
+apply. Start the conservative session clock immediately before the separately
+authorized `make aws-up`, then record both deadlines:
+
+```bash
+make aws-evidence-session \
+  AWS_RUN_ID="$run_id" \
+  AWS_BILLABLE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  M4_OPERATOR="$USER"
+```
+
+The command derives the evidence deadline at 2 hours 30 minutes and the hard
+deadline at 3 hours. It writes `00-session.json` once. The live sequence uses
+the export order and Prometheus queries recorded in `capture-plan.json`.
+
 The #96 staging issue must capture these files under the raw evidence directory:
 
 - `01-identity.txt`: caller identity with the account id redacted in the
@@ -265,11 +315,82 @@ delivery; keep the failure as evidence rather than extending the paid run.
 
 Save the machine-readable results as `10-event.json`, `11-attempts.json`,
 `12-metrics.txt`, `13-trace.json`, `14-keda.txt`, `15-dlq.json`, and
-`16-replay.json`. The screenshot set is `grafana-lag.png`, `tempo-trace.png`,
-`argocd-apps.png`, and `terminal-demo.png`.
+`16-replay.json`. Take the required screenshots in this order:
+
+1. `argocd-apps.png`, with every child Application synced and healthy;
+2. `terminal-demo.png`, after the machine checks pass;
+3. `grafana-lag.png`, with lag and replicas visible across the whole run;
+4. `tempo-trace.png`, with the complete selected trace visible.
+
+Optional AWS-console orientation shots use `aws-console-eks.png`,
+`aws-console-msk.png`, `aws-console-rds.png`, and `aws-console-cost.png`.
+Skip them when they would delay destroy. Command output remains the source
+evidence for AWS state.
 
 A failed step is valid evidence. It does not authorize more paid debugging.
 Record the failure, start destroy, and return to local rehearsal.
+
+## Local integrated rehearsal
+
+Run the functional and visual path against minikube before opening the paid
+window:
+
+```bash
+local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
+make m4-local-demo M4_LOCAL_RUN_ID="$local_run_id"
+```
+
+This command makes no AWS call. It requires the `mlp` context, the Compose app
+containers stopped, and the minikube relay and sink ready. It first proves the
+Grafana queries are populated, then exercises delivery, broker lag, KEDA scale
+out and scale in, a fresh DLQ outcome, and replay. Before either command runs,
+it checks every ready relay and sink pod's OCI revision label against the
+source commit. The private receipt and complete terminal transcript are written
+under `.evidence/m4-local/<run-id>/` with mode 0600.
+
+The runner restores sink controls, removes any KEDA pause, and stops its own
+port-forwards on success or failure. It deliberately records visual capture as
+`pending-human-capture`: a machine cannot honestly claim that the 4 required
+screenshots are legible. While minikube is still warm, inspect and capture
+ArgoCD, the successful terminal output, and Grafana in that order. Then stop
+minikube before starting the Compose app consumers, run `make up-apps`,
+`make up-obs`, and `make smoke-traces`, and capture its selected Tempo trace as
+the fourth view. Keeping the 2 relay-deliver groups out of Kafka at the same
+time prevents either environment from consuming the other's evidence event.
+This is practice evidence only. The clean-commit run with ECR images and AWS
+endpoints remains part of #97.
+
+## Abort path
+
+The first live failure jumps to `destroy_first` in `capture-plan.json`. Skip
+the remaining demo exports and screenshots. Run the state-backed destroy, then
+the complete after-inventory and provisional cost capture. Evidence
+sanitization and failure analysis happen after those commands finish.
+
+An abort does not wait for an event, trace, replay, dashboard, or optional AWS
+console view. Keep any raw partial files from the failed run. The publication
+allowlist will remain incomplete, which correctly prevents that attempt from
+being presented as a complete proof.
+
+Rehearse the controller transition locally before staging:
+
+```bash
+local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
+make m4-local-abort M4_LOCAL_RUN_ID="$local_run_id"
+```
+
+The command makes no AWS call. It checks the real `make aws-down` dry-run for
+identity, initialized state, destroy, and state-backup ordering. A local worker
+then creates mode-0600 temporary credential files and simulated hourly-resource
+state, waits until deployment has started, and receives SIGTERM. The worker
+must skip every unfinished live export and screenshot, remove the simulated
+resources, observe an empty explicit inventory, record immediate cost capture,
+and remove the credential directory. Its private write-once receipt is
+`.evidence/m4-local/<run-id>/abort-rehearsal.json`.
+
+This rehearsal proves the controller order and interruption cleanup. It cannot
+prove that the AWS provider destroys a partial resource or that service APIs
+return an empty live inventory; those remain measured outcomes for #97.
 
 ## Destroy is part of the run
 
@@ -308,6 +429,66 @@ offsets, metrics, and exit status.
 
 Before staging the sanitized directory, scan it for the known account id,
 endpoints, and secret values. Any match blocks the commit.
+
+Do this after destroy. Create a mode-0600 JSON file under the raw run directory
+with the exact values the scanner must remove. Keep the real file ignored:
+
+```json
+{
+  "schema_version": 1,
+  "values": {
+    "ACCOUNT_ID": "replace-with-the-known-account-id",
+    "DATABASE_PASSWORD": "replace-with-the-fetched-database-password",
+    "OPERATOR": "replace-with-the-session-username",
+    "SIGNING_SECRET": "replace-with-the-fetched-signing-secret"
+  }
+}
+```
+
+Record a human visual review in ignored `visual-review.json`. It must name the
+run id, reviewer, UTC review time, `"result": "passed"`, and every required
+screenshot under `files`:
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "20260905T193000Z",
+  "reviewed_at": "2026-09-05T22:15:00Z",
+  "reviewer": "replace-with-the-session-username",
+  "result": "passed",
+  "files": [
+    "argocd-apps.png",
+    "terminal-demo.png",
+    "grafana-lag.png",
+    "tempo-trace.png"
+  ]
+}
+```
+
+The publisher checks PNG structure and a minimum 640 by 360 size. It cannot
+inspect rendered text in pixels, so the reviewer must check each image for
+account ids, endpoints, usernames, email addresses, public IPs, and secret
+values.
+
+Publish the first packet after cleanup:
+
+```bash
+make aws-evidence-publish \
+  AWS_RUN_ID="$run_id" \
+  AWS_REDACTIONS_FILE=".evidence/m4/$run_id/redactions.json" \
+  AWS_EVIDENCE_PHASE=provisional
+```
+
+The command copies only the named allowlist, replaces sensitive text with
+stable bracketed tokens, validates every JSON file, checks the screenshot
+review, and records SHA-256 hashes in `publication.json`. Any missing file,
+unknown published file, leak, malformed screenshot, or later edit fails
+verification.
+
+At least 48 hours after destroy, write `23-cost-final.txt` under the raw run
+directory and repeat the command with `AWS_EVIDENCE_PHASE=final`. This verifies
+the provisional packet before adding the settled cost. Use
+`make aws-evidence-verify` with the same variables to recheck either phase.
 
 ## Issue handoff
 

@@ -131,12 +131,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The preflight proves the recorded M3 merge is an ancestor of HEAD.
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests
+
+      - name: M4 account-independent preflight contract
+        run: make aws-preflight-check
 
   smoke:
     name: end-to-end smoke check
@@ -384,7 +389,17 @@ jobs:
             [ -n "$pulled" ] || { echo "could not pull $base after 3 attempts" >&2; exit 1; }
           done
 
-      - run: docker build -t ${{ matrix.service }}:ci services/${{ matrix.service }}
+      - name: Build the commit-labelled image
+        run: |
+          docker build --build-arg VERSION="$GITHUB_SHA" \
+            -t "${{ matrix.service }}:ci" "services/${{ matrix.service }}"
+          revision=$(docker image inspect --format \
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${{ matrix.service }}:ci")
+          [ "$revision" = "$GITHUB_SHA" ] || {
+            echo "image revision $revision does not match $GITHUB_SHA" >&2
+            exit 1
+          }
 
   # The go matrix above cannot be computed from the repository -- GitHub needs
   # it before any step runs -- so this job checks it after the fact. It exists
