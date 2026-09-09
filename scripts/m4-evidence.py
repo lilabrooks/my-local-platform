@@ -31,6 +31,7 @@ REQUIRED_REDACTION_NAMES = {
 }
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+APPLY_START_MAX_AGE = datetime.timedelta(minutes=15)
 
 PROVISIONAL_TEXT = (
     "00-session.json",
@@ -240,7 +241,7 @@ def capture_steps() -> list[dict[str, Any]]:
             "phase": "before_paid_window",
             "output": "00-session.json",
             "source": "session controller",
-            "command": "python3 scripts/m4-evidence.py start-session --run-id $AWS_RUN_ID --started-at $BILLABLE_STARTED_AT --operator $M4_OPERATOR",
+            "command": "make aws-live-run AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT M4_OPERATOR=$M4_OPERATOR",
         },
         {
             "order": 10,
@@ -316,8 +317,8 @@ def capture_steps() -> list[dict[str, Any]]:
             "order": 20,
             "phase": "destroy_first",
             "output": "20-destroy.txt",
-            "source": "state-backed Terraform destroy transcript",
-            "command": "make aws-down >$RAW_EVIDENCE/20-destroy.txt 2>&1",
+            "source": "controller-owned state-backed destroy, log cleanup, and empty-state transcript",
+            "command": "make aws-down; make aws-state-empty",
         },
         {
             "order": 21,
@@ -527,6 +528,80 @@ def start_session(
     }
     write_json_exclusive(path, payload, 0o600)
     return path
+
+
+def process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def validate_live_controller(
+    root: Path,
+    run_id: str,
+    commit: str,
+    controller_pid: int,
+    *,
+    now: datetime.datetime | None = None,
+    pid_check: Any = process_is_running,
+) -> dict[str, Any]:
+    validate_run_id(run_id)
+    if not COMMIT_RE.fullmatch(commit):
+        raise EvidenceError("approved commit must be a full lowercase git SHA")
+    if controller_pid <= 0:
+        raise EvidenceError("hourly apply requires the live-run controller PID")
+    raw, _ = evidence_paths(root, run_id)
+    session = read_json_object(raw / "00-session.json", "session receipt")
+    if (
+        session.get("schema_version") != 1
+        or session.get("run_id") != run_id
+        or session.get("commit") != commit
+        or session.get("region") != "us-east-1"
+    ):
+        raise EvidenceError("session receipt is not bound to this run and commit")
+    started = parse_utc(session.get("billable_started_at"), "billable start")
+    destroy = parse_utc(session.get("destroy_deadline"), "destroy deadline")
+    hard = parse_utc(session.get("hard_deadline"), "hard deadline")
+    if destroy - started != datetime.timedelta(minutes=150):
+        raise EvidenceError("session receipt has the wrong destroy deadline")
+    if hard - started != datetime.timedelta(minutes=180):
+        raise EvidenceError("session receipt has the wrong hard deadline")
+    state = read_json_object(raw / "controller-state.json", "controller state")
+    if (
+        state.get("schema_version") != 1
+        or state.get("run_id") != run_id
+        or state.get("commit") != commit
+        or state.get("region") != "us-east-1"
+        or state.get("controller_pid") != controller_pid
+        or state.get("phase") != "applying"
+    ):
+        raise EvidenceError("controller state does not authorize this apply")
+    current = (now or datetime.datetime.now(datetime.UTC)).astimezone(datetime.UTC)
+    if started > current + datetime.timedelta(seconds=30):
+        raise EvidenceError("session start is in the future")
+    if current - started > APPLY_START_MAX_AGE:
+        raise EvidenceError("session is too old to start an hourly apply")
+    if current >= destroy:
+        raise EvidenceError("destroy deadline has already passed")
+    updated = parse_utc(state.get("updated_at"), "controller heartbeat")
+    if updated > current + datetime.timedelta(seconds=30):
+        raise EvidenceError("controller heartbeat is in the future")
+    if current - updated > datetime.timedelta(seconds=5):
+        raise EvidenceError("live-run controller heartbeat is stale")
+    if not pid_check(controller_pid):
+        raise EvidenceError("live-run controller process is not running")
+    return {
+        "run_id": run_id,
+        "commit": commit,
+        "controller_pid": controller_pid,
+        "billable_started_at": session["billable_started_at"],
+        "destroy_deadline": session["destroy_deadline"],
+        "hard_deadline": session["hard_deadline"],
+    }
 
 
 def load_redactions(path: Path) -> dict[str, str]:
@@ -937,6 +1012,13 @@ def parser() -> argparse.ArgumentParser:
     session.add_argument("--operator", required=True)
     session.add_argument("--region", default="us-east-1")
 
+    controller = commands.add_parser(
+        "check-controller", help="verify the active controller for an hourly apply"
+    )
+    controller.add_argument("--run-id", required=True)
+    controller.add_argument("--commit", required=True)
+    controller.add_argument("--controller-pid", type=int, required=True)
+
     publish_parser = commands.add_parser("publish", help="sanitize and verify evidence")
     publish_parser.add_argument("--run-id", default=os.environ.get("AWS_RUN_ID", ""))
     publish_parser.add_argument(
@@ -964,6 +1046,11 @@ def main() -> int:
                 ROOT, args.run_id, args.started_at, args.operator, args.region
             )
             print(f"session receipt: {path.relative_to(ROOT)}")
+        elif args.command == "check-controller":
+            validate_live_controller(
+                ROOT, args.run_id, args.commit, args.controller_pid
+            )
+            print("live-run controller permit passed")
         elif args.command == "publish":
             path = publish(ROOT, args.run_id, args.phase, args.redactions_file)
             print(f"{args.phase} evidence passed: {path.relative_to(ROOT)}")

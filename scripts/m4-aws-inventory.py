@@ -17,7 +17,17 @@ from typing import Any
 
 PROJECT = "my-local-platform"
 NAME_PREFIX = "mlp-"
-RUNTIME_SERVICES = ("eks", "msk", "rds", "ec2", "ebs", "elb", "nat", "logs")
+RUNTIME_SERVICES = (
+    "eks",
+    "msk",
+    "rds",
+    "ec2",
+    "ebs",
+    "eip",
+    "elb",
+    "nat",
+    "logs",
+)
 ROOT = Path(__file__).resolve().parent.parent
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -176,6 +186,7 @@ def collect(
         ]
     )
     ebs = runner(["ec2", "describe-volumes", *common])
+    eip = runner(["ec2", "describe-addresses", *common])
     elb = runner(["elbv2", "describe-load-balancers", *common])
     ecr = runner(["ecr", "describe-repositories", *common])
     nat = runner(["ec2", "describe-nat-gateways", *common])
@@ -213,6 +224,11 @@ def collect(
             volume
             for volume in ebs.get("Volumes", [])
             if project_tagged(volume.get("Tags", []))
+        ],
+        "eip": [
+            address
+            for address in eip.get("Addresses", [])
+            if project_tagged(address.get("Tags", []))
         ],
         "elb": [
             load_balancer

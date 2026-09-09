@@ -35,7 +35,7 @@ require_command() {
 
 check_budget() {
 	local account_id budget_name=$1 limit notifications_json notification_count
-	local notification subscriber_count has_subscriber=false
+	local notification subscriber_count
 	account_id=$(aws sts get-caller-identity --query Account --output text)
 	if ! limit=$(aws budgets describe-budget \
 		--account-id "$account_id" \
@@ -43,15 +43,15 @@ check_budget() {
 		--query 'Budget.BudgetLimit.Amount' \
 		--output text 2>/dev/null); then
 		echo "hourly resources require the pre-existing $budget_name budget" >&2
-		echo "apply the cheap tier with budget_alert_email set, then plan again" >&2
+		echo "apply the persistent guardrail stack, then plan again" >&2
 		exit 1
 	fi
 	if ! awk -v value="$limit" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/) }'; then
 		echo "$budget_name returned an invalid budget limit" >&2
 		exit 1
 	fi
-	awk -v limit="$limit" 'BEGIN { exit !(limit <= 5) }' || {
-		echo "$budget_name has a limit above the approved \$5 maximum" >&2
+	awk -v limit="$limit" 'BEGIN { exit !(limit == 5) }' || {
+		echo "$budget_name must have the approved \$5 limit" >&2
 		exit 1
 	}
 	notifications_json=$(aws budgets describe-notifications-for-budget \
@@ -69,6 +69,21 @@ check_budget() {
 		echo "$budget_name has no notification; hourly resources remain blocked" >&2
 		exit 1
 	fi
+	if ! jq -e '
+		(map([.NotificationType, .ComparisonOperator, .Threshold, .ThresholdType]) | sort)
+		==
+		([ ["ACTUAL", "GREATER_THAN", 80, "PERCENTAGE"],
+		   ["ACTUAL", "GREATER_THAN", 100, "PERCENTAGE"],
+		   ["FORECASTED", "GREATER_THAN", 100, "PERCENTAGE"] ] | sort)
+	' <<<"$notifications_json" >/dev/null; then
+		echo "$budget_name notification settings do not match the guardrail stack" >&2
+		exit 1
+	fi
+	if ! jq -e 'all(.[]; .NotificationState == "OK")' \
+		<<<"$notifications_json" >/dev/null; then
+		echo "$budget_name notifications are not all OK; hourly resources remain blocked" >&2
+		exit 1
+	fi
 
 	while IFS= read -r notification; do
 		subscriber_count=$(aws budgets describe-subscribers-for-notification \
@@ -83,17 +98,13 @@ check_budget() {
 				exit 1
 				;;
 		esac
-		if [ "$subscriber_count" -ge 1 ]; then
-			has_subscriber=true
-			break
+		if [ "$subscriber_count" -lt 1 ]; then
+			echo "$budget_name has a notification without a subscriber; hourly resources remain blocked" >&2
+			exit 1
 		fi
 	done < <(jq -c \
 		'.[] | {NotificationType, ComparisonOperator, Threshold, ThresholdType}' \
 		<<<"$notifications_json")
-	if [ "$has_subscriber" != "true" ]; then
-		echo "$budget_name has no notification subscriber; hourly resources remain blocked" >&2
-		exit 1
-	fi
 }
 
 check_eks_support() {
@@ -341,6 +352,17 @@ case "$action" in
 				--plan "$PLAN_FILE" \
 				--summary "$SUMMARY_FILE" \
 				--output "$GO_NO_GO_FILE"
+			controller_pid=${MLP_AWS_LIVE_CONTROLLER_PID:-}
+			case "$controller_pid" in
+				'' | *[!0-9]*)
+					echo "hourly apply must run under make aws-live-run" >&2
+					exit 1
+					;;
+			esac
+			python3 "$ROOT_DIR/scripts/m4-evidence.py" check-controller \
+				--run-id "$RUN_ID" \
+				--commit "$SOURCE_COMMIT" \
+				--controller-pid "$controller_pid"
 		fi
 		# Keep this last: its EKS support query must immediately precede apply.
 		guard_shape "$runtime_json"

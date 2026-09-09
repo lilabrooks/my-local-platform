@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -211,6 +211,7 @@ class GuardScriptTest(unittest.TestCase):
         for script_name in (
             "aws-terraform-guard.sh",
             "check-aws-plan.py",
+            "m4-evidence.py",
             "m4-stage.py",
         ):
             shutil.copy2(ROOT / "scripts" / script_name, scripts / script_name)
@@ -245,7 +246,7 @@ class GuardScriptTest(unittest.TestCase):
         runtime = {
             "hourly_enabled": True,
             "enable_eks": True,
-            "budget_name": "mlp-dev-live-runtime",
+            "budget_name": "mlp-live-aws-monthly",
             "region": "us-east-1",
             "eks_version": "1.35",
         }
@@ -254,7 +255,7 @@ class GuardScriptTest(unittest.TestCase):
             "hourly_enabled": False,
             "enable_eks": False,
         }
-        missing_runtime_keys = {"budget_name": "mlp-dev-live-runtime"}
+        missing_runtime_keys = {"budget_name": "mlp-live-aws-monthly"}
         planned_shape = shape(
             hourly_enabled=True,
             enable_eks=True,
@@ -264,7 +265,7 @@ class GuardScriptTest(unittest.TestCase):
             "complete": True,
             "planned_values": {
                 "outputs": {
-                    "runtime_budget_name": {"value": "mlp-dev-live-runtime"},
+                    "runtime_budget_name": {"value": "mlp-live-aws-monthly"},
                     "runtime_shape": {"value": planned_shape},
                 },
                 "root_module": {
@@ -286,7 +287,7 @@ class GuardScriptTest(unittest.TestCase):
             **plan_json,
             "planned_values": {
                 "outputs": {
-                    "runtime_budget_name": {"value": "mlp-dev-live-runtime"},
+                    "runtime_budget_name": {"value": "mlp-live-aws-monthly"},
                     "runtime_shape": {"value": shape()},
                 },
                 "root_module": {"resources": []},
@@ -334,7 +335,8 @@ case "$1 $2" in
     printf '%s\\n' "${MLP_FAKE_BUDGET_LIMIT:-5.0}"
     ;;
   'budgets describe-notifications-for-budget')
-    printf '%s\\n' '[{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80,"ThresholdType":"PERCENTAGE"}]'
+    if [ "${MLP_FAKE_BUDGET_ALARM:-}" = 1 ]; then alarm=',"NotificationState":"ALARM"'; else alarm=',"NotificationState":"OK"'; fi
+    printf '%s\\n' "[{\\"NotificationType\\":\\"ACTUAL\\",\\"ComparisonOperator\\":\\"GREATER_THAN\\",\\"Threshold\\":80.0,\\"ThresholdType\\":\\"PERCENTAGE\\"$alarm},{\\"NotificationType\\":\\"ACTUAL\\",\\"ComparisonOperator\\":\\"GREATER_THAN\\",\\"Threshold\\":100.0,\\"ThresholdType\\":\\"PERCENTAGE\\",\\"NotificationState\\":\\"OK\\"},{\\"NotificationType\\":\\"FORECASTED\\",\\"ComparisonOperator\\":\\"GREATER_THAN\\",\\"Threshold\\":100.0,\\"ThresholdType\\":\\"PERCENTAGE\\",\\"NotificationState\\":\\"OK\\"}]"
     ;;
   'budgets describe-subscribers-for-notification')
     printf '%s\\n' "${MLP_FAKE_SUBSCRIBER_COUNT:-1}"
@@ -364,6 +366,7 @@ esac
                 "MLP_AWS_APPROVED_COMMIT": source_commit,
                 "AWS_RUN_ID": run_id,
                 "MLP_FAKE_LOG": str(self.log),
+                "MLP_AWS_LIVE_CONTROLLER_PID": str(os.getpid()),
             }
         )
 
@@ -409,6 +412,44 @@ esac
         }
         (self.evidence / "06-go-no-go.json").write_text(
             json.dumps(packet), encoding="utf-8"
+        )
+        started = datetime.now(timezone.utc).replace(microsecond=0)
+        (self.evidence / "00-session.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": self.run_id,
+                    "commit": "a" * 40,
+                    "region": "us-east-1",
+                    "operator": "test-operator",
+                    "billable_started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "destroy_deadline": (
+                        started + timedelta(minutes=150)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "hard_deadline": (started + timedelta(minutes=180)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    "limits": {
+                        "maximum_hourly_usd": 1.25,
+                        "maximum_total_usd": 5.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.evidence / "controller-state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": self.run_id,
+                    "commit": "a" * 40,
+                    "region": "us-east-1",
+                    "controller_pid": os.getpid(),
+                    "phase": "applying",
+                    "updated_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            ),
+            encoding="utf-8",
         )
 
     def test_support_check_is_immediately_before_plan_and_apply(self):
@@ -472,7 +513,7 @@ esac
         result = self._run("plan", environment)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pre-existing mlp-dev-live-runtime budget", result.stderr)
+        self.assertIn("pre-existing mlp-live-aws-monthly budget", result.stderr)
         self.assertFalse(self.plan.exists())
 
     def test_plan_with_no_variable_arguments_runs_under_system_bash(self):
@@ -510,6 +551,16 @@ esac
         self.assertIn("invalid budget limit", result.stderr)
         self.assertFalse(self.plan.exists())
 
+    def test_changed_budget_limit_blocks_plan(self):
+        environment = self.environment.copy()
+        environment["MLP_FAKE_BUDGET_LIMIT"] = "4"
+
+        result = self._run("plan", environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("approved $5 limit", result.stderr)
+        self.assertFalse(self.plan.exists())
+
     def test_missing_budget_subscriber_blocks_plan(self):
         environment = self.environment.copy()
         environment["MLP_FAKE_SUBSCRIBER_COUNT"] = "0"
@@ -517,7 +568,17 @@ esac
         result = self._run("plan", environment)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no notification subscriber", result.stderr)
+        self.assertIn("notification without a subscriber", result.stderr)
+        self.assertFalse(self.plan.exists())
+
+    def test_active_budget_alarm_blocks_plan(self):
+        environment = self.environment.copy()
+        environment["MLP_FAKE_BUDGET_ALARM"] = "1"
+
+        result = self._run("plan", environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not all OK", result.stderr)
         self.assertFalse(self.plan.exists())
 
     def test_failed_replan_removes_the_previous_reviewed_pair(self):
@@ -572,6 +633,18 @@ esac
 
         self.assertNotEqual(applied.returncode, 0)
         self.assertIn("GO packet not found", applied.stderr)
+
+    def test_hourly_apply_requires_live_controller(self):
+        planned = self._run("plan")
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self._write_go_packet()
+        environment = self.environment.copy()
+        environment.pop("MLP_AWS_LIVE_CONTROLLER_PID")
+
+        applied = self._run("apply", environment)
+
+        self.assertNotEqual(applied.returncode, 0)
+        self.assertIn("must run under make aws-live-run", applied.stderr)
 
     def test_cheap_tier_apply_does_not_require_go_packet(self):
         environment = self.environment.copy()

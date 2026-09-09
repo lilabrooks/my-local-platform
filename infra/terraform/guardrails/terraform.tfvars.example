@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars and use an email address you actively monitor.
+# terraform.tfvars is gitignored.
+
+region             = "us-east-1"
+budget_alert_email = "owner@example.com"

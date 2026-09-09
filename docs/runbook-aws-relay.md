@@ -1,17 +1,17 @@
 # Live AWS relay validation runbook
 
 Status: Contract accepted on 2026-09-05. The deployment render, local
-rehearsal, staging gates, capture order, and evidence sanitizer are
-implemented. The account-check helper is implemented; its real-account receipt
-and the live AWS validation remain open. No command on this page authorizes an
-AWS mutation.
+rehearsal, staging gates, live-run controller, persistent cost alert, capture
+order, and evidence sanitizer are implemented. The real-account receipts and
+live AWS validation remain open. No command on this page authorizes an AWS
+mutation.
 
 This runbook implements the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md). It is the shared handoff for
-issues #92 through #97. The IAM transport, guarded Terraform plan, shutdown
-budgets, local rehearsal, and deployment render now exist. The remaining
-real-account checks and live evidence commands remain subject to their issue
-gates.
+issues #92 through #97. The IAM transport, guarded Terraform plan, clocked
+cleanup, cost alert, local rehearsal, and deployment render now exist. The
+remaining real-account checks and live evidence commands remain subject to
+their issue gates.
 
 The live run needs three separate approvals:
 
@@ -54,6 +54,8 @@ Do not apply if any of these is false:
   `Ephemeral=true`, and appears in the destroy plan;
 - the local rehearsal for deploy, demo, abort, evidence, redaction, and cleanup
   passed at the exact commit being staged;
+- the persistent `mlp-live-aws-monthly` budget has its expected notifications,
+  a subscriber on each, and every notification state is `OK`;
 - the repository owner has separately authorized this hourly apply.
 
 After apply, any unexpected resource, public workload endpoint, identity
@@ -62,18 +64,25 @@ starts destroy.
 
 ## Clock and spend
 
-Create a UTC run id before staging and record it in
-`.evidence/m4/<run-id>/00-session.json`. Record the exact commit, region,
-operator, start time, 2-hour-30-minute destroy deadline, 3-hour hard deadline,
-$1.25/hour shape cap, and $5.00 maximum.
+Create a UTC run id before staging. `make aws-live-run` writes
+`.evidence/m4/<run-id>/00-session.json` immediately before apply. The receipt
+contains the exact commit, region, operator, start time, 2-hour-30-minute
+destroy deadline, 3-hour hard deadline, $1.25/hour shape cap, and $5.00
+per-run maximum.
 
-The clock starts when the first hourly resource enters a billable state. Start
+The controller starts a conservative clock immediately before apply. It starts
 destroy at 2 hours 30 minutes even if evidence is incomplete. Do not extend the
-sample to obtain a successful result. The executing repository owner owns the
-timer and cleanup.
+sample to obtain a successful result. If Terraform is still applying at the
+deadline, the controller sends `SIGINT`, waits 30 seconds, sends `SIGTERM`,
+waits 10 seconds, and sends `SIGKILL`. Cleanup starts after a final 5-second
+wait. Another operator signal advances the sequence immediately. The executing
+repository owner owns the controller and cleanup.
 
-AWS Budgets is a forgotten-resource alarm. It is not the session stop control,
-because its billing data cannot arrive fast enough.
+The account-wide $5 monthly AWS Budget is a delayed forgotten-resource alert.
+The controller enforces the session clock because billing data cannot arrive
+fast enough. These are separate limits. A forecast or actual budget alarm can
+block later hourly runs until AWS returns it to `OK` or the monthly period
+resets.
 
 ## Configuration and secrets
 
@@ -229,19 +238,9 @@ check and returns non-zero. Use a new run id after fixing a failure.
 
 The capture plan puts account, price, plan, inventory, image, and final decision
 work before the paid window. Prepare the terminal commands and browser layout
-before the apply. Start the conservative session clock immediately before the
-separately authorized `make aws-up`, then record both deadlines:
-
-```bash
-make aws-evidence-session \
-  AWS_RUN_ID="$run_id" \
-  AWS_BILLABLE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  M4_OPERATOR="$USER"
-```
-
-The command derives the evidence deadline at 2 hours 30 minutes and the hard
-deadline at 3 hours. It writes `00-session.json` once. The live sequence uses
-the export order and Prometheus queries recorded in `capture-plan.json`.
+before the apply. The controller creates the session clock later, after every
+staging receipt and the final GO decision pass. The live sequence uses the
+export order and Prometheus queries recorded in `capture-plan.json`.
 
 The #96 staging issue must capture these files under the raw evidence directory:
 
@@ -254,7 +253,24 @@ The #96 staging issue must capture these files under the raw evidence directory:
 - `06-go-no-go.json`: one cross-check of every staged gate, the cleanup owner,
   image digests, capture order, and stop limits.
 
-Capture the account gates before changing any AWS resource:
+Create the persistent cost alert first under the separate #96 approval. Copy
+the private variable example, replace its email address, review the saved plan,
+and apply that exact plan:
+
+```bash
+cp infra/terraform/guardrails/terraform.tfvars.example \
+  infra/terraform/guardrails/terraform.tfvars
+${EDITOR:-vi} infra/terraform/guardrails/terraform.tfvars
+make aws-guardrails-plan
+make aws-guardrails-up
+```
+
+The guardrail stack uses the bootstrap bucket with its own remote-state key.
+It has no destroy target, and the budget has `prevent_destroy = true`. For an
+older checkout, create this replacement before a reviewed cheap-tier dev apply
+removes `mlp-dev-live-runtime` from the dev state.
+
+Then capture the account gates before changing any dev resource:
 
 ```bash
 make aws-account-check \
@@ -268,12 +284,13 @@ account-scoped state bucket with versioning, AES256 encryption, and all four
 public-access blocks. If that bucket is absent, stop and follow the documented
 `make aws-bootstrap` path under the separate #96 staging approval.
 
-The same receipt requires the `mlp-dev-live-runtime` budget, a notification
-destination, and enough remaining capacity for one EKS cluster, one MSK
-Serverless cluster, one RDS instance, six Standard Spot vCPUs, and one Elastic
-IP. The Spot check reserves six vCPUs for the 3-node maximum and subtracts both
-running instances and unfulfilled requests. It checks Kubernetes 1.35 standard
-support, published MSK service presence,
+The same receipt requires the `mlp-live-aws-monthly` budget, its 3 notification
+definitions, a subscriber on each notification, and an `OK` state for each. It also
+requires enough remaining capacity for one EKS cluster, one MSK Serverless
+cluster, one RDS instance, six Standard Spot vCPUs, and one Elastic IP. The Spot
+check reserves six vCPUs for the 3-node maximum and subtracts both running
+instances and unfulfilled requests. It checks Kubernetes 1.35 standard support,
+published MSK service presence,
 the two fixed RDS offerings, and `t3.medium` offerings in `us-east-1a` and
 `us-east-1b`. The MSK check combines the account-visible Kafka region with the
 linked AWS Serverless region table; the API does not expose a separate
@@ -307,9 +324,9 @@ $1.25/hour. It writes itemized `02-prices.md` plus a private JSON sidecar used b
 the release gate. This step reads local files only.
 
 The inventory combines `resourcegroupstaggingapi get-resources` with explicit
-EKS, MSK, RDS, EC2, EBS, ELB, ECR, NAT gateway, and CloudWatch log-group
-queries. The tagging API alone is insufficient. Capture the pre-apply inventory
-with the account selected for staging:
+EKS, MSK, RDS, EC2, EBS, Elastic IP, ELB, ECR, NAT gateway, and CloudWatch
+log-group queries. The tagging API alone is insufficient. Capture the
+pre-apply inventory with the account selected for staging:
 
 ```bash
 make aws-inventory-empty \
@@ -321,9 +338,10 @@ make aws-inventory-empty \
 The helper writes only to the ignored run directory with mode `0600`. It checks
 project tags, names, Kubernetes cluster tags, and service-native results. ECR
 repositories are allowed because they belong to the cheap tier. Any matching
-EKS, MSK, RDS, EC2, EBS, load balancer, NAT gateway, or log group makes the
-command fail after preserving the receipt. Reuse the same command after
-destroy with `AWS_INVENTORY_FILE` set to `21-inventory-after.json`.
+EKS, MSK, RDS, EC2, EBS, Elastic IP, load balancer, NAT gateway, or log group
+makes the command fail after preserving the receipt. Reuse the same command
+after destroy with `AWS_INVENTORY_FILE` set to
+`21-inventory-after.json`.
 
 Build and stage the EKS images after the cheap tier has created both ECR
 repositories:
@@ -363,9 +381,10 @@ make aws-go-no-go \
 The target makes no AWS request. It checks that every input names this run,
 commit, and region, requires a clean exact HEAD, recomputes the price comparison,
 checks both digest-pinned `linux/amd64` images, and records SHA-256 hashes of its
-inputs. `make aws-up` reads this packet again and compares its plan and summary
-hashes immediately before the apply. Any missing, stale, or mixed receipt
-leaves the paid apply blocked.
+inputs. The controller makes `make aws-up` read this packet again, compare its
+plan and summary hashes, and verify the fresh controller receipt immediately
+before apply. An hourly `make aws-up` outside the controller is refused. Any
+missing, stale, or mixed receipt leaves the paid apply blocked.
 
 Trace one image and configuration value through its producer, generated AWS
 Application, ArgoCD load, Deployment, running pod, and evidence output. Trace
@@ -375,6 +394,33 @@ consumer, and a denied action outside its authority.
 ## Live proof
 
 The paid run repeats M3's outcome on the fixed AWS topology:
+
+Start the controller in a dedicated terminal after the separate hourly-run
+approval:
+
+```bash
+make aws-live-run \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit" \
+  M4_OPERATOR="$USER"
+```
+
+Starting this target authorizes both the reviewed apply and automatic cleanup.
+It uses `caffeinate -i` on macOS, creates `00-session.json` immediately before
+apply, and remains in the foreground. Keep the Mac powered, open, and online.
+Use another terminal for the capture commands below.
+
+The guarded apply must reach its final controller check within 15 minutes of
+that timestamp. This allows for backend initialization and the last plan,
+budget, and support checks without moving either cleanup deadline. If it takes
+longer, the run is spent and cleanup starts without applying the plan.
+
+Run `make aws-live-status AWS_RUN_ID="$run_id"` to inspect the deadline. Once
+the required evidence is complete, request early cleanup:
+
+```bash
+make aws-live-stop AWS_RUN_ID="$run_id"
+```
 
 1. ArgoCD reports every application synced and healthy.
 2. Post one event and repeat it with the same idempotency key. Both responses
@@ -489,26 +535,31 @@ being presented as a complete proof.
 Rehearse the controller transition locally before staging:
 
 ```bash
+make aws-live-rehearse
 local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
 make m4-local-abort M4_LOCAL_RUN_ID="$local_run_id"
 ```
 
-The command makes no AWS call. It checks the real `make aws-down` dry-run for
-identity, initialized state, destroy, and state-backup ordering. A local worker
-then creates mode-0600 temporary credential files and simulated hourly-resource
-state, waits until deployment has started, and receives SIGTERM. The worker
-must skip every unfinished live export and screenshot, remove the simulated
-resources, observe an empty explicit inventory, record immediate cost capture,
-and remove the credential directory. Its private write-once receipt is
+These commands make no AWS call. The first runs the Go controller tests and
+the existing abort-protocol tests. The second checks the real `make aws-down`
+dry-run for identity, initialized state, destroy, and state-backup ordering. A
+local worker then creates mode-0600 temporary credential files and simulated
+hourly-resource state, waits until deployment has started, and receives
+SIGTERM. The worker must skip every unfinished live export and screenshot,
+remove the simulated resources, observe an empty explicit inventory, record
+immediate cost capture, and remove the credential directory. Its private
+write-once receipt is
 `.evidence/m4-local/<run-id>/abort-rehearsal.json`.
 
-This rehearsal proves the controller order and interruption cleanup. It cannot
-prove that the AWS provider destroys a partial resource or that service APIs
-return an empty live inventory; those remain measured outcomes for #97.
+This rehearsal proves the controller's state transitions, fixed deadlines,
+bounded retries, and interruption cleanup order. It cannot prove that the AWS
+provider destroys a partial resource or that service APIs return an empty live
+inventory; those remain measured outcomes for #97.
 
 ## Destroy is part of the run
 
-Success and failure both end in the same sequence:
+The controller sends success, failure, operator stop, `SIGINT`, `SIGTERM`, and
+the 150-minute deadline through the same sequence:
 
 1. stop evidence collection at the destroy deadline;
 2. run the state-backed dev-stack destroy;
@@ -516,15 +567,103 @@ Success and failure both end in the same sequence:
 4. confirm Terraform has no dev resources;
 5. repeat every tagged and service-native inventory from the before snapshot;
 6. capture provisional month-to-date and Cost Explorer output;
-7. preserve the bootstrap state bucket.
+7. preserve the bootstrap state bucket and persistent cost alert.
 
 Write the destroy transcript and exit status to `20-destroy.txt`, the complete
 after inventory to `21-inventory-after.json`, and the provisional bill to
 `22-cost-immediate.txt`.
 
-Cleanup is complete only when no M4 EKS cluster, MSK cluster, RDS instance, NAT
-gateway, load balancer, worker instance or volume, dev ECR repository, or M4
-log group remains. An empty tagging response on its own does not pass.
+The controller retries destroy and the empty inventory twice after their first
+failure. It marks cleanup overdue if this sequence crosses the 3-hour hard
+deadline, then records the final result in the private
+`controller-state.json`. The controller never kills an active destroy at the
+hard deadline.
+
+Killing Terraform can leave the S3 state lock in place. A destroy that reports
+`Error acquiring the state lock` cannot succeed on retry until that lock is
+released. Use only the lock ID printed by Terraform, and force-unlock only
+after confirming no apply or destroy process from this run is still active.
+
+Before destroy, the controller compares the current AWS account with
+`01-identity.txt`. Transient identity lookup failures get three attempts with
+30 seconds between attempts. A confirmed account mismatch stops without
+destroying; three failed lookups stop with the manual recovery command printed
+to both the terminal and `20-destroy.txt`. Its direct AWS CLI calls use a
+10-second connection timeout, a 30-second read timeout, one CLI attempt, and a
+45-second process limit. The controller owns the visible identity retry.
+
+Cleanup is complete only when the dev Terraform state is empty and no M4 EKS
+cluster, MSK cluster, RDS instance, NAT gateway, Elastic IP, load balancer,
+worker instance or volume, dev ECR repository, or M4 log group remains. An
+empty tagging response on its own does not pass.
+
+`cleanup_verified: true` records those two empty checks. Cost Explorer,
+destroy, log cleanup, and transcript failures keep their own exit fields. If
+one fails after cleanup is verified, the result is
+`cleanup_complete_with_errors`. Retry the failed evidence command; do not
+start a resource hunt solely because immediate cost capture failed.
+
+### Controller stopped unexpectedly
+
+`make aws-live-status AWS_RUN_ID="$run_id"` reports
+`controller_running: false` when the active controller PID is gone or its
+heartbeat is more than 5 seconds old. A spent run cannot be restarted because
+`00-session.json` already exists. Keep its files and recover in this order:
+
+1. Run `make aws-whoami` and compare the account with
+   `.evidence/m4/$run_id/01-identity.txt`. Stop if they differ.
+2. Run `make aws-init`, then `make aws-down`. If destroy reports
+   `Error acquiring the state lock`, first confirm that no Terraform apply or
+   destroy process from this run is active. Copy the lock ID from the error,
+   then release that exact lock and retry destroy:
+
+   ```bash
+   lock_id=replace-with-the-lock-id-from-terraform
+   profile=${AWS_PROFILE_NAME:-aws-public-change-feed}
+   region=${AWS_REAL_REGION:-us-east-1}
+   env -i \
+     HOME="$HOME" \
+     PATH="$PATH" \
+     TMPDIR="${TMPDIR:-/tmp}" \
+     AWS_PROFILE="$profile" \
+     AWS_REGION="$region" \
+     AWS_DEFAULT_REGION="$region" \
+     TF_VAR_region="$region" \
+     terraform -chdir=infra/terraform/envs/dev force-unlock "$lock_id"
+   make aws-down AWS_PROFILE_NAME="$profile" AWS_REAL_REGION="$region"
+   ```
+
+   Never force-unlock a state that an active Terraform process still owns.
+3. Delete only CloudWatch log groups beginning with `/aws/eks/mlp-` or
+   `/aws/msk/mlp-`:
+
+   ```bash
+   profile=${AWS_PROFILE_NAME:-aws-public-change-feed}
+   for prefix in /aws/eks/mlp- /aws/msk/mlp-; do
+     aws logs describe-log-groups \
+       --profile "$profile" \
+       --region us-east-1 \
+       --log-group-name-prefix "$prefix" \
+       --query 'logGroups[].logGroupName' \
+       --output json |
+       jq -r '.[]' |
+       while IFS= read -r group; do
+         [ -z "$group" ] ||
+           aws logs delete-log-group \
+             --profile "$profile" \
+             --region us-east-1 \
+             --log-group-name "$group"
+       done
+   done
+   ```
+
+4. Run `make aws-state-empty`.
+5. Run the after-destroy `make aws-inventory-empty` command above with
+   `AWS_INVENTORY_FILE=".evidence/m4/$run_id/21-inventory-after.json"`.
+6. Run `make aws-cost >".evidence/m4/$run_id/22-cost-immediate.txt"`.
+
+The run remains failed even after manual cleanup. Keep the recovery output with
+its spent run id.
 
 No earlier than 48 hours after destroy, capture the settled attributed cost in
 `23-cost-final.txt`. Wait longer if AWS still marks the data incomplete. #97

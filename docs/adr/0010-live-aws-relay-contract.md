@@ -187,16 +187,42 @@ or NAT resource, more than three worker nodes, a non-Spot worker group, more
 than 13 Kafka partitions, or an EKS version outside standard support. On-demand
 node pricing is used for the gate even though the plan requests Spot.
 
-The paid window is three hours from the first hourly resource entering a
-billable state. At 2 hours 30 minutes the run stops gathering evidence and
-starts destroy, leaving 30 minutes for cleanup. The approved maximum is $5.00.
+The paid-window target is three hours from the start of apply. At 2 hours 30
+minutes the run stops gathering evidence and starts destroy, leaving 30
+minutes for cleanup. Crossing three hours is a failed deadline, but the
+controller keeps an active destroy running because stopping cleanup would
+leave the account in a worse state. The approved maximum is $5.00.
 Any plan-gate failure, identity mismatch, unexpected resource, support-status
 failure, or modeled rate above $1.25/hour blocks apply. Any such discovery
 after apply aborts the demonstration and starts destroy.
 
-AWS Budgets is still configured before staging as a forgotten-resource alarm,
-but it does not enforce this window. Billing data arrives too late for a
-three-hour experiment. The executing repository owner owns the timer and
+`make aws-live-run` creates the timestamp immediately before apply and keeps a
+Go controller in the foreground. Success, failure, `SIGINT`, `SIGTERM`, an
+operator stop, and the 2-hour-30-minute deadline all enter the same cleanup
+path. The controller interrupts an apply that is still running at that
+deadline, waits 30 seconds, escalates to `SIGTERM`, waits 10 seconds, and then
+sends `SIGKILL`; cleanup starts after a final 5-second bound. A second operator
+signal advances that sequence immediately. Hourly apply requires a fresh
+controller heartbeat bound to the run, commit, and live controller process.
+Cleanup runs state-backed destroy, removes project-prefixed EKS and MSK log
+groups, requires empty dev Terraform state, checks the service-native inventory
+including project-tagged Elastic IPs, and captures immediate cost output. It
+records an overdue result if cleanup crosses the 3-hour deadline and never
+kills an active destroy.
+
+Cleanup verification is the empty Terraform state plus the empty explicit
+inventory. Destroy, log cleanup, transcript, and Cost Explorer exits remain
+separate evidence. A Cost Explorer failure can therefore fail the evidence run
+without telling the operator that resources remain.
+
+The account-wide `mlp-live-aws-monthly` budget lives in a persistent Terraform
+stack with its own remote state and destroy protection. It sends actual-spend
+email at $4 and $5 and forecast email at $5. Any active budget alarm blocks a
+new hourly plan. Billing data arrives too late for a three-hour experiment, so
+the budget remains a forgotten-resource alert. Its $5 amount is a monthly
+account ceiling, separate from the $5 session maximum. A single run can trip
+the forecast alarm and block another hourly run for the rest of the alarm
+period. The executing repository owner owns the foreground controller and
 cleanup; there is no cleanup handoff.
 
 ### Evidence and redaction
@@ -211,7 +237,7 @@ lives under `docs/evidence/m4/<run-id>/` and uses these names:
 | `01-identity.txt` | redacted repository and caller identity, state backend, budget, quota capacity, regional offerings, and EKS support |
 | `02-prices.md` | dated source URLs, rates, quantities, arithmetic, and $1.25/hour gate result |
 | `03-plan-summary.json` | capture time, Terraform input hash, resource addresses, types, counts, and enforced topology result; no secret values |
-| `04-inventory-before.json` | tagged inventory plus service-native EKS, MSK, RDS, EC2, EBS, ELB, ECR, NAT, and log-group queries |
+| `04-inventory-before.json` | tagged inventory plus service-native EKS, MSK, RDS, EC2, EBS, Elastic IP, ELB, ECR, NAT, and log-group queries |
 | `05-images.json` | source commit, both immutable tags, and deployed digests |
 | `06-go-no-go.json` | one run-and-commit-bound decision over identity, prices, plan, empty inventory, images, capture order, limits, and cleanup owner |
 | `10-event.json` | accepted event, idempotent repeat, and persisted event identity |
@@ -242,8 +268,9 @@ The tagging API is not cleanup proof because it omits some untagged or
 service-created resources. The before and after inventories therefore pair it
 with service-native queries. Destroy is complete only when Terraform reports
 no dev resources and the explicit queries find no M4 EKS cluster, MSK cluster,
-RDS instance, NAT gateway, load balancer, worker instance or volume, dev ECR
-repository, or M4 CloudWatch log group. The bootstrap state bucket survives.
+RDS instance, NAT gateway, Elastic IP, load balancer, worker instance or
+volume, dev ECR repository, or M4 CloudWatch log group. The bootstrap state
+bucket survives.
 
 The immediate cost capture is provisional. `23-cost-final.txt` is captured no
 earlier than 48 hours after destroy, or later if AWS still reports incomplete
@@ -330,7 +357,8 @@ hourly apply, rollback is the same action as successful completion: stop the
 demo, run the state-backed destroy, delete service-created log groups, run the
 explicit inventories, and capture the final cost later.
 
-The bootstrap state bucket is never part of rollback or dev-stack destroy.
+The bootstrap state bucket and persistent cost budget are never part of
+rollback or dev-stack destroy.
 
 ## Revisit when
 
@@ -565,6 +593,28 @@ The 2026-09-08 #96 staging slices remained outside the paid window:
   files, 18 final text files, and the required visual sequence;
 - `make test` passed every Go module and 121 Python tests, and `make lint`
   passed all 12 checks.
+
+The 2026-09-08 live-run control slice remained outside AWS:
+
+- the new Go controller tests fixed the 150- and 180-minute boundaries,
+  escalated a stuck apply through the bounded signal sequence, exercised the
+  live stop-file, deadline, real process group, pending-signal reset, exclusive
+  lock, nested-module repository lookup, identity retries, heartbeats, and
+  distinct cleanup and evidence failures;
+- the apply-wrapper tests required a fresh run-, commit-, region-, and
+  process-bound controller permit for hourly resources. They also rejected a
+  missing or changed budget, any notification state other than `OK`, and a
+  notification without a subscriber. The notification fixture uses the AWS
+  CLI's floating-point threshold form;
+- the persistent guardrail stack passed `terraform validate` and its 1 mocked
+  contract test. The dev stack passed validation and all 7 mocked tests after
+  the budget moved out of its destroy scope, including the deprecated dev
+  email input as a tested no-op;
+- `make aws-live-rehearse` passed the Go controller suite and 18 focused
+  evidence and abort tests. `make aws-preflight-check` accepted the repository
+  and capture protocol;
+- `make test` passed all 6 race-enabled Go modules and 132 Python tests.
+  `make lint` passed all 12 checks.
 
 No AWS command ran for these checks. Real account identity, state, budget,
 quota, regional availability, inventory, ECR, and price evidence still belong

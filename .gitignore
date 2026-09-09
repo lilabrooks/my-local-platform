@@ -46,6 +46,7 @@ __pycache__/
 /services/relay/relay
 /services/sink/sink
 /services/smoke/smoke
+/tools/m4-live-run/m4-live-run
 
 # Editors / OS
 .DS_Store

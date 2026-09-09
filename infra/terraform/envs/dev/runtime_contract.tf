@@ -1,5 +1,5 @@
 locals {
-  runtime_budget_name = "${local.name}-live-runtime"
+  runtime_budget_name = "mlp-live-aws-monthly"
 
   delivery_topic         = "mlp.relay.deliveries"
   dead_letter_topic      = "mlp.relay.deliveries.dlq"
@@ -41,11 +41,6 @@ resource "terraform_data" "runtime_contract" {
   }
 
   lifecycle {
-    precondition {
-      condition     = var.budget_alert_email != ""
-      error_message = "Set budget_alert_email and apply the cheap tier before enabling hourly resources."
-    }
-
     precondition {
       condition     = !var.enable_eks || var.eks_operator_cidr != ""
       error_message = "Set eks_operator_cidr to the operator's current IPv4 /32 before enabling EKS."

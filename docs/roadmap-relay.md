@@ -1,13 +1,12 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-06
+Date: 2026-08-24 · Last audited: 2026-09-08
 Status: **M0 through M3 are built. M3's whole-application proof passed on
 2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
-is closed. M4's contract, IAM transport, Terraform runtime, shutdown budget,
-and AWS deployment render are implemented.** The local rehearsal in
-[#95](https://github.com/lilabrooks/my-local-platform/issues/95) is the next
-gate. Live staging and the hourly apply still require their separate owner
-decisions.
+is closed. M4's contract, local foundation, AWS deployment render, and local
+rehearsal are complete.** Cheap-tier staging in
+[#96](https://github.com/lilabrooks/my-local-platform/issues/96) is waiting for
+owner authorization. The later hourly apply requires a second owner decision.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -469,9 +468,13 @@ that shift, narrow enough to name precisely.
 
 ### Before the first apply
 
-1. An AWS Budgets alarm for forgotten resources. The active session controls
-   are the fixed resource-shape gate, the 2-hour-30-minute destroy deadline,
-   the 3-hour hard stop, and the $5 approved maximum.
+1. Create the persistent account-wide AWS Budget from
+   `infra/terraform/guardrails/`. Its actual-spend alerts fire above 80% and
+   100% of $5, and its forecast alert fires above 100%. The foreground Go
+   controller owns the fixed 2-hour-30-minute destroy deadline; billing data
+   arrives too late to serve as the session clock. The $5 budget is a monthly
+   account ceiling, so an active forecast or actual alarm can block another
+   hourly run that month.
 2. Confirm the EKS version is in **standard** support. Extended support bills
    $0.60/cluster-hour instead of $0.10, applied automatically:
 
@@ -545,7 +548,7 @@ rules are in the AWS relay runbook.
 | minikube cannot reach the compose broker | M2 | Named above; budget a day, decide the listener strategy deliberately |
 | kafka-go does not compose with the MSK IAM signer | M4 | Checked in M0, before any producer code exists |
 | Demo-first ordering leaves semantic gaps | M2 | Known and accepted; the gaps are enumerated as M3 rather than left implicit |
-| MSK left running after M4 | M4 | Budget alarm before apply; `Ephemeral=true` tag; `make aws-cost` |
+| MSK left running after M4 | M4 | Foreground controller starts cleanup at 150 minutes; persistent budget alerts at $4 actual, $5 actual, and $5 forecast; empty Terraform state plus service inventory, including Elastic IPs, verify cleanup |
 | CI runtime grows with each new service | M1 | Acceptable; revisit if the smoke job exceeds ~5 minutes |
 
 Estimates assume focused sessions and are the least reliable thing here.

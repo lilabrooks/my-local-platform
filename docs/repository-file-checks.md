@@ -52,8 +52,8 @@ so the diagram stays editable beside the workflow it describes.
 ```mermaid
 flowchart TD
     event[Pull request or manual dispatch]
-    event --> go[Go: 5-module matrix]
-    event --> terraform[Terraform: 2-stack matrix]
+    event --> go[Go: 6-module matrix]
+    event --> terraform[Terraform: 3-stack matrix]
     event --> python[Python tests and M4 repository preflight]
     event --> smoke[Smoke: ordered runtime suite]
     event --> image[Images: 3-service matrix]
@@ -74,8 +74,8 @@ flowchart TD
     push[Push to protected branch] -. documented GitHub setup .-> codeql[CodeQL default setup]
 ```
 
-The 3 matrices expand the 9 tracked job definitions into 16 job instances on a
-pull request: 5 Go jobs, 2 Terraform jobs, Python, smoke, 3 image jobs, module
+The 3 matrices expand the 9 tracked job definitions into 18 job instances on a
+pull request: 6 Go jobs, 3 Terraform jobs, Python, smoke, 3 image jobs, module
 coverage, lint, dependency review, and the aggregate. A manual run has the same
 shape with dependency review skipped.
 
@@ -83,9 +83,9 @@ shape with dependency review skipped.
 
 | Job | Expansion | Timeout | Work performed |
 |---|---:|---:|---|
-| `go` | 5 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
-| `terraform` | 2 stacks | 15 minutes | Format, backend-free initialization, and configuration validation. |
-| `python` | 1 | 5 minutes | Python tests plus the account-independent M4 repository preflight. |
+| `go` | 6 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
+| `terraform` | 3 stacks | 15 minutes | Format, backend-free initialization, configuration validation, and stack tests where present. |
+| `python` | 1 | 5 minutes | Python tests, the Go-backed live-run Make entry-point check, and the account-independent M4 repository preflight. |
 | `smoke` | 1 | 30 minutes | Start the local platform and run smoke, trace, replay, ordering, drain, and crash checks. |
 | `image` | 3 services | 20 minutes | Pull each pinned build base, build the service image, and verify its commit label. |
 | `go-modules-covered` | 1 | 5 minutes | Compare discovered `go.mod` files with the Go matrix. |
@@ -102,6 +102,7 @@ The Go matrix covers:
 - `services/relay`
 - `services/sink`
 - `k8s/validate`
+- `tools/m4-live-run`
 
 Each matrix job checks out the repository, installs the Go version named by
 that module's `go.mod`, and runs:
@@ -113,6 +114,11 @@ that module's `go.mod`, and runs:
 5. golangci-lint 2.13.1 with the root `.golangci.yml`.
 6. `go test -count=1 ./...`.
 
+The live-run module tests its deadline arithmetic, bounded apply signal
+sequence, process-group delivery, pending-signal reset, state heartbeat,
+exclusive lock, identity retries, Terraform-state check, explicit inventory,
+and the split between resource cleanup and evidence-command failures.
+
 The matrix is written explicitly because GitHub needs it before steps run. The
 `go-modules-covered` job independently discovers every `go.mod` and compares
 the result with that matrix. It reports both missing modules and stale entries.
@@ -122,6 +128,7 @@ the result with that matrix. It reports both missing modules and stale entries.
 The Terraform matrix covers:
 
 - `infra/terraform/bootstrap`
+- `infra/terraform/guardrails`
 - `infra/terraform/envs/dev`
 
 Each job installs Terraform 1.15.8 and runs:
@@ -130,7 +137,7 @@ Each job installs Terraform 1.15.8 and runs:
 terraform fmt -check -recursive
 terraform init -backend=false -input=false
 terraform validate
-terraform test # dev stack only: disabled and enabled runtime plans
+terraform test # guardrail and dev stacks
 ```
 
 The disabled backend avoids remote state. The workflow has no AWS credentials,
@@ -329,9 +336,10 @@ format.
 
 ### Terraform rules: TFLint 0.64.0
 
-TFLint runs in both Terraform stacks:
+TFLint runs in all 3 Terraform stacks:
 
 - `infra/terraform/bootstrap`
+- `infra/terraform/guardrails`
 - `infra/terraform/envs/dev`
 
 Each stack runs:
@@ -678,7 +686,7 @@ scans when those tools recognize their contents.
 
 ## Terraform validation in CI
 
-The CI Terraform job runs against both stacks:
+The CI Terraform job runs against all 3 stacks:
 
 ```bash
 terraform fmt -check -recursive
@@ -687,9 +695,9 @@ terraform validate
 ```
 
 `terraform validate` checks parsing, references, types, and provider schemas.
-The dev stack's mocked tests additionally assert that the default has no
-hourly resources, the enabled plan matches ADR 0010, and missing budget or EKS
-endpoint configuration fails. The disabled backend keeps the job away from
+The guardrail stack's mocked test fixes the persistent budget's name, limit,
+and 3 notifications. The dev stack's mocked tests assert that the default has
+no hourly resources and the enabled plan matches ADR 0010. The disabled backend keeps the job away from
 remote state, and the job has no AWS credentials. This validation is separate
 from `make lint`, which runs Terraform formatting and TFLint.
 
@@ -715,6 +723,12 @@ small screenshots, redact known and structural sensitive values, preserve
 commit and image identifiers, hash each published file, and detect edits after
 publication. No test reads an AWS account.
 
+They also execute the `aws-live-status` Make entry point against an invalid
+run id, so the nested Go module must start before the expected validation
+failure. Separate local-only cases check floating-point budget thresholds,
+stale controller heartbeats, stale guardrail-plan removal, plan consumption,
+and the cheap-tier confirmation prompt.
+
 They also exercise the minikube SIGTERM receipt helpers without a cluster.
 Those cases require application readiness to fail before a clean container
 exit, reject explicit signals and grace-period overruns, accept completed or
@@ -736,7 +750,7 @@ Compose app containers, missing pods, mismatched image revisions, or leftover
 KEDA pause state before it produces an event.
 
 The other account-independent parts of `make aws-preflight` stay in their
-existing CI jobs: Go and Python tests, strict lint, both Terraform stacks, the
+existing CI jobs: Go and Python tests, strict lint, all 3 Terraform stacks, the
 3 service-image builds, and rendered Kubernetes validation. Presence checks
 for operator tools remain local because the hosted jobs install only what each
 job uses. The workflow receives no AWS credentials and creates no local
@@ -815,8 +829,8 @@ updates for:
 - GitHub Actions;
 - Compose images;
 - the `echo`, `relay`, and `sink` Dockerfiles;
-- both Terraform stacks;
-- all 5 Go modules.
+- all 3 Terraform stacks;
+- all 6 Go modules.
 
 Dependabot creates update proposals and reports no pass/fail result. Proposed
 updates still pass through the pull-request gates described in this document.

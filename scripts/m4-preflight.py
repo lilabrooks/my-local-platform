@@ -669,7 +669,11 @@ def run_preflight(root: Path, run_id: str, environment: Mapping[str, str]) -> Pa
         )
         images["relay:dev"] = inspect_image("relay:dev", commit)
         images["sink:dev"] = inspect_image("sink:dev", commit)
-        for stack in ("infra/terraform/bootstrap", "infra/terraform/envs/dev"):
+        for stack in (
+            "infra/terraform/bootstrap",
+            "infra/terraform/guardrails",
+            "infra/terraform/envs/dev",
+        ):
             run_step(
                 f"Terraform init ({stack})",
                 [
@@ -686,11 +690,15 @@ def run_preflight(root: Path, run_id: str, environment: Mapping[str, str]) -> Pa
                 ["terraform", f"-chdir={stack}", "validate"],
                 checks,
             )
-        run_step(
-            "Terraform contract tests",
-            ["terraform", "-chdir=infra/terraform/envs/dev", "test"],
-            checks,
-        )
+        for stack in (
+            "infra/terraform/guardrails",
+            "infra/terraform/envs/dev",
+        ):
+            run_step(
+                f"Terraform contract tests ({stack})",
+                ["terraform", f"-chdir={stack}", "test"],
+                checks,
+            )
         run_step("rendered Kubernetes validation", ["make", "k8s-validate"], checks)
         payload["result"] = "passed"
     except BaseException as error:
