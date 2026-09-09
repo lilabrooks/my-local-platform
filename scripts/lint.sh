@@ -221,7 +221,7 @@ if has_docker; then
   mkdir -p "$TFLINT_CACHE"
 
   lint_fail=0 lint_out=""
-  for stack in infra/terraform/bootstrap infra/terraform/envs/dev; do
+  for stack in infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev; do
     # --init is NOT silenced. Hiding it once turned a GitHub 504 into an empty
     # failure with no cause, which cost more time than the flake itself -- and
     # then CI's own copy of this step silenced it again and did exactly that.

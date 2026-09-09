@@ -18,6 +18,23 @@ make aws-init
 
 Terraform 1.10 or newer uses the S3 backend's native lockfile here.
 
+The same bucket stores the persistent cost-alert state under a separate key.
+Create or update that stack before staging hourly resources:
+
+```bash
+cp infra/terraform/guardrails/terraform.tfvars.example \
+  infra/terraform/guardrails/terraform.tfvars
+${EDITOR:-vi} infra/terraform/guardrails/terraform.tfvars
+make aws-guardrails-plan
+make aws-guardrails-up
+```
+
+These commands create the account-wide `mlp-live-aws-monthly` budget. The
+stack has no destroy target, and the budget has `prevent_destroy = true`.
+Planning removes any older saved guardrail plan first. Applying consumes the
+reviewed plan whether the apply succeeds or fails, so a later attempt must
+create a new plan.
+
 For M4 staging, `make aws-account-check` confirms this bucket exists and still
 has versioning, AES256 encryption, and all four public-access blocks before any
 paid resource can enter the final decision packet. If the check cannot confirm
@@ -57,10 +74,12 @@ that selects the remote backend without copying the existing state.
 | SQS queue + DLQ | $0.40 per million requests, first million free | ~$0 |
 | SES identity (when `ses_sender_email` is set) | $0.10 per thousand emails | ~$0 |
 | Two ECR repositories | $0.10/GB-month | ~$0 |
-| AWS Budget, when `budget_alert_email` is set | monitoring and notifications are free | $0 |
 
 Leaving these standing costs approximately nothing. The bucket has a 30-day
 expiry rule and ECR keeps only the last 10 images, so neither grows unbounded.
+
+The persistent guardrail stack contains the $5 monthly budget. AWS does not
+charge for the budget or its email notifications.
 
 ## The expensive tier — off by default
 
@@ -74,8 +93,9 @@ The fixed relay-validation shape in
 [ADR 0010](adr/0010-live-aws-relay-contract.md) was
 rechecked on 2026-09-05 at approximately **$1.02/hour** before small usage
 charges. MSK contributes about $0.77/hour of that total. The runbook rejects a
-shape above $1.25/hour, starts destroy at 2 hours 30 minutes, ends at 3 hours,
-and requires separate approval for a $5 maximum.
+shape above $1.25/hour, starts destroy at 2 hours 30 minutes, marks cleanup
+overdue at 3 hours, and requires separate approval for a $5 maximum. It
+continues an active destroy after that mark.
 
 Breaking down `enable_eks`, because it is the one that hurts:
 
@@ -129,13 +149,21 @@ Issue #93 replaces the former `mlp-dev` ECR repository with `mlp-dev/relay` and
 including any images it contains. The safe summary includes ECR change actions
 so the operator sees that migration before apply.
 
-`make aws-up` applies that exact saved plan for the same run and commit. It does
-not create a fresh plan at apply time. An hourly apply requires a fresh
+`make aws-live-run` applies that exact saved plan for the same run and commit.
+It creates the session clock, keeps the controller in the foreground, and
+starts cleanup after an operator stop, failure, signal, or the 150-minute
+destroy deadline. If apply is still running then, the controller interrupts it
+and allows 30 seconds for a graceful exit, then sends `SIGTERM`, waits 10
+seconds, and sends `SIGKILL`. Cleanup starts after another 5 seconds even if
+the apply process has not reported an exit. An hourly `make aws-up` requires
+the controller's fresh, run-bound heartbeat and permit.
+
+The apply does not create a fresh plan. It requires a fresh
 `06-go-no-go.json`, checks that packet against the binary plan and safe summary,
 then repeats the account-sensitive guards. The wrapper verifies that:
 
-- the Terraform-managed budget already exists with a notification subscriber
-  and a limit no greater than $5;
+- the persistent budget has the exact $5 limit, notification set, a subscriber
+  on each notification, and only `OK` states;
 - the configured Kubernetes version is currently in EKS standard support;
 - the plan stays within one EKS cluster, one MSK cluster, one RDS instance,
   one NAT gateway, three maximum Spot workers, 13 topic partitions, and the
@@ -144,18 +172,34 @@ then repeats the account-sensitive guards. The wrapper verifies that:
 The same support check runs again immediately before an hourly apply. A plan
 whose binary content changes after review is rejected.
 
-Create the budget in a separate cheap-tier plan first. In the ignored
-`terraform.tfvars`, set `budget_alert_email`, leave all hourly flags false,
-then run `make aws-plan` and the separately approved `make aws-up`. Only after
-that apply can an hourly plan pass the budget preflight. EKS additionally
+Apply the guardrail stack before the dev plan. In the ignored dev
+`terraform.tfvars`, leave all hourly flags false for staging. EKS additionally
 requires `eks_operator_cidr` to be the operator's current IPv4 `/32`.
+
+Repositories that still have `mlp-dev-live-runtime` in dev state need one
+migration apply. Create and verify `mlp-live-aws-monthly` first, then apply a
+reviewed cheap-tier dev plan with all hourly flags false. That plan removes the
+old budget while the persistent replacement is already active. The dev module
+keeps `budget_alert_email` as a deprecated no-op so an older
+`terraform.tfvars` migrates without an undeclared-variable warning.
 
 ## Keeping the bill at zero
 
 ```bash
 make aws-cost    # month-to-date spend
-make aws-down    # destroy through the backend initialized by make aws-init
+make aws-down    # manual recovery destroy through the initialized backend
 ```
+
+During a paid run, use `make aws-live-stop` for early cleanup and
+`make aws-live-status` to inspect the result. The controller runs state-backed
+destroy, removes matching EKS and MSK log groups, requires empty dev Terraform
+state, repeats the service-native inventory, and captures immediate cost
+output. The inventory includes project-tagged Elastic IPs.
+
+`cleanup_verified: true` means the Terraform state and service inventory are
+empty. A failed destroy command, log-deletion call, transcript write, or Cost
+Explorer call is recorded separately as `cleanup_complete_with_errors`; it
+does not claim that resources remain after the two empty checks pass.
 
 `make aws-down` deliberately does not reconfigure state before a destructive
 operation. In a fresh checkout, run `make aws-init` first. After each successful
@@ -183,17 +227,29 @@ Every taggable dev-stack resource carries `Project=my-local-platform` and
 that nothing else exists: AWS-created EKS log groups are outside Terraform's
 tagged resource set.
 
-Two things `terraform destroy` will not clean up, by design:
+The bootstrap stack's state bucket has `prevent_destroy = true`. Losing a state
+file orphans real infrastructure, which is worse than a fraction of a cent per
+month. The persistent cost budget has the same protection.
 
-- The **bootstrap** stack's state bucket has `prevent_destroy = true`. Losing a
-  state file orphans real infrastructure, which is worse than a fraction of a
-  cent per month.
-- **CloudWatch log groups** created by EKS outlive the cluster. Delete them
-  manually if they accumulate.
+CloudWatch log groups created by EKS can outlive the cluster. The live
+controller deletes project-prefixed EKS and MSK groups before it runs the final
+inventory. A manual recovery must do the same.
 
 ## A note on billing alerts
 
-The Terraform-managed $5 budget is a forgotten-resource alarm. It cannot stop
-spend, and AWS billing data does not update fast enough to enforce M4's
-three-hour window. The guarded resource shape, elapsed-time deadline, and
-destroy rule remain the active controls.
+The persistent budget sends email when actual monthly spend passes $4, when it
+passes $5, or when forecasted monthly spend passes $5. The account gate refuses
+a new hourly plan when any notification is already in `ALARM`.
+
+This is a $5 account-wide monthly ceiling. Each session also records a separate
+$5 maximum. The $1.25/hour gate and 3-hour hard target cap modeled runtime at
+$3.75, leaving $1.25 for small charges outside that model. One run can put
+the forecast notification in `ALARM`, which blocks later hourly plans until
+AWS reports the notification as `OK` again or the monthly budget period
+resets. Treat that block as intentional. Raising the monthly amount requires a
+new owner decision.
+
+AWS Budgets refreshes after billing data arrives, so it cannot enforce M4's
+three-hour window. The foreground controller owns the 150-minute destroy
+deadline. Its protection depends on the Mac retaining power, network access,
+and valid AWS credentials until cleanup passes.

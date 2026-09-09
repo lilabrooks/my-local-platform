@@ -67,6 +67,20 @@ class InventoryTest(unittest.TestCase):
                     {"VolumeId": "vol-other", "Tags": []},
                 ]
             },
+            ("ec2", "describe-addresses"): {
+                "Addresses": [
+                    {
+                        "AllocationId": "eipalloc-project",
+                        "PublicIp": "192.0.2.10",
+                        "Tags": tagged(),
+                    },
+                    {
+                        "AllocationId": "eipalloc-other",
+                        "PublicIp": "192.0.2.11",
+                        "Tags": [],
+                    },
+                ]
+            },
             ("elbv2", "describe-load-balancers"): {
                 "LoadBalancers": [
                     {"LoadBalancerName": "mlp-dev-internal"},
@@ -111,7 +125,7 @@ class InventoryTest(unittest.TestCase):
 
         result = INVENTORY.collect("us-east-1", run)
 
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 11)
         self.assertTrue(all("--region" in call for call in calls))
         self.assertEqual(result["counts"]["tagged"], 1)
         self.assertEqual(result["resources"]["eks"], ["mlp-dev"])
@@ -129,7 +143,7 @@ class InventoryTest(unittest.TestCase):
         self.assertFalse(result["runtime_empty"])
         self.assertEqual(
             set(result["runtime_resources_present"]),
-            {"ebs", "ec2", "eks", "elb", "logs", "msk", "nat", "rds"},
+            {"ebs", "ec2", "eip", "eks", "elb", "logs", "msk", "nat", "rds"},
         )
         self.assertNotIn("ecr", result["runtime_resources_present"])
 
@@ -140,6 +154,7 @@ class InventoryTest(unittest.TestCase):
         responses[("rds", "describe-db-instances")] = {"DBInstances": []}
         responses[("ec2", "describe-instances")] = {"Reservations": []}
         responses[("ec2", "describe-volumes")] = {"Volumes": []}
+        responses[("ec2", "describe-addresses")] = {"Addresses": []}
         responses[("elbv2", "describe-load-balancers")] = {"LoadBalancers": []}
         responses[("ec2", "describe-nat-gateways")] = {"NatGateways": []}
         responses[("logs", "describe-log-groups")] = {"logGroups": []}

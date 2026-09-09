@@ -13,6 +13,8 @@ AWS_REAL_REGION ?= us-east-1
 AWS_INIT_ARGS ?=
 AWS_TF_ARGS ?=
 AWS_PLAN_FILE ?= infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan
+AWS_GUARDRAILS_PLAN_FILE ?= infra/terraform/guardrails/.terraform/mlp-guardrails.tfplan
+AWS_DESTROY_ARGS ?=
 AWS_PLAN_SUMMARY ?= .evidence/m4/$(AWS_RUN_ID)/03-plan-summary.json
 AWS_ACCOUNT_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/01-identity.txt
 AWS_INVENTORY_FILE ?= .evidence/m4/$(AWS_RUN_ID)/04-inventory-before.json
@@ -459,7 +461,7 @@ AWS_MSK_BOOTSTRAP   ?=
 AWS_K8S_RENDER_DIR  ?= .evidence/m4/$(AWS_RUN_ID)/rendered
 AWS_EVIDENCE_PHASE  ?= provisional
 AWS_REDACTIONS_FILE ?=
-AWS_BILLABLE_STARTED_AT ?=
+MLP_AWS_LIVE_CONTROLLER_PID ?=
 M4_OPERATOR         ?=
 M4_LOCAL_RUN_ID     ?=
 M4_SIGTERM_EVIDENCE ?= .evidence/m4-local/$(M4_LOCAL_RUN_ID)/k8s-sigterm.json
@@ -566,17 +568,6 @@ aws-go-no-go: ## Require one consistent staged packet before the paid window
 	  --cleanup-owner "$(M4_OPERATOR)" \
 	  --output "$(AWS_GO_NO_GO)"
 
-.PHONY: aws-evidence-session
-aws-evidence-session: ## Record the M4 paid-window deadlines
-	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
-	@test -n "$(AWS_BILLABLE_STARTED_AT)" || { echo "AWS_BILLABLE_STARTED_AT is required" >&2; exit 2; }
-	@test -n "$(M4_OPERATOR)" || { echo "M4_OPERATOR is required" >&2; exit 2; }
-	python3 scripts/m4-evidence.py start-session \
-	  --run-id "$(AWS_RUN_ID)" \
-	  --started-at "$(AWS_BILLABLE_STARTED_AT)" \
-	  --operator "$(M4_OPERATOR)" \
-	  --region "$(AWS_REAL_REGION)"
-
 .PHONY: aws-evidence-publish
 aws-evidence-publish: ## Sanitize and verify the provisional or final M4 packet
 	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
@@ -669,6 +660,37 @@ aws-bootstrap: aws-whoami ## Create the one-time S3 state backend
 	cd infra/terraform/bootstrap && $(AWS_REAL_ENV) terraform init -input=false && \
 	  $(AWS_REAL_ENV) terraform apply
 
+.PHONY: aws-guardrails-init
+aws-guardrails-init: aws-whoami ## Initialize the persistent AWS cost-guardrail stack
+	@mlp_account_id="$$($(AWS_REAL_ENV) aws sts get-caller-identity \
+	  --query Account --output text)"; \
+	  cd infra/terraform/guardrails && \
+	  $(AWS_REAL_ENV) terraform init -input=false $(AWS_INIT_ARGS) \
+	    -backend-config="bucket=mlp-tfstate-$$mlp_account_id" \
+	    -backend-config="key=guardrails/terraform.tfstate" \
+	    -backend-config="region=$(AWS_REAL_REGION)" \
+	    -backend-config="use_lockfile=true" \
+	    -backend-config="encrypt=true"
+
+.PHONY: aws-guardrails-plan
+aws-guardrails-plan: ## Save an exact plan for the persistent $5 AWS budget
+	@rm -f -- "$(AWS_GUARDRAILS_PLAN_FILE)"
+	$(MAKE) aws-guardrails-init
+	$(AWS_REAL_ENV) terraform -chdir=infra/terraform/guardrails plan \
+	  -out="$(abspath $(AWS_GUARDRAILS_PLAN_FILE))"
+
+.PHONY: aws-guardrails-up
+aws-guardrails-up: aws-whoami ## Apply the reviewed persistent AWS budget plan
+	@test -f "$(AWS_GUARDRAILS_PLAN_FILE)" || { \
+	  echo "guardrail plan is missing; run 'make aws-guardrails-plan' first" >&2; exit 1; \
+	}
+	@echo "This creates or updates the persistent account-wide AWS cost alert."
+	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
+	@set -e; \
+	  trap 'rm -f -- "$(AWS_GUARDRAILS_PLAN_FILE)"' EXIT; \
+	  $(AWS_REAL_ENV) terraform -chdir=infra/terraform/guardrails apply \
+	    "$(abspath $(AWS_GUARDRAILS_PLAN_FILE))"
+
 .PHONY: aws-init
 aws-init: aws-whoami ## Initialize the remote state backend for the dev environment
 	@mlp_account_id="$$($(AWS_REAL_ENV) aws sts get-caller-identity \
@@ -711,7 +733,15 @@ aws-up: ## Apply the dev environment to real AWS (INCURS COST)
 	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
 	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
 	@echo "This applies the exact reviewed plan and may create billable AWS resources."
-	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
+	@if [ "$(origin MLP_AWS_LIVE_CONTROLLER_PID)" = "command line" ] && \
+	  python3 scripts/m4-evidence.py check-controller \
+	    --run-id "$(AWS_RUN_ID)" \
+	    --commit "$(AWS_APPROVED_COMMIT)" \
+	    --controller-pid "$(MLP_AWS_LIVE_CONTROLLER_PID)" >/dev/null 2>&1; then \
+	  :; \
+	else \
+	  read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]; \
+	fi
 	$(MAKE) aws-init
 	$(AWS_REAL_ENV) \
 	  AWS_RUN_ID="$(AWS_RUN_ID)" \
@@ -719,16 +749,68 @@ aws-up: ## Apply the dev environment to real AWS (INCURS COST)
 	  MLP_AWS_PLAN_FILE="$(AWS_PLAN_FILE)" \
 	  MLP_AWS_PLAN_SUMMARY="$(AWS_PLAN_SUMMARY)" \
 	  MLP_AWS_GO_NO_GO="$(AWS_GO_NO_GO)" \
+	  MLP_AWS_LIVE_CONTROLLER_PID="$(MLP_AWS_LIVE_CONTROLLER_PID)" \
 	  ./scripts/aws-terraform-guard.sh apply
 	$(MAKE) aws-state-backup
+
+.PHONY: aws-live-run
+aws-live-run: ## Run one guarded live AWS session with timed cleanup
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	@test -n "$(M4_OPERATOR)" || { echo "M4_OPERATOR is required" >&2; exit 2; }
+	@echo "This authorizes the controller to apply the reviewed plan and run automatic cleanup."
+	@echo "Keep this Mac powered, awake, open, and online until cleanup passes."
+	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
+	@mlp_live_command=(go -C tools/m4-live-run run . run \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --operator "$(M4_OPERATOR)" \
+	  --profile "$(AWS_PROFILE_NAME)" \
+	  --region "$(AWS_REAL_REGION)"); \
+	  if command -v caffeinate >/dev/null 2>&1; then \
+	    caffeinate -i "$${mlp_live_command[@]}"; \
+	  else \
+	    "$${mlp_live_command[@]}"; \
+	  fi
+
+.PHONY: aws-live-status
+aws-live-status: ## Show the active live AWS deadline and cleanup state
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	go -C tools/m4-live-run run . status --run-id "$(AWS_RUN_ID)"
+
+.PHONY: aws-live-stop
+aws-live-stop: ## Stop evidence capture and ask the controller to clean up now
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	go -C tools/m4-live-run run . stop --run-id "$(AWS_RUN_ID)"
+
+.PHONY: aws-live-rehearse
+aws-live-rehearse: ## Run the local controller and abort-path tests without AWS
+	cd tools/m4-live-run && go test -race ./...
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+	  scripts.tests.test_m4_evidence \
+	  scripts.tests.test_m4_local_abort
 
 .PHONY: aws-down
 aws-down: aws-whoami ## Destroy dev using its already initialized backend
 	@test -f infra/terraform/envs/dev/.terraform/terraform.tfstate || { \
 	  echo "backend is not initialized; run 'make aws-init' first" >&2; exit 1; \
 	}
-	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform destroy
+	cd infra/terraform/envs/dev && $(AWS_REAL_ENV) terraform destroy $(AWS_DESTROY_ARGS)
 	$(MAKE) aws-state-backup
+
+.PHONY: aws-state-empty
+aws-state-empty: ## Require the initialized dev Terraform state to contain no resources
+	@test -f infra/terraform/envs/dev/.terraform/terraform.tfstate || { \
+	  echo "backend is not initialized; run 'make aws-init' first" >&2; exit 1; \
+	}
+	@set -e; \
+	  resources="$$( $(AWS_REAL_ENV) terraform -chdir=infra/terraform/envs/dev state list )"; \
+	  if [ -n "$$resources" ]; then \
+	    echo "dev Terraform state still contains resources:" >&2; \
+	    printf '%s\n' "$$resources" >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "dev Terraform state is empty"
 
 .PHONY: aws-cost
 aws-cost: ## Month-to-date spend on the account

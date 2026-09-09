@@ -16,6 +16,14 @@ variable "ses_sender_email" {
   default     = ""
 }
 
+# Existing private tfvars may still set this during the one-time state migration.
+# tflint-ignore: terraform_unused_declarations
+variable "budget_alert_email" {
+  description = "Deprecated no-op retained so an older dev terraform.tfvars can migrate without an undeclared-variable warning. Configure the guardrails stack instead."
+  type        = string
+  default     = ""
+}
+
 variable "enable_rds" {
   description = "Create an RDS Postgres instance. Roughly $15/month. Local Postgres in docker-compose is free."
   type        = bool
@@ -51,16 +59,5 @@ variable "eks_operator_cidr" {
       (can(cidrnetmask(var.eks_operator_cidr)) && endswith(var.eks_operator_cidr, "/32"))
     )
     error_message = "eks_operator_cidr must be empty or a valid IPv4 /32 CIDR."
-  }
-}
-
-variable "budget_alert_email" {
-  description = "Email subscriber for the $5 monthly forgotten-resource budget. Required before any hourly flag is enabled."
-  type        = string
-  default     = ""
-
-  validation {
-    condition     = var.budget_alert_email == "" || can(regex("^[^@[:space:]]+@[^@[:space:]]+$", var.budget_alert_email))
-    error_message = "budget_alert_email must be empty or a syntactically valid email address."
   }
 }

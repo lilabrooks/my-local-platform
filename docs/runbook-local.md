@@ -380,36 +380,14 @@ aws sns list-topics
 and fails with `The config profile could not be found` — which looks like a
 floci problem and is not.
 
-## Running the smoke checks against real AWS
+## Running checks against real AWS
 
-The same binary works against the real account. Bootstrap remote state once as
-described in [costs.md](costs.md#remote-state-comes-first), then create the
-cheap tier through the guarded Make target:
-
-```bash
-run_id=$(date -u +%Y%m%dT%H%M%SZ)
-commit=$(git rev-parse HEAD)
-make aws-plan AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit"
-make aws-up AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit" # separately approved
-
-unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_DYNAMODB AWS_ENDPOINT_URL_S3
-unset AWS_ENDPOINT_URL_STS AWS_ACCESS_KEY_ID
-unset AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-export AWS_PROFILE=aws-public-change-feed
-BUCKET=$(terraform -chdir=infra/terraform/envs/dev output -raw bucket)
-
-(
-  cd services/smoke
-  AWS_DEFAULT_REGION=us-east-1 \
-  MLP_USE_REAL_AWS=1 \
-  MLP_BUCKET="$BUCKET" \
-  MLP_TOPIC=mlp-dev-events \
-  MLP_QUEUE=mlp-dev-events \
-    go run ./cmd/smoke
-)
-
-make aws-down
-```
+This repository is for local development. Use live AWS only for a brief check
+of behavior the local platform cannot reproduce. The cheap-tier smoke path and
+the clocked EKS, MSK, and RDS proof have different approvals and controls; see
+[Costs and real AWS](costs.md) before either one. Hourly resources can be
+applied only through the foreground Go controller documented in the
+[AWS relay runbook](runbook-aws-relay.md#live-proof).
 
 `MLP_USE_REAL_AWS=1` is the **only** way to reach a live account. An empty or
 unset `AWS_ENDPOINT_URL` still means "local", so a stray

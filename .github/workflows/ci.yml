@@ -31,7 +31,7 @@ jobs:
         # its list from go.mod for the same reason; a matrix cannot, so adding a
         # module means adding it here -- and `discover` below fails the build if
         # anyone forgets.
-        module: [services/smoke, services/echo, services/relay, services/sink, k8s/validate]
+        module: [services/smoke, services/echo, services/relay, services/sink, k8s/validate, tools/m4-live-run]
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -61,7 +61,7 @@ jobs:
       # Nothing else checks tidiness -- not scripts/lint.sh, not any other job.
       # `make tidy` covered services/smoke alone until #65, so four modules
       # could drift untidy indefinitely with every gate green. The Makefile
-      # target now covers all five; this is the part that notices when someone
+      # target now covers every module; this is the part that notices when someone
       # forgets to run it.
       - name: go.mod and go.sum are tidy
         run: |
@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        stack: [infra/terraform/bootstrap, infra/terraform/envs/dev]
+        stack: [infra/terraform/bootstrap, infra/terraform/guardrails, infra/terraform/envs/dev]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -120,7 +120,7 @@ jobs:
         working-directory: ${{ matrix.stack }}
 
       - run: terraform test
-        if: matrix.stack == 'infra/terraform/envs/dev'
+        if: matrix.stack != 'infra/terraform/bootstrap'
         working-directory: ${{ matrix.stack }}
 
   python:
@@ -137,6 +137,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
+
+      # test_make_live_run.py exercises the public Make entry point, which
+      # builds the controller from its nested Go module.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/m4-live-run/go.mod
+          cache-dependency-path: tools/m4-live-run/go.mod
 
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests
 

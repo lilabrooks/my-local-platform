@@ -84,15 +84,30 @@ run "default_plan_has_no_hourly_resources" {
   }
 }
 
+run "legacy_budget_email_is_a_no_op" {
+  command = plan
+
+  variables {
+    budget_alert_email = "old-owner@example.invalid"
+  }
+
+  assert {
+    condition = (
+      output.runtime_budget_name == "mlp-live-aws-monthly" &&
+      output.runtime_shape.hourly_enabled == false
+    )
+    error_message = "The legacy dev budget email must not change the persistent budget name or enable hourly resources."
+  }
+}
+
 run "live_runtime_matches_the_accepted_shape" {
   command = plan
 
   variables {
-    budget_alert_email = "owner@example.invalid"
-    eks_operator_cidr  = "192.0.2.10/32"
-    enable_eks         = true
-    enable_msk         = true
-    enable_rds         = true
+    eks_operator_cidr = "192.0.2.10/32"
+    enable_eks        = true
+    enable_msk        = true
+    enable_rds        = true
   }
 
   override_resource {
@@ -202,10 +217,9 @@ run "eks_and_msk_without_rds_has_the_workload_boundary" {
   command = plan
 
   variables {
-    budget_alert_email = "owner@example.invalid"
-    eks_operator_cidr  = "192.0.2.10/32"
-    enable_eks         = true
-    enable_msk         = true
+    eks_operator_cidr = "192.0.2.10/32"
+    enable_eks        = true
+    enable_msk        = true
   }
 
   assert {
@@ -219,22 +233,11 @@ run "eks_and_msk_without_rds_has_the_workload_boundary" {
   }
 }
 
-run "hourly_flags_require_budget_configuration" {
-  command = plan
-
-  variables {
-    enable_msk = true
-  }
-
-  expect_failures = [terraform_data.runtime_contract[0]]
-}
-
 run "eks_requires_an_operator_cidr" {
   command = plan
 
   variables {
-    budget_alert_email = "owner@example.invalid"
-    enable_eks         = true
+    enable_eks = true
   }
 
   expect_failures = [terraform_data.runtime_contract[0]]
@@ -244,8 +247,7 @@ run "partial_msk_apply_does_not_create_eks_or_rds" {
   command = apply
 
   variables {
-    budget_alert_email = "owner@example.invalid"
-    enable_msk         = true
+    enable_msk = true
   }
 
   assert {
@@ -262,10 +264,6 @@ run "partial_msk_apply_does_not_create_eks_or_rds" {
 
 run "partial_msk_state_returns_to_the_cheap_tier" {
   command = apply
-
-  variables {
-    budget_alert_email = "owner@example.invalid"
-  }
 
   assert {
     condition = (

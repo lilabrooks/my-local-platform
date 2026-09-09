@@ -24,7 +24,7 @@ OUTPUT_NAME = "01-identity.txt"
 EXPECTED_REPOSITORY = "lilabrooks/my-local-platform"
 EXPECTED_REGION = "us-east-1"
 EKS_VERSION = "1.35"
-BUDGET_NAME = "mlp-dev-live-runtime"
+BUDGET_NAME = "mlp-live-aws-monthly"
 FIXED_AZS = ("us-east-1a", "us-east-1b")
 MSK_SERVERLESS_REGIONS = frozenset(
     {
@@ -330,8 +330,8 @@ def budget(account: str, runner: Runner) -> dict[str, Any]:
     if not isinstance(limit, dict) or limit.get("Unit") != "USD":
         raise AccountError("AWS budget does not have a USD limit")
     limit_usd = number(limit.get("Amount"), "budget limit")
-    if limit_usd <= 0 or limit_usd > Decimal("5"):
-        raise AccountError("AWS budget limit must be above zero and no greater than $5")
+    if limit_usd != Decimal("5"):
+        raise AccountError("AWS budget must have the approved $5 limit")
     notifications = list_value(
         runner.json(
             [
@@ -351,13 +351,18 @@ def budget(account: str, runner: Runner) -> dict[str, Any]:
     )
     expected_notifications = {
         ("ACTUAL", "GREATER_THAN", Decimal("80"), "PERCENTAGE"),
+        ("ACTUAL", "GREATER_THAN", Decimal("100"), "PERCENTAGE"),
         ("FORECASTED", "GREATER_THAN", Decimal("100"), "PERCENTAGE"),
     }
+    if len(notifications) != len(expected_notifications):
+        raise AccountError("AWS budget must have exactly three notifications")
     notification_settings = set()
     subscribers = []
     for notification in notifications:
         if not isinstance(notification, dict):
             raise AccountError("AWS budget returned an invalid notification")
+        if notification.get("NotificationState") != "OK":
+            raise AccountError("AWS budget notifications are not all OK")
         identity = {
             key: notification.get(key)
             for key in (
@@ -394,6 +399,8 @@ def budget(account: str, runner: Runner) -> dict[str, Any]:
             "Subscribers",
             "AWS budget subscribers",
         )
+        if not current:
+            raise AccountError("AWS budget has a notification without a subscriber")
         for subscriber in current:
             if not isinstance(subscriber, dict):
                 raise AccountError("AWS budget returned an invalid subscriber")

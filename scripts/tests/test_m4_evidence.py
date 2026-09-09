@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 from pathlib import Path
@@ -178,6 +179,100 @@ class M4EvidenceTest(unittest.TestCase):
             self.assertEqual(session["destroy_deadline"], "2026-09-08T00:30:00Z")
             self.assertEqual(session["hard_deadline"], "2026-09-08T01:00:00Z")
             self.assertEqual(session["commit"], COMMIT)
+
+    def test_live_controller_permit_requires_fresh_matching_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = self.create_run(root)
+            EVIDENCE.start_session(
+                root,
+                RUN_ID,
+                "2026-09-07T22:00:00Z",
+                "operator-one",
+                "us-east-1",
+            )
+            (raw / "controller-state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": RUN_ID,
+                        "commit": COMMIT,
+                        "region": "us-east-1",
+                        "controller_pid": 1234,
+                        "phase": "applying",
+                        "updated_at": "2026-09-07T22:15:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = EVIDENCE.validate_live_controller(
+                root,
+                RUN_ID,
+                COMMIT,
+                1234,
+                now=datetime.datetime(2026, 9, 7, 22, 15, tzinfo=datetime.UTC),
+                pid_check=lambda pid: pid == 1234,
+            )
+
+            self.assertEqual(result["controller_pid"], 1234)
+            self.assertEqual(result["destroy_deadline"], "2026-09-08T00:30:00Z")
+
+    def test_live_controller_permit_rejects_stale_or_dead_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = self.create_run(root)
+            EVIDENCE.start_session(
+                root,
+                RUN_ID,
+                "2026-09-07T22:00:00Z",
+                "operator-one",
+                "us-east-1",
+            )
+            (raw / "controller-state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": RUN_ID,
+                        "commit": COMMIT,
+                        "region": "us-east-1",
+                        "controller_pid": 1234,
+                        "phase": "applying",
+                        "updated_at": "2026-09-07T22:01:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(EVIDENCE.EvidenceError, "too old"):
+                EVIDENCE.validate_live_controller(
+                    root,
+                    RUN_ID,
+                    COMMIT,
+                    1234,
+                    now=datetime.datetime(2026, 9, 7, 22, 16, tzinfo=datetime.UTC),
+                    pid_check=lambda _pid: True,
+                )
+            with self.assertRaisesRegex(EVIDENCE.EvidenceError, "heartbeat is stale"):
+                EVIDENCE.validate_live_controller(
+                    root,
+                    RUN_ID,
+                    COMMIT,
+                    1234,
+                    now=datetime.datetime(
+                        2026, 9, 7, 22, 1, 6, tzinfo=datetime.UTC
+                    ),
+                    pid_check=lambda _pid: True,
+                )
+            with self.assertRaisesRegex(EVIDENCE.EvidenceError, "not running"):
+                EVIDENCE.validate_live_controller(
+                    root,
+                    RUN_ID,
+                    COMMIT,
+                    1234,
+                    now=datetime.datetime(2026, 9, 7, 22, 1, tzinfo=datetime.UTC),
+                    pid_check=lambda _pid: False,
+                )
 
     def test_publication_redacts_text_and_requires_reviewed_visuals(self):
         with tempfile.TemporaryDirectory() as temporary:

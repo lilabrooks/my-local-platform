@@ -29,6 +29,7 @@ class FakeRunner:
         self.spot_limit = 8
         self.rds_azs = ["us-east-1a", "us-east-1b"]
         self.public_access_blocked = True
+        self.budget_limit = "5.0"
         self.subscribers = [
             {"SubscriptionType": "EMAIL", "Address": "owner@example.com"}
         ]
@@ -38,12 +39,21 @@ class FakeRunner:
                 "ComparisonOperator": "GREATER_THAN",
                 "Threshold": 80.0,
                 "ThresholdType": "PERCENTAGE",
+                "NotificationState": "OK",
+            },
+            {
+                "NotificationType": "ACTUAL",
+                "ComparisonOperator": "GREATER_THAN",
+                "Threshold": 100.0,
+                "ThresholdType": "PERCENTAGE",
+                "NotificationState": "OK",
             },
             {
                 "NotificationType": "FORECASTED",
                 "ComparisonOperator": "GREATER_THAN",
                 "Threshold": 100.0,
                 "ThresholdType": "PERCENTAGE",
+                "NotificationState": "OK",
             },
         ]
         self.msk_service_quota: dict | None = None
@@ -115,10 +125,10 @@ class FakeRunner:
         if arguments[:3] == ["aws", "budgets", "describe-budget"]:
             return {
                 "Budget": {
-                    "BudgetName": "mlp-dev-live-runtime",
+                    "BudgetName": "mlp-live-aws-monthly",
                     "BudgetType": "COST",
                     "TimeUnit": "MONTHLY",
-                    "BudgetLimit": {"Amount": "5.0", "Unit": "USD"},
+                    "BudgetLimit": {"Amount": self.budget_limit, "Unit": "USD"},
                 }
             }
         if arguments[:3] == [
@@ -409,6 +419,32 @@ class AccountEvidenceTest(unittest.TestCase):
                 runner,
             )
 
+    def test_budget_limit_drift_is_rejected(self):
+        runner = FakeRunner()
+        runner.budget_limit = "4"
+
+        with self.assertRaisesRegex(ACCOUNT_CHECK.AccountError, "approved \\$5 limit"):
+            ACCOUNT_CHECK.collect(
+                RUN_ID,
+                COMMIT,
+                "aws-public-change-feed",
+                "us-east-1",
+                runner,
+            )
+
+    def test_active_budget_alarm_is_rejected(self):
+        runner = FakeRunner()
+        runner.notifications[0]["NotificationState"] = "ALARM"
+
+        with self.assertRaisesRegex(ACCOUNT_CHECK.AccountError, "not all OK"):
+            ACCOUNT_CHECK.collect(
+                RUN_ID,
+                COMMIT,
+                "aws-public-change-feed",
+                "us-east-1",
+                runner,
+            )
+
     def test_profile_account_mismatch_stops_before_account_queries(self):
         runner = FakeRunner()
         runner.configured_account = "999999999999"
@@ -438,7 +474,9 @@ class AccountEvidenceTest(unittest.TestCase):
 
         runner = FakeRunner()
         runner.subscribers = []
-        with self.assertRaisesRegex(ACCOUNT_CHECK.AccountError, "no notification"):
+        with self.assertRaisesRegex(
+            ACCOUNT_CHECK.AccountError, "notification without a subscriber"
+        ):
             ACCOUNT_CHECK.collect(
                 RUN_ID,
                 COMMIT,

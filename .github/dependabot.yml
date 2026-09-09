@@ -40,6 +40,7 @@ updates:
   - package-ecosystem: terraform
     directories:
       - "/infra/terraform/bootstrap"
+      - "/infra/terraform/guardrails"
       - "/infra/terraform/envs/dev"
     schedule:
       interval: weekly
@@ -47,10 +48,10 @@ updates:
       terraform:
         patterns: ["*"]
 
-  # All five modules. This listed smoke, echo and validate only, so relay and
+  # Every module. This listed smoke, echo and validate only, so relay and
   # sink got no update PRs -- and relay is the module that has dependencies
   # worth updating: kafka-go, pgx and client_golang, plus sixteen indirect.
-  # It was the only one of the five outside this list with a non-empty
+  # At the time, it was the only omitted module with a non-empty
   # require block, so the gap covered exactly the code it mattered for.
   #
   # sink and echo are standard-library-only and listing them changes nothing
@@ -67,6 +68,7 @@ updates:
       - "/services/relay"
       - "/services/sink"
       - "/k8s/validate"
+      - "/tools/m4-live-run"
     schedule:
       interval: weekly
     groups:

@@ -8,10 +8,6 @@ environment = "dev"
 # Verify a real address you control -- AWS emails a confirmation link.
 ses_sender_email = ""
 
-# AWS sends budget notifications here. Set this and apply the cheap tier before
-# enabling any hourly resource.
-budget_alert_email = ""
-
 # All three cost real money by the hour. Leave false unless you are actively
 # working on them, and `make aws-down` when you stop.
 enable_rds = false
