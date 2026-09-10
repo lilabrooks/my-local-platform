@@ -8,10 +8,10 @@ mutation.
 
 This runbook implements the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md). It is the shared handoff for
-issues #92 through #97. The IAM transport, guarded Terraform plan, clocked
-cleanup, cost alert, local rehearsal, and deployment render now exist. The
-remaining real-account checks and live evidence commands remain subject to
-their issue gates.
+issues #92 through #97 and #136. The IAM transport, guarded Terraform plan,
+clocked cleanup, cost alert, local rehearsal, deployment render, and runtime
+bootstrap now exist. The remaining real-account checks and live evidence
+commands remain subject to their issue gates.
 
 The live run needs three separate approvals:
 
@@ -37,8 +37,9 @@ Only the EKS API endpoint is public, limited to the operator's current address.
 Use `kubectl port-forward` for the sink, ArgoCD, Grafana, and Tempo. Do not add
 an ingress or load balancer during the session.
 
-Pod Identity associations belong to `relay-ingest`, `relay-deliver`, and
-`keda-operator`. The sink has no AWS role. KEDA uses `identityOwner: keda`.
+Pod Identity associations belong to `relay-bootstrap`, `relay-ingest`,
+`relay-deliver`, and `keda-operator`. The sink has no AWS role. KEDA uses
+`identityOwner: keda`.
 
 ## Stop conditions
 
@@ -122,13 +123,12 @@ identity trace; the binary and its shared transport are supplied by #92.
 RDS manages its master password in Secrets Manager. A second secret holds the
 controlled sink signing key. The staging helper must:
 
-1. disable shell tracing and set `umask 077`;
-2. create a private temporary directory;
-3. fetch both values without putting them in arguments or logs;
-4. stream the namespace-scoped Kubernetes Secret to `kubectl apply` over
+1. fetch both values into process memory without putting them in arguments or
+   logs;
+2. stream the namespace-scoped Kubernetes Secret to `kubectl apply` over
    standard input;
-5. seed the RDS subscription with the same signing key;
-6. remove the temporary directory on success, error, or interruption.
+3. seed the RDS subscription with the same signing key;
+4. keep both values out of command output, evidence, and temporary files.
 
 Do not copy secret values into git, images, Terraform variables or outputs,
 shell history, screenshots, or evidence files.
@@ -146,6 +146,7 @@ commit and two ECR digests. Render the bundle during #97 only after its
 separately authorized apply has also produced the MSK IAM broker endpoint:
 
 ```bash
+make aws-kubeconfig
 make aws-k8s-render \
   AWS_RUN_ID="$run_id" \
   AWS_APPROVED_COMMIT="$commit" \
@@ -169,29 +170,40 @@ The populated `relay-secrets` object is not rendered to disk. The #97 run
 streams it from Secrets Manager as described above. Before registering the
 root Application, create the `mlp` namespace, apply `relay-runtime` and the
 streamed Secret, create the delivery and DLQ topics, then create the RDS schema
-and seed its subscription row with that same signing key. The helper built by
-Issue #96 owns those broker and database initialization steps; it runs only
+and seed its subscription row with that same signing key. The adapter built by
+Issue #136 owns those broker and database initialization steps; it runs only
 after #97's separately authorized infrastructure apply has produced the
-endpoints.
+endpoints and the live controller reports a successful apply.
 Install KEDA and the AWS monitoring values before the child Applications sync,
 then pass the generated root directly to the installer:
 
 ```bash
-kubectl apply -f k8s/manifests/namespace.yaml
-kubectl apply -f ".evidence/m4/$run_id/rendered/relay-runtime.json"
-# Stream relay-secrets here; do not write it to disk.
-# Run the #96 staging helper to create both topics, the RDS schema, and the
-# subscription before any workload starts.
+make aws-runtime-bootstrap \
+  AWS_RUN_ID="$run_id" \
+  AWS_APPROVED_COMMIT="$commit"
 make keda-install
 make monitoring-install-aws
 make argocd-install-aws \
   AWS_ROOT_APPLICATION=".evidence/m4/$run_id/rendered/root-app.json"
 ```
 
+`aws-runtime-bootstrap` verifies that the current Kubernetes context points at
+the EKS endpoint from Terraform state. It also requires a fresh live-controller
+heartbeat for the run and commit, clamps itself to the earlier of its five-minute
+limit and the controller's destroy deadline, then rechecks the controller before
+each mutation and while the Job runs. It creates the namespace and service
+accounts, applies the rendered runtime ConfigMap, retrieves or creates the
+signing value, streams `relay-secrets` with server-side apply, creates a one-shot
+Job from the approved relay image, waits up to four minutes, and prints only
+topic names, partition counts, and the active-subscription count. The relay
+image carries the checksum-pinned `us-east-1` RDS CA bundle used by
+`sslmode=verify-full`. Repeating the command reuses the signing value and reruns
+idempotent topic and database setup.
+
 Those commands target the current Kubernetes context. Their presence is not
-permission to run them. #95 rehearses their ordering locally, #96 stages the
-inputs with separate owner approval, and #97 is the only issue authorized to
-use the paid EKS cluster after a new approval.
+permission to run them. #95 rehearses their ordering locally, #136 packages the
+adapter, #96 stages the inputs with separate owner approval, and #97 is the only
+issue authorized to use the paid EKS cluster after a new approval.
 
 All rendered workload Services are `ClusterIP`; no AWS overlay contains an
 Ingress. Grafana and ArgoCD are reached through `kubectl port-forward`. Tempo
@@ -752,6 +764,7 @@ the provisional packet before adding the settled cost. Use
 | #93 | disabled and enabled Terraform plans pass their resource-shape checks |
 | #94 | rendered workloads preserve this topology, identity, and evidence path (implemented; merge closes the issue) |
 | #95 | the full runbook, including abort and cleanup, passes locally |
+| #136 | the shared topic, schema, secret, and in-cluster bootstrap path passes offline checks |
 | #96 | cheap staging, images, budget alarm, current prices, and exact plan are separately approved and captured |
 | #97 | paid proof ends in destroy, empty inventories, and a settled final cost |
 

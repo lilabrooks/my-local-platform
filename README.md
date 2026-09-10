@@ -114,7 +114,9 @@ make seed
 make smoke
 ```
 
-M0 through M3 and the locally testable M4 implementation are complete. The
+M0 through M3 and the locally testable M4 implementation are complete,
+including the one-shot runtime bootstrap packaged in
+[issue #136](https://github.com/lilabrooks/my-local-platform/issues/136). The
 live EKS, RDS, and MSK proof remains unverified and separately authorized.
 [Issue #96](https://github.com/lilabrooks/my-local-platform/issues/96) tracks
 staging; [issue #97](https://github.com/lilabrooks/my-local-platform/issues/97)
@@ -190,6 +192,8 @@ failure.
   are enabled.
 - `make aws-plan` saves an exact plan and a redaction-safe summary.
 - An hourly `make aws-up` refuses to run outside `make aws-live-run`.
+- `make aws-runtime-bootstrap` requires that live controller, verifies the EKS
+  context, and runs the idempotent MSK and RDS setup before workloads start.
 - `make aws-down` destroys the dev stack. The versioned remote-state bucket is
   a separate bootstrap resource; the state bucket and cost alert survive by
   design.

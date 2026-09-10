@@ -11,6 +11,28 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class LiveRunMakeTargetTest(unittest.TestCase):
+    def test_runtime_bootstrap_target_reaches_the_nested_go_module_without_running(self):
+        result = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "--dry-run",
+                "aws-runtime-bootstrap",
+                "AWS_RUN_ID=20260909T200000Z",
+                f"AWS_APPROVED_COMMIT={'a' * 40}",
+            ],
+            cwd=ROOT,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, combined)
+        self.assertIn("go -C tools/m4-bootstrap run .", combined)
+        self.assertNotIn("ResourceNotFoundException", combined)
+
     def test_status_target_reaches_the_nested_go_module(self):
         with tempfile.TemporaryDirectory() as go_cache:
             environment = os.environ.copy()
