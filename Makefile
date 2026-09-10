@@ -217,7 +217,8 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 
 # Modules whose tests read files the Go test cache does not track, so a cached
 # pass proves nothing. k8s/validate reads the YAML under k8s/manifests and the
-# topic partition counts out of local/bootstrap/kafka-topics.sh.
+# topic partition counts out of local/bootstrap/kafka-topics.sh and the shared
+# services/relay/internal/bootstrap/topics.txt file.
 UNCACHED_MODULES := k8s/validate
 
 .PHONY: test
@@ -255,6 +256,21 @@ vet: ## go vet every module
 	@for m in $(GO_MODULES); do \
 	  echo "==> $$m: go vet"; \
 	  ( cd "$$m" && go vet ./... ) || exit 1; \
+	done
+
+TERRAFORM_STACKS := infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev
+
+.PHONY: terraform-check
+terraform-check: ## Run the offline Terraform checks used by CI
+	@for stack in $(TERRAFORM_STACKS); do \
+	  echo "==> $$stack: terraform fmt, init, and validate"; \
+	  terraform -chdir="$$stack" fmt -check -recursive || exit 1; \
+	  terraform -chdir="$$stack" init -backend=false -input=false || exit 1; \
+	  terraform -chdir="$$stack" validate || exit 1; \
+	  if [ "$$stack" != "infra/terraform/bootstrap" ]; then \
+	    echo "==> $$stack: terraform test"; \
+	    terraform -chdir="$$stack" test || exit 1; \
+	  fi; \
 	done
 
 # ---------------------------------------------------------------------------
@@ -634,6 +650,23 @@ aws-k8s-render: ## Render the untracked AWS deployment bundle (no cluster mutati
 	  --values k8s/monitoring-values-aws.yaml \
 	  >"$(AWS_K8S_RENDER_DIR)/monitoring.yaml"
 	@echo "rendered $(AWS_K8S_RENDER_DIR) (no cluster mutation)"
+
+.PHONY: aws-runtime-bootstrap
+aws-runtime-bootstrap: ## Initialize live MSK, RDS, and relay secrets inside the paid controller window
+	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
+	@test -n "$(AWS_APPROVED_COMMIT)" || { echo "AWS_APPROVED_COMMIT is required" >&2; exit 2; }
+	@echo "This mutates the active paid EKS, MSK, RDS, and Secrets Manager runtime."
+	$(AWS_REAL_ENV) AWS_PAGER= MLP_USE_REAL_AWS=1 go -C tools/m4-bootstrap run . \
+	  --root ../.. \
+	  --run-id "$(AWS_RUN_ID)" \
+	  --commit "$(AWS_APPROVED_COMMIT)" \
+	  --region "$(AWS_REAL_REGION)"
+
+.PHONY: aws-kubeconfig
+aws-kubeconfig: ## Point kubectl at the live EKS cluster recorded in dev state
+	@$(AWS_REAL_ENV) bash -c 'set -euo pipefail; \
+	  cluster="$$(terraform -chdir=infra/terraform/envs/dev output -raw eks_cluster_name)"; \
+	  aws eks update-kubeconfig --name "$$cluster" --region "$(AWS_REAL_REGION)"'
 
 .PHONY: k8s-status
 k8s-status: ## Show ArgoCD applications and the mlp namespace

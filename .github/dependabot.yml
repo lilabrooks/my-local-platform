@@ -68,6 +68,7 @@ updates:
       - "/services/relay"
       - "/services/sink"
       - "/k8s/validate"
+      - "/tools/m4-bootstrap"
       - "/tools/m4-live-run"
     schedule:
       interval: weekly

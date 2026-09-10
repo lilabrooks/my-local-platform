@@ -17,8 +17,9 @@ made and what evidence backs it.
 
 This bills a personal AWS account. Two rules:
 
-1. **Never run `terraform apply`, `make aws-up`, `make aws-guardrails-up`, or
-   `make aws-live-run` without explicit permission.**
+1. **Never run `terraform apply`, `make aws-up`, `make aws-guardrails-up`,
+   `make aws-live-run`, or `make aws-runtime-bootstrap` without explicit
+   permission.**
    The default tier is ~$0/month, but `enable_rds` (~$15/mo) and `enable_eks`
    (~$110/mo) create real hourly charges.
 2. **The EKS `kubernetes_version` must be in STANDARD support.** A version in
@@ -56,6 +57,7 @@ AWS charges:
 ```bash
 make lint          # lint, docs, actions, Docker, Terraform, security, secrets
 make test          # Go and Python tests, including the live-run controller
+make terraform-check # offline fmt, init, validate, and mocked contract tests
 make k8s-validate  # manifest invariants
 make smoke         # end-to-end against the running local stack
 ```

@@ -222,10 +222,11 @@ rather than repeated here.
 The MSK IAM configuration and the scaler spellings were checked against KEDA's
 documentation for 2.20 and its issue tracker, not run.
 
-As of 2026-09-06, `enable_msk` and the three Pod Identity associations exist in
-the opt-in Terraform runtime, and #92 has locally tested the relay's IAM
-transport. The operator-owned KEDA credential path still requires #95's local
-rehearsal and remains prediction rather than evidence.
+As of 2026-09-09, `enable_msk` and four Pod Identity associations exist in the
+opt-in Terraform runtime, including the bounded topic-bootstrap identity. #92
+locally tested the relay's IAM transport, and #95 rehearsed the workload and
+scaler behavior without AWS. The operator-owned KEDA credential path remains a
+live #97 measurement because minikube cannot supply EKS Pod Identity.
 
 ## Revisit when
 

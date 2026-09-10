@@ -109,6 +109,7 @@ func TestAWSWorkloadsKeepIdentityAndExposureBoundaries(t *testing.T) {
 	}
 
 	relay := awsDocs(t, "relay")
+	findNamed(t, relay, "ServiceAccount", "relay-bootstrap")
 	ingest := findNamed(t, relay, "Deployment", "relay-ingest")
 	if nested(ingest, "spec")["replicas"] != float64(2) {
 		t.Errorf("relay-ingest replicas = %v, want 2", nested(ingest, "spec")["replicas"])
@@ -470,12 +471,23 @@ func TestAWSPodIdentityNamesMatchTerraform(t *testing.T) {
 	}
 	text := string(body)
 	for _, block := range []string{
+		"relay-bootstrap = {\n      namespace       = \"mlp\"\n      service_account = \"relay-bootstrap\"",
 		"relay-ingest = {\n      namespace       = \"mlp\"\n      service_account = \"relay-ingest\"",
 		"relay-deliver = {\n      namespace       = \"mlp\"\n      service_account = \"relay-deliver\"",
 		"keda-operator = {\n      namespace       = \"keda\"\n      service_account = \"keda-operator\"",
 	} {
 		if !strings.Contains(text, block) {
 			t.Errorf("Terraform Pod Identity map omits:\n%s", block)
+		}
+	}
+	for _, permission := range []string{
+		`"kafka-cluster:CreateTopic"`,
+		`"kafka-cluster:DescribeTopic"`,
+		"local.delivery_topic_arn",
+		"local.dead_letter_topic_arn",
+	} {
+		if !strings.Contains(text, permission) {
+			t.Errorf("Terraform bootstrap policy omits %s", permission)
 		}
 	}
 	podIdentityMap := strings.SplitN(text, "  } : {}", 2)[0]

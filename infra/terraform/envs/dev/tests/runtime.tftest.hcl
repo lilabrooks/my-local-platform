@@ -154,8 +154,10 @@ run "live_runtime_matches_the_accepted_shape" {
 
   assert {
     condition = (
-      length(aws_iam_role.pod_identity) == 3 &&
-      length(aws_eks_pod_identity_association.runtime) == 3 &&
+      length(aws_iam_role.pod_identity) == 4 &&
+      length(aws_eks_pod_identity_association.runtime) == 4 &&
+      aws_eks_pod_identity_association.runtime["relay-bootstrap"].namespace == "mlp" &&
+      aws_eks_pod_identity_association.runtime["relay-bootstrap"].service_account == "relay-bootstrap" &&
       aws_eks_pod_identity_association.runtime["relay-ingest"].namespace == "mlp" &&
       aws_eks_pod_identity_association.runtime["relay-ingest"].service_account == "relay-ingest" &&
       aws_eks_pod_identity_association.runtime["relay-deliver"].namespace == "mlp" &&
@@ -163,7 +165,7 @@ run "live_runtime_matches_the_accepted_shape" {
       aws_eks_pod_identity_association.runtime["keda-operator"].namespace == "keda" &&
       aws_eks_pod_identity_association.runtime["keda-operator"].service_account == "keda-operator"
     )
-    error_message = "The enabled runtime must create three distinct Pod Identity roles and associations."
+    error_message = "The enabled runtime must create four distinct Pod Identity roles and associations."
   }
 
   assert {
@@ -226,7 +228,7 @@ run "eks_and_msk_without_rds_has_the_workload_boundary" {
     condition = (
       length(aws_db_instance.main) == 0 &&
       length(aws_secretsmanager_secret.sink_signing_key) == 1 &&
-      length(aws_eks_pod_identity_association.runtime) == 3 &&
+      length(aws_eks_pod_identity_association.runtime) == 4 &&
       length(aws_vpc_security_group_ingress_rule.msk_from_eks) == 1
     )
     error_message = "EKS and MSK without RDS must retain the sink secret, identities, and private Kafka ingress boundary."

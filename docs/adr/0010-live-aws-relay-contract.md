@@ -79,10 +79,11 @@ M4 uses EKS Pod Identity rather than IRSA. AWS recommends Pod Identity for new
 EKS workloads when the SDK supports it, and the pinned KEDA 2.20.2 build uses
 an AWS SDK version newer than the published Pod Identity minimum.
 
-Four service accounts define the boundary:
+Five Kubernetes service accounts define the boundary:
 
 | Service account | AWS role authority |
 |---|---|
+| `relay-bootstrap` | connect to MSK and create or describe the two exact relay topics |
 | `relay-ingest` | connect to MSK, describe the delivery topic and consumer group, write the delivery topic, and read broker group offsets for metrics |
 | `relay-deliver` | connect to MSK, describe/read the delivery topic and group, alter the consumer group, and write the DLQ |
 | `keda-operator` | connect to MSK and read only the delivery topic and `relay-deliver` group lag |
@@ -145,18 +146,25 @@ secret holds the controlled sink signing key. Neither value appears in source,
 an image, a Terraform variable, Terraform output, a command argument, or shell
 history.
 
-The staging command disables shell tracing, sets `umask 077`, retrieves both
-values into a temporary directory, and streams a Kubernetes Secret manifest to
-`kubectl apply` over standard input. A trap removes the temporary directory on
-success, error, or interruption. The Secret supplies:
+The Go staging command retrieves both values into process memory and streams a
+Kubernetes Secret manifest to `kubectl apply` over standard input. Secret
+values never enter command arguments, command output, an evidence file, or a
+temporary credential file. The Secret supplies:
 
 - `DATABASE_URL` to relay and the database seed Job;
 - the signing key to the sink and seed Job.
 
 The seed Job inserts the same signing key into the subscription row. Relay
 therefore continues to read subscriber secrets from Postgres, as it does
-locally. The temporary Kubernetes Secret is scoped to namespace `mlp`, read by
-only those service accounts, and disappears with the cluster.
+locally. A retry reuses the signing value already in Secrets Manager, then
+reruns the idempotent topic and database setup. The short-lived Kubernetes
+Secret is scoped to namespace `mlp`, consumed only by the named workload and
+bootstrap specifications, and disappears with the cluster.
+
+The original accepted mechanism used a mode-0600 temporary directory with a
+cleanup trap. Packaging the operator in Go made that handoff unnecessary. The
+implemented path keeps the same secret boundary and removes the
+credential-file cleanup failure mode.
 
 Mounting Secrets Manager through the Secrets Store CSI driver was considered.
 The current scratch images read environment variables, so that choice would
@@ -285,6 +293,7 @@ data. Closing #97 requires that final cost and the empty inventories.
 | #93 | opt-in Terraform runtime | default plan has no hourly resources; enabled plan passes shape checks |
 | #94 | rendered AWS workload and evidence path | one digest/config/identity path traced through every consumer |
 | #95 | local rehearsal | deploy, evidence, abort, destroy, and redaction scripts pass without AWS |
+| #136 | live runtime bootstrap | shared topic and schema inputs, bounded secret streaming, and the in-cluster Job pass offline checks |
 | #96 | cheap-tier stage and reviewed plan | separate owner approval, immutable images, budget alarm, identity, prices, and exact plan captured |
 | #97 | paid run and cleanup | demonstration evidence, successful destroy, empty inventory, and final settled cost |
 
@@ -615,6 +624,24 @@ The 2026-09-08 live-run control slice remained outside AWS:
   and capture protocol;
 - `make test` passed all 6 race-enabled Go modules and 132 Python tests.
   `make lint` passed all 12 checks.
+
+The 2026-09-09 #136 runtime-bootstrap slice also remained outside AWS:
+
+- one shared topic file and one shared schema now feed both the local seed path
+  and the in-image bootstrap binary; `make up-apps`, `make seed`, and
+  `make smoke` created 19 active subscriptions and passed all 7 local component
+  checks before `make down` restored the stopped stack;
+- adapter tests bound the run to the approved commit, relay digest, AWS account,
+  active controller heartbeat, Terraform outputs, and current EKS endpoint.
+  They also proved that generated and fetched secret values use standard input,
+  never command arguments or output;
+- `make terraform-check` formatted, initialized without a backend, and
+  validated all 3 stacks; the guardrail test passed once and the dev contract
+  passed all 7 mocked runs. `make k8s-validate` parsed 162 resources with no
+  invalid resource or error;
+- `make test` passed all 7 race-enabled Go modules and 133 Python tests.
+  `make lint` passed all 12 checks, and every module passed `go mod tidy` and
+  `go vet`.
 
 No AWS command ran for these checks. Real account identity, state, budget,
 quota, regional availability, inventory, ECR, and price evidence still belong

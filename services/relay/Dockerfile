@@ -17,7 +17,10 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/relay ./cmd/relay && \
     CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w" \
-      -o /out/relay-replay ./cmd/relay-replay
+      -o /out/relay-replay ./cmd/relay-replay && \
+    CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w" \
+      -o /out/relay-bootstrap ./cmd/relay-bootstrap
 
 # scratch: no shell, no package manager, nothing to exploit.
 #
@@ -31,6 +34,7 @@ FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/relay /relay
 COPY --from=build /out/relay-replay /relay-replay
+COPY --from=build /out/relay-bootstrap /relay-bootstrap
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.revision="${VERSION}"

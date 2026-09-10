@@ -158,6 +158,13 @@ seconds, and sends `SIGKILL`. Cleanup starts after another 5 seconds even if
 the apply process has not reported an exit. An hourly `make aws-up` requires
 the controller's fresh, run-bound heartbeat and permit.
 
+After apply succeeds, `make aws-runtime-bootstrap` requires the same live
+controller heartbeat. It verifies the current EKS context, reuses or creates
+the short-lived signing value, streams the Kubernetes Secret, and runs the
+idempotent MSK topic and RDS schema setup inside the VPC. A stale input,
+stale controller, wrong cluster context, or failed bootstrap stops deployment;
+the paid-session deadline remains unchanged.
+
 The apply does not create a fresh plan. It requires a fresh
 `06-go-no-go.json`, checks that packet against the binary plan and safe summary,
 then repeats the account-sensitive guards. The wrapper verifies that:

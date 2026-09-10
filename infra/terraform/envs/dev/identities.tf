@@ -2,6 +2,10 @@ locals {
   create_pod_identities = var.enable_eks && var.enable_msk
 
   pod_identities = local.create_pod_identities ? {
+    relay-bootstrap = {
+      namespace       = "mlp"
+      service_account = "relay-bootstrap"
+    }
     relay-ingest = {
       namespace       = "mlp"
       service_account = "relay-ingest"
@@ -100,6 +104,28 @@ data "aws_iam_policy_document" "relay_ingest" {
   }
 }
 
+data "aws_iam_policy_document" "relay_bootstrap" {
+  count = local.create_pod_identities ? 1 : 0
+
+  statement {
+    sid       = "Connect"
+    actions   = ["kafka-cluster:Connect"]
+    resources = [local.msk_cluster_arn]
+  }
+
+  statement {
+    sid = "CreateAndDescribeRelayTopics"
+    actions = [
+      "kafka-cluster:CreateTopic",
+      "kafka-cluster:DescribeTopic",
+    ]
+    resources = [
+      local.delivery_topic_arn,
+      local.dead_letter_topic_arn,
+    ]
+  }
+}
+
 data "aws_iam_policy_document" "relay_deliver" {
   count = local.create_pod_identities ? 1 : 0
 
@@ -161,9 +187,10 @@ data "aws_iam_policy_document" "keda_operator" {
 
 locals {
   pod_identity_policies = local.create_pod_identities ? {
-    relay-ingest  = data.aws_iam_policy_document.relay_ingest[0].json
-    relay-deliver = data.aws_iam_policy_document.relay_deliver[0].json
-    keda-operator = data.aws_iam_policy_document.keda_operator[0].json
+    relay-bootstrap = data.aws_iam_policy_document.relay_bootstrap[0].json
+    relay-ingest    = data.aws_iam_policy_document.relay_ingest[0].json
+    relay-deliver   = data.aws_iam_policy_document.relay_deliver[0].json
+    keda-operator   = data.aws_iam_policy_document.keda_operator[0].json
   } : {}
 }
 

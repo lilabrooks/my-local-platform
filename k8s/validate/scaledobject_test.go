@@ -9,16 +9,19 @@ import (
 	"testing"
 )
 
-// The bootstrap script is the only place topic partition counts are declared.
-// Reading it here rather than restating the number is the point: an invariant
-// that carries its own copy of the value it guards can agree with itself while
-// both copies are wrong.
-const topicScript = "../../local/bootstrap/kafka-topics.sh"
+// Local-only topic counts remain in the shell script. Relay's shared file feeds
+// both that script and the live bootstrap binary. Reading both sources here
+// keeps the scaler assertion tied to the value the initializers consume.
+const (
+	topicScript      = "../../local/bootstrap/kafka-topics.sh"
+	relayTopicSource = "../../services/relay/internal/bootstrap/topics.txt"
+)
 
 // `topic <name> <partitions>` -- the helper every topic in the script is
 // created through. Anchored to the line start so the helper's own definition
 // and the commentary around it do not match.
 var topicLine = regexp.MustCompile(`(?m)^topic\s+(\S+)\s+(\d+)\s*$`)
+var sharedTopicLine = regexp.MustCompile(`(?m)^(\S+)\s+(\d+)\s*$`)
 
 // topicPartitions parses the bootstrap script into topic name -> partition
 // count.
@@ -38,12 +41,25 @@ func topicPartitions(t *testing.T) map[string]int {
 		}
 		out[m[1]] = n
 	}
+	shared, err := os.ReadFile(relayTopicSource)
+	if err != nil {
+		t.Fatalf("reading %s: %v", relayTopicSource, err)
+	}
+	for _, m := range sharedTopicLine.FindAllStringSubmatch(string(shared), -1) {
+		n, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("topic %q in %s has a non-numeric partition count %q", m[1], relayTopicSource, m[2])
+		}
+		if _, duplicate := out[m[1]]; duplicate {
+			t.Fatalf("topic %q is declared in both local and shared sources", m[1])
+		}
+		out[m[1]] = n
+	}
 
 	// A parser that silently matches nothing would make every assertion below
 	// vacuous, and it would look exactly like a passing test.
 	if len(out) == 0 {
-		t.Fatalf("parsed no topics out of %s; the `topic <name> <partitions>` "+
-			"convention this reads has probably changed", topicScript)
+		t.Fatalf("parsed no topics out of %s and %s", topicScript, relayTopicSource)
 	}
 	return out
 }
@@ -164,8 +180,8 @@ func TestScaledObjectMaxReplicasMatchesPartitionCount(t *testing.T) {
 				if !known {
 					t.Fatalf("the trigger scales on topic %q, which %s never creates.\n"+
 						"Either the topic is missing from the bootstrap script or the "+
-						"trigger points at one that does not exist.\nTopics it does "+
-						"create: %v", topic, topicScript, sortedKeys(partitions))
+						"trigger points at one that does not exist.\nTopics the local and "+
+						"shared sources create: %v", topic, topicScript, sortedKeys(partitions))
 				}
 
 				checked++

@@ -11,6 +11,32 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class LiveRunMakeTargetTest(unittest.TestCase):
+    def test_runtime_bootstrap_target_reaches_the_nested_go_module(self):
+        with tempfile.TemporaryDirectory() as go_cache:
+            environment = os.environ.copy()
+            environment["GOCACHE"] = go_cache
+            result = subprocess.run(
+                [
+                    "make",
+                    "--no-print-directory",
+                    "aws-runtime-bootstrap",
+                    "AWS_RUN_ID=invalid",
+                    f"AWS_APPROVED_COMMIT={'a' * 40}",
+                    "AWS_REAL_ENV=env",
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("AWS_RUN_ID must use UTC YYYYMMDDTHHMMSSZ", combined)
+        self.assertNotIn("cannot find main module", combined)
+
     def test_status_target_reaches_the_nested_go_module(self):
         with tempfile.TemporaryDirectory() as go_cache:
             environment = os.environ.copy()

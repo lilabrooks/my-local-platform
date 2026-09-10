@@ -1,12 +1,14 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-08
+Date: 2026-08-24 · Last audited: 2026-09-09
 Status: **M0 through M3 are built. M3's whole-application proof passed on
 2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
 is closed. M4's contract, local foundation, AWS deployment render, and local
-rehearsal are complete.** Cheap-tier staging in
-[#96](https://github.com/lilabrooks/my-local-platform/issues/96) is waiting for
-owner authorization. The later hourly apply requires a second owner decision.
+rehearsal are complete.** The runtime bootstrap discovered at their handoff is
+packaged in [#136](https://github.com/lilabrooks/my-local-platform/issues/136).
+Cheap-tier staging in [#96](https://github.com/lilabrooks/my-local-platform/issues/96)
+waits for that merge and owner authorization. The later hourly apply requires
+a second owner decision.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -425,10 +427,12 @@ at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
 4. Rehearse the deployment, demonstration, evidence capture, abort path, and
    cleanup locally in
    [#95](https://github.com/lilabrooks/my-local-platform/issues/95).
-5. With separate owner authority, stage the cheap AWS tier, immutable images,
+5. Package the one-shot live runtime bootstrap locally in
+   [#136](https://github.com/lilabrooks/my-local-platform/issues/136).
+6. With separate owner authority, stage the cheap AWS tier, immutable images,
    budget protection, and reviewed plan in
    [#96](https://github.com/lilabrooks/my-local-platform/issues/96).
-6. With a new owner authorization for the expensive apply, run the brief live
+7. With a new owner authorization for the expensive apply, run the brief live
    validation and destroy it in
    [#97](https://github.com/lilabrooks/my-local-platform/issues/97).
 
@@ -441,7 +445,7 @@ across that sequence:
 | Boundary | Contract |
 |---|---|
 | Topology | private MSK Serverless and RDS; EKS runs relay, internal sink, KEDA, ArgoCD, Prometheus, Grafana, and Tempo |
-| Identity | EKS Pod Identity for separate ingest, deliver, and KEDA operator roles; the sink has no AWS role |
+| Identity | EKS Pod Identity for separate bootstrap, ingest, deliver, and KEDA operator roles; the sink has no AWS role |
 | Images | immutable `mlp-dev/relay` and `mlp-dev/sink` ECR repositories, git SHA tags, digest deployments |
 | Data | 12-partition delivery topic, one-partition DLQ, two ingest replicas, deliver scales 1 to 12 |
 | Exposure | EKS API restricted to the operator; workload UIs and sink reached only by `kubectl port-forward` |
@@ -452,9 +456,10 @@ The three foundation issues consume #91 independently: issue #92 proves IAM
 transport, issue #93 produces guarded Terraform, and issue #101 makes shutdown
 execution and drain accounting share one definition. Issue #94 consumes all
 three artifacts to render the workload. Issue #95 then rehearses the whole
-runbook locally, issue #96 stages immutable images and the reviewed plan, and
-issue #97 performs the separately authorized paid run. A change to the table
-returns to the owner before it enters a plan.
+runbook locally. Issue #136 packages the runtime bootstrap, issue #96 stages
+immutable images and the reviewed plan, and issue #97 performs the separately
+authorized paid run. A change to the table returns to the owner before it
+enters a plan.
 
 The one thing the local stack structurally cannot teach: MSK Serverless supports
 **IAM authentication only** -- no SASL/SCRAM -- so this is SASL_SSL with
@@ -490,10 +495,10 @@ that shift, narrow enough to name precisely.
 - `enable_msk` variable, default `false`, alongside `enable_rds` and
   `enable_eks` in `infra/terraform/envs/dev/variables.tf`.
 - MSK Serverless in the existing VPC's private subnets.
-- EKS Pod Identity for separate relay-ingest, relay-deliver, and KEDA operator
-  roles. KEDA uses operator ownership; the sink has no AWS role. IRSA is the
-  pre-staging fallback only if the pinned KEDA path fails rehearsal and the
-  owner accepts an ADR amendment.
+- EKS Pod Identity for separate bootstrap, relay-ingest, relay-deliver, and
+  KEDA operator roles. KEDA uses operator ownership; the sink has no AWS role.
+  IRSA is the pre-staging fallback only if the pinned KEDA path fails rehearsal
+  and the owner accepts an ADR amendment.
 - KEDA. **Both** Kafka scalers support MSK IAM, by different routes, and the two
   spellings are not interchangeable:
 
