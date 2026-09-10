@@ -31,14 +31,7 @@ jobs:
         # its list from go.mod for the same reason; a matrix cannot, so adding a
         # module means adding it here -- and `discover` below fails the build if
         # anyone forgets.
-        module:
-          - services/smoke
-          - services/echo
-          - services/relay
-          - services/sink
-          - k8s/validate
-          - tools/m4-bootstrap
-          - tools/m4-live-run
+        module: [services/smoke, services/echo, services/relay, services/sink, k8s/validate, tools/m4-bootstrap, tools/m4-live-run]
     defaults:
       run:
         working-directory: ${{ matrix.module }}
