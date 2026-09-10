@@ -11,8 +11,8 @@ func TestSafeErrorRemovesDatabaseAndSigningCredentials(t *testing.T) {
 	t.Setenv("DATABASE_URL", database)
 	t.Setenv("RELAY_SIGNING_SECRET", "private-signing-value")
 
-	got := safeError(errors.New("failed " + database + " password=p@ssword signing=private-signing-value"))
-	for _, secret := range []string{database, "p@ssword", "private-signing-value"} {
+	got := safeError(errors.New("failed " + database + " password=p@ssword encoded=p%40ssword signing=private-signing-value"))
+	for _, secret := range []string{database, "p@ssword", "p%40ssword", "private-signing-value"} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("safe error contains %q: %s", secret, got)
 		}

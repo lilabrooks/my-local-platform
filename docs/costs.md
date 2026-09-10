@@ -161,9 +161,11 @@ the controller's fresh, run-bound heartbeat and permit.
 After apply succeeds, `make aws-runtime-bootstrap` requires the same live
 controller heartbeat. It verifies the current EKS context, reuses or creates
 the short-lived signing value, streams the Kubernetes Secret, and runs the
-idempotent MSK topic and RDS schema setup inside the VPC. A stale input,
-stale controller, wrong cluster context, or failed bootstrap stops deployment;
-the paid-session deadline remains unchanged.
+idempotent MSK topic and RDS schema setup inside the VPC. Its deadline cannot
+outlive the paid session, and it rechecks the controller before mutations and
+throughout the Job. A stale input, stopped controller, wrong cluster context,
+or failed bootstrap stops deployment; the paid-session deadline remains
+unchanged.
 
 The apply does not create a fresh plan. It requires a fresh
 `06-go-no-go.json`, checks that packet against the binary plan and safe summary,

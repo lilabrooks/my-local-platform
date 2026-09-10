@@ -261,7 +261,7 @@ vet: ## go vet every module
 TERRAFORM_STACKS := infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev
 
 .PHONY: terraform-check
-terraform-check: ## Run the offline Terraform checks used by CI
+terraform-check: ## Run offline checks with an installed supported Terraform version
 	@for stack in $(TERRAFORM_STACKS); do \
 	  echo "==> $$stack: terraform fmt, init, and validate"; \
 	  terraform -chdir="$$stack" fmt -check -recursive || exit 1; \

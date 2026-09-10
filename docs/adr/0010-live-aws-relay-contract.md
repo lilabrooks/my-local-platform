@@ -147,9 +147,10 @@ an image, a Terraform variable, Terraform output, a command argument, or shell
 history.
 
 The Go staging command retrieves both values into process memory and streams a
-Kubernetes Secret manifest to `kubectl apply` over standard input. Secret
-values never enter command arguments, command output, an evidence file, or a
-temporary credential file. The Secret supplies:
+Kubernetes Secret manifest to server-side `kubectl apply` over standard input,
+which avoids the client-side last-applied annotation. Secret values never enter
+command arguments, command output, an evidence file, or a temporary credential
+file. The Secret supplies:
 
 - `DATABASE_URL` to relay and the database seed Job;
 - the signing key to the sink and seed Job.
@@ -165,6 +166,10 @@ The original accepted mechanism used a mode-0600 temporary directory with a
 cleanup trap. Packaging the operator in Go made that handoff unnecessary. The
 implemented path keeps the same secret boundary and removes the
 credential-file cleanup failure mode.
+
+The relay image includes the checksum-pinned `us-east-1` RDS CA bundle. Both
+the bootstrap Job and relay use it with `sslmode=verify-full`, so the private
+RDS endpoint receives certificate and hostname verification.
 
 Mounting Secrets Manager through the Secrets Store CSI driver was considered.
 The current scratch images read environment variables, so that choice would
@@ -631,14 +636,22 @@ The 2026-09-09 #136 runtime-bootstrap slice also remained outside AWS:
   and the in-image bootstrap binary; `make up-apps`, `make seed`, and
   `make smoke` created 19 active subscriptions and passed all 7 local component
   checks before `make down` restored the stopped stack;
-- adapter tests bound the run to the approved commit, relay digest, AWS account,
-  active controller heartbeat, Terraform outputs, and current EKS endpoint.
-  They also proved that generated and fetched secret values use standard input,
-  never command arguments or output;
+- negative adapter fixtures rejected malformed identifiers, missing real-AWS
+  opt-in, an emulator endpoint, an unapproved relay image, account and STS
+  mismatches, stale or stopped controller states, an expired session, a wrong
+  commit, a dirty worktree, mismatched secret ARNs, and mismatched MSK brokers;
+- controller-transition tests stopped before Job creation and during Job
+  polling. A deadline assertion bounded every post-validation command by the
+  session destroy time, and a failed Job returned its condition immediately;
+- secret-path tests covered server-side apply and raw, encoded, and full-URL
+  redaction. The relay image built successfully with the checksum-pinned RDS
+  CA, and a manifest invariant ties that image path to the database URL;
+- the shared topic/Terraform parity check passed, and metadata tests covered a
+  transient stale response followed by success as well as permanent drift;
 - `make terraform-check` formatted, initialized without a backend, and
-  validated all 3 stacks; the guardrail test passed once and the dev contract
-  passed all 7 mocked runs. `make k8s-validate` parsed 162 resources with no
-  invalid resource or error;
+  validated all 3 stacks with local Terraform 1.16.0; the guardrail test passed
+  once and the dev contract passed all 7 mocked runs. `make k8s-validate`
+  parsed 162 resources with no invalid resource or error;
 - `make test` passed all 7 race-enabled Go modules and 133 Python tests.
   `make lint` passed all 12 checks, and every module passed `go mod tidy` and
   `go vet`.
@@ -660,6 +673,7 @@ to the separately authorized staging run.
 - [MSK service quotas](https://docs.aws.amazon.com/msk/latest/developerguide/limits.html)
 - [MSK pricing](https://aws.amazon.com/msk/pricing/)
 - [Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/)
+- [Amazon RDS SSL/TLS certificates](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html)
 - [RDS for PostgreSQL pricing](https://aws.amazon.com/rds/postgresql/pricing/)
 - [ECR tag immutability](https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html)
 - [ECR `DescribeImages`](https://docs.aws.amazon.com/AmazonECR/latest/APIReference/API_DescribeImages.html)

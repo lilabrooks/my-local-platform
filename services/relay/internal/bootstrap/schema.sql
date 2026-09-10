@@ -82,6 +82,9 @@ WHERE event.published_at IS NULL
       WHERE attempt.event_id = event.id
   );
 
+-- Two subscribers for one tenant keep the partial-failure path observable:
+-- one healthy and one configured to fail. A single subscriber would let a bug
+-- that dead-letters the whole event pass unnoticed.
 INSERT INTO relay_subscriptions (tenant_id, url, signing_secret) VALUES
     ('acme',   'http://sink:8081/hooks/ok',    current_setting('mlp.signing_secret')),
     ('acme',   'http://sink:8081/hooks/flaky', current_setting('mlp.signing_secret')),
@@ -89,6 +92,10 @@ INSERT INTO relay_subscriptions (tenant_id, url, signing_secret) VALUES
 ON CONFLICT (tenant_id, url) DO UPDATE
 SET signing_secret = EXCLUDED.signing_secret;
 
+-- Sixteen tenants spread the scaling load across the twelve Kafka partitions.
+-- A single busy tenant lands on one partition, so extra consumers would sit
+-- idle. The demo tenants use only the healthy endpoint; acme owns the separate
+-- dead-letter proof so the lag curve stays readable.
 INSERT INTO relay_subscriptions (tenant_id, url, signing_secret)
 SELECT 'demo-' || to_char(n, 'FM00'),
        'http://sink:8081/hooks/ok',

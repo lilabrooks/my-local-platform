@@ -16,7 +16,9 @@ type fakeKafkaAdmin struct {
 	create        *kafka.CreateTopicsResponse
 	createErr     error
 	metadata      *kafka.MetadataResponse
+	metadataQueue []*kafka.MetadataResponse
 	metadataErr   error
+	metadataCalls int
 }
 
 func (f *fakeKafkaAdmin) CreateTopics(_ context.Context, request *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
@@ -25,6 +27,12 @@ func (f *fakeKafkaAdmin) CreateTopics(_ context.Context, request *kafka.CreateTo
 }
 
 func (f *fakeKafkaAdmin) Metadata(_ context.Context, _ *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+	f.metadataCalls++
+	if len(f.metadataQueue) != 0 {
+		metadata := f.metadataQueue[0]
+		f.metadataQueue = f.metadataQueue[1:]
+		return metadata, nil
+	}
 	return f.metadata, f.metadataErr
 }
 
@@ -65,9 +73,35 @@ func TestEnsureTopicsRejectsTopologyDrift(t *testing.T) {
 		}},
 	}
 
-	_, err := EnsureTopics(context.Background(), admin, kafka.TCP("broker:9098"))
+	_, err := ensureTopics(context.Background(), admin, kafka.TCP("broker:9098"), 0)
 	if err == nil || !strings.Contains(err.Error(), "has 3 partitions, want 12") {
 		t.Fatalf("error = %v", err)
+	}
+	if admin.metadataCalls != metadataAttempts {
+		t.Fatalf("metadata calls = %d, want %d", admin.metadataCalls, metadataAttempts)
+	}
+}
+
+func TestEnsureTopicsRetriesMetadataPropagation(t *testing.T) {
+	admin := &fakeKafkaAdmin{
+		create: &kafka.CreateTopicsResponse{Errors: map[string]error{}},
+		metadataQueue: []*kafka.MetadataResponse{
+			{Topics: []kafka.Topic{
+				metadataTopic("mlp.relay.deliveries", 3),
+				metadataTopic("mlp.relay.deliveries.dlq", 1),
+			}},
+			{Topics: []kafka.Topic{
+				metadataTopic("mlp.relay.deliveries", 12),
+				metadataTopic("mlp.relay.deliveries.dlq", 1),
+			}},
+		},
+	}
+
+	if _, err := ensureTopics(context.Background(), admin, kafka.TCP("broker:9098"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if admin.metadataCalls != 2 {
+		t.Fatalf("metadata calls = %d, want 2", admin.metadataCalls)
 	}
 }
 

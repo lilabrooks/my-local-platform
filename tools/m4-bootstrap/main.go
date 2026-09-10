@@ -22,7 +22,14 @@ import (
 	"time"
 )
 
-const heartbeatMaxAge = 5 * time.Second
+const (
+	heartbeatMaxAge        = 5 * time.Second
+	operatorTimeout        = 5 * time.Minute
+	jobActiveDeadline      = 210
+	jobWaitTimeout         = 4 * time.Minute
+	jobPollInterval        = 2 * time.Second
+	rdsRootCertificatePath = "/etc/ssl/certs/rds-us-east-1-bundle.pem"
+)
 
 var (
 	runIDPattern  = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z$`)
@@ -138,6 +145,22 @@ type rdsSecret struct {
 	Password string `json:"password"`
 }
 
+type runApproval struct {
+	packet          goPacket
+	destroyDeadline time.Time
+}
+
+type jobStatus struct {
+	Status struct {
+		Conditions []struct {
+			Type    string `json:"type"`
+			Status  string `json:"status"`
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"conditions"`
+	} `json:"status"`
+}
+
 type application struct {
 	root           string
 	runner         commandRunner
@@ -145,6 +168,7 @@ type application struct {
 	now            func() time.Time
 	processRunning func(int) bool
 	output         io.Writer
+	after          func(time.Duration) <-chan time.Time
 }
 
 func readJSON(path string, destination any, description string) error {
@@ -199,81 +223,93 @@ func parseUTC(value, name string) (time.Time, error) {
 	return parsed, nil
 }
 
-func (a *application) validateRun(ctx context.Context, runID, commit, region string) (goPacket, error) {
-	var packet goPacket
-	if !commitPattern.MatchString(commit) {
-		return packet, errors.New("AWS_APPROVED_COMMIT must be a full lowercase git SHA")
-	}
-	if region != "us-east-1" {
-		return packet, errors.New("M4 uses the fixed us-east-1 region")
-	}
-	if os.Getenv("MLP_USE_REAL_AWS") != "1" {
-		return packet, errors.New("MLP_USE_REAL_AWS=1 is required")
-	}
-	if os.Getenv("AWS_ENDPOINT_URL") != "" {
-		return packet, errors.New("AWS_ENDPOINT_URL must be unset for live AWS")
-	}
+func (a *application) activeController(runID, commit, region string) (time.Time, error) {
 	raw, err := a.evidenceDirectory(runID)
 	if err != nil {
-		return packet, err
-	}
-	if err := readJSON(filepath.Join(raw, "06-go-no-go.json"), &packet, "go/no-go packet"); err != nil {
-		return packet, err
-	}
-	relayImage := packet.ImageReferences["relay"]
-	if packet.SchemaVersion != 1 || packet.RunID != runID || packet.SourceCommit != commit || packet.Decision != "go" || !packet.Gate.Passed || !imagePattern.MatchString(relayImage) {
-		return packet, errors.New("go/no-go packet does not approve this run, commit, and relay image")
-	}
-	var identity accountReceipt
-	if err := readJSON(filepath.Join(raw, "01-identity.txt"), &identity, "account receipt"); err != nil {
-		return packet, err
-	}
-	imageAccount := relayImage[:12]
-	if identity.AWS.AccountID != imageAccount {
-		return packet, errors.New("account receipt does not match the approved relay image account")
-	}
-	currentAccount, err := a.runner.Run(ctx, nil, "aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text")
-	if err != nil {
-		return packet, err
-	}
-	if strings.TrimSpace(string(currentAccount)) != identity.AWS.AccountID {
-		return packet, errors.New("current AWS identity does not match the approved account receipt")
+		return time.Time{}, err
 	}
 	var state controllerState
 	if err := readJSON(filepath.Join(raw, "controller-state.json"), &state, "controller state"); err != nil {
-		return packet, err
+		return time.Time{}, err
 	}
 	updated, err := parseUTC(state.UpdatedAt, "controller heartbeat")
 	if err != nil {
-		return packet, err
+		return time.Time{}, err
 	}
 	age := a.now().UTC().Sub(updated)
 	if state.SchemaVersion != 1 || state.RunID != runID || state.Commit != commit || state.Region != region || state.Phase != "live" || state.ApplyExit == nil || *state.ApplyExit != 0 || age < -30*time.Second || age > heartbeatMaxAge || !a.processRunning(state.ControllerPID) {
-		return packet, errors.New("live controller is not active after a successful apply for this run and commit")
+		return time.Time{}, errors.New("live controller is not active after a successful apply for this run and commit")
 	}
 	var session sessionReceipt
 	if err := readJSON(filepath.Join(raw, "00-session.json"), &session, "session receipt"); err != nil {
-		return packet, err
+		return time.Time{}, err
 	}
 	deadline, err := parseUTC(session.DestroyDeadline, "destroy deadline")
 	if err != nil {
-		return packet, err
+		return time.Time{}, err
 	}
 	if session.SchemaVersion != 1 || session.RunID != runID || session.Commit != commit || session.Region != region || !a.now().UTC().Before(deadline) {
-		return packet, errors.New("session receipt is not active for this run and commit")
+		return time.Time{}, errors.New("session receipt is not active for this run and commit")
 	}
-	head, err := a.runner.Run(context.Background(), nil, "git", "rev-parse", "HEAD")
-	if err != nil || strings.TrimSpace(string(head)) != commit {
-		return packet, errors.New("worktree HEAD does not match the approved commit")
+	return deadline, nil
+}
+
+func (a *application) validateRun(ctx context.Context, runID, commit, region string) (runApproval, error) {
+	var approval runApproval
+	if !commitPattern.MatchString(commit) {
+		return approval, errors.New("AWS_APPROVED_COMMIT must be a full lowercase git SHA")
 	}
-	status, err := a.runner.Run(context.Background(), nil, "git", "status", "--porcelain")
+	if region != "us-east-1" {
+		return approval, errors.New("M4 uses the fixed us-east-1 region")
+	}
+	if os.Getenv("MLP_USE_REAL_AWS") != "1" {
+		return approval, errors.New("MLP_USE_REAL_AWS=1 is required")
+	}
+	if os.Getenv("AWS_ENDPOINT_URL") != "" {
+		return approval, errors.New("AWS_ENDPOINT_URL must be unset for live AWS")
+	}
+	raw, err := a.evidenceDirectory(runID)
 	if err != nil {
-		return packet, err
+		return approval, err
+	}
+	if err := readJSON(filepath.Join(raw, "06-go-no-go.json"), &approval.packet, "go/no-go packet"); err != nil {
+		return approval, err
+	}
+	relayImage := approval.packet.ImageReferences["relay"]
+	if approval.packet.SchemaVersion != 1 || approval.packet.RunID != runID || approval.packet.SourceCommit != commit || approval.packet.Decision != "go" || !approval.packet.Gate.Passed || !imagePattern.MatchString(relayImage) {
+		return approval, errors.New("go/no-go packet does not approve this run, commit, and relay image")
+	}
+	var identity accountReceipt
+	if err := readJSON(filepath.Join(raw, "01-identity.txt"), &identity, "account receipt"); err != nil {
+		return approval, err
+	}
+	imageAccount := relayImage[:12]
+	if identity.AWS.AccountID != imageAccount {
+		return approval, errors.New("account receipt does not match the approved relay image account")
+	}
+	currentAccount, err := a.runner.Run(ctx, nil, "aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text")
+	if err != nil {
+		return approval, err
+	}
+	if strings.TrimSpace(string(currentAccount)) != identity.AWS.AccountID {
+		return approval, errors.New("current AWS identity does not match the approved account receipt")
+	}
+	approval.destroyDeadline, err = a.activeController(runID, commit, region)
+	if err != nil {
+		return approval, err
+	}
+	head, err := a.runner.Run(ctx, nil, "git", "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(string(head)) != commit {
+		return approval, errors.New("worktree HEAD does not match the approved commit")
+	}
+	status, err := a.runner.Run(ctx, nil, "git", "status", "--porcelain")
+	if err != nil {
+		return approval, err
 	}
 	if len(bytes.TrimSpace(status)) != 0 {
-		return packet, errors.New("worktree must be clean before live bootstrap")
+		return approval, errors.New("worktree must be clean before live bootstrap")
 	}
-	return packet, nil
+	return approval, nil
 }
 
 func (a *application) terraformOutputs(ctx context.Context) (terraformOutputs, error) {
@@ -309,7 +345,7 @@ func (a *application) getSecret(ctx context.Context, arn string) (string, error)
 	return parseSecret(value, "Secrets Manager response")
 }
 
-func (a *application) signingSecret(ctx context.Context, arn string) (string, error) {
+func (a *application) signingSecret(ctx context.Context, arn string, beforeStore func() error) (string, error) {
 	existing, err := a.getSecret(ctx, arn)
 	if err == nil {
 		decoded, decodeErr := base64.RawURLEncoding.DecodeString(existing)
@@ -326,6 +362,11 @@ func (a *application) signingSecret(ctx context.Context, arn string) (string, er
 		return "", fmt.Errorf("generate sink signing secret: %w", err)
 	}
 	generated := base64.RawURLEncoding.EncodeToString(randomBytes)
+	if beforeStore != nil {
+		if err := beforeStore(); err != nil {
+			return "", fmt.Errorf("controller stopped before storing sink signing secret: %w", err)
+		}
+	}
 	if _, err := a.runner.Run(ctx, []byte(generated), "aws", "secretsmanager", "put-secret-value", "--secret-id", arn, "--secret-string", "file:///dev/stdin", "--output", "json"); err != nil {
 		return "", fmt.Errorf("store sink signing secret: %w", err)
 	}
@@ -353,9 +394,15 @@ func databaseURL(endpoint, secretText string) (string, error) {
 		User:     url.UserPassword(credential.Username, credential.Password),
 		Host:     endpoint,
 		Path:     "/platform",
-		RawQuery: "sslmode=verify-full",
+		RawQuery: "sslmode=verify-full&sslrootcert=" + url.QueryEscape(rdsRootCertificatePath),
 	}
 	return value.String(), nil
+}
+
+func encodedPassword(password string) string {
+	userinfo := url.UserPassword("user", password).String()
+	_, encoded, _ := strings.Cut(userinfo, ":")
+	return encoded
 }
 
 func secretManifest(database, signing string) ([]byte, error) {
@@ -406,7 +453,7 @@ func jobManifest(runID, commit, image string) ([]byte, error) {
 		},
 		"spec": map[string]any{
 			"backoffLimit":          0,
-			"activeDeadlineSeconds": 150,
+			"activeDeadlineSeconds": jobActiveDeadline,
 			"template": map[string]any{
 				"metadata": map[string]any{
 					"labels": map[string]string{
@@ -510,10 +557,57 @@ func runtimeBootstrapValue(path string) ([]byte, error) {
 	return value, nil
 }
 
+func (a *application) afterDelay(delay time.Duration) <-chan time.Time {
+	if a.after != nil {
+		return a.after(delay)
+	}
+	return time.After(delay)
+}
+
+func (a *application) waitForJob(ctx context.Context, jobName, runID, commit, region string) error {
+	for {
+		if _, err := a.activeController(runID, commit, region); err != nil {
+			return fmt.Errorf("live controller stopped during runtime bootstrap: %w", err)
+		}
+		value, err := a.runner.Run(ctx, nil, "kubectl", "-n", "mlp", "get", jobName, "-o", "json")
+		if err != nil {
+			return fmt.Errorf("read relay bootstrap Job status: %w", err)
+		}
+		var status jobStatus
+		if err := json.Unmarshal(value, &status); err != nil {
+			return fmt.Errorf("relay bootstrap Job status is invalid JSON: %w", err)
+		}
+		for _, condition := range status.Status.Conditions {
+			if condition.Status != "True" {
+				continue
+			}
+			switch condition.Type {
+			case "Complete":
+				return nil
+			case "Failed":
+				detail := strings.TrimSpace(strings.Join([]string{condition.Reason, condition.Message}, ": "))
+				return fmt.Errorf("relay bootstrap Job failed: %s", detail)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for relay bootstrap Job: %w", ctx.Err())
+		case <-a.afterDelay(jobPollInterval):
+		}
+	}
+}
+
 func (a *application) run(ctx context.Context, runID, commit, region string) error {
-	packet, err := a.validateRun(ctx, runID, commit, region)
+	approval, err := a.validateRun(ctx, runID, commit, region)
 	if err != nil {
 		return err
+	}
+	ctx, cancel := context.WithDeadline(ctx, approval.destroyDeadline)
+	defer cancel()
+	packet := approval.packet
+	controllerActive := func() error {
+		_, activeErr := a.activeController(runID, commit, region)
+		return activeErr
 	}
 	outputs, err := a.terraformOutputs(ctx)
 	if err != nil {
@@ -559,7 +653,10 @@ func (a *application) run(ctx context.Context, runID, commit, region string) err
 		return errors.New("rendered relay runtime does not match the Terraform MSK brokers")
 	}
 
-	signing, err := a.signingSecret(ctx, signingSecretARN)
+	if err := controllerActive(); err != nil {
+		return err
+	}
+	signing, err := a.signingSecret(ctx, signingSecretARN, controllerActive)
 	if err != nil {
 		return err
 	}
@@ -588,15 +685,27 @@ func (a *application) run(ctx context.Context, runID, commit, region string) err
 		{"kubectl", "apply", "-f", "k8s/manifests/namespace.yaml"},
 		{"kubectl", "-n", "mlp", "apply", "-f", "k8s/aws/relay/serviceaccounts.yaml"},
 	} {
+		if err := controllerActive(); err != nil {
+			return err
+		}
 		if _, err := a.runner.Run(ctx, nil, arguments...); err != nil {
 			return err
 		}
 	}
-	if _, err := a.runner.Run(ctx, runtime, "kubectl", "apply", "-f", "-"); err != nil {
+	if err := controllerActive(); err != nil {
+		return err
+	}
+	if _, err := a.runner.Run(ctx, runtime, "kubectl", "apply", "--server-side", "--field-manager=mlp-bootstrap", "-f", "-"); err != nil {
 		return fmt.Errorf("apply relay runtime ConfigMap: %w", err)
 	}
-	if _, err := a.runner.Run(ctx, secret, "kubectl", "apply", "-f", "-"); err != nil {
+	if err := controllerActive(); err != nil {
+		return err
+	}
+	if _, err := a.runner.Run(ctx, secret, "kubectl", "apply", "--server-side", "--field-manager=mlp-bootstrap", "-f", "-"); err != nil {
 		return fmt.Errorf("apply relay runtime Secret: %w", err)
+	}
+	if err := controllerActive(); err != nil {
+		return err
 	}
 	created, err := a.runner.Run(ctx, job, "kubectl", "create", "-f", "-", "-o", "name")
 	if err != nil {
@@ -606,21 +715,24 @@ func (a *application) run(ctx context.Context, runID, commit, region string) err
 	if !jobPattern.MatchString(jobName) {
 		return fmt.Errorf("kubectl returned invalid bootstrap Job name %q", jobName)
 	}
-	if _, err := a.runner.Run(ctx, nil, "kubectl", "-n", "mlp", "wait", "--for=condition=complete", jobName, "--timeout=180s"); err != nil {
-		logContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	jobContext, stopWaiting := context.WithTimeout(ctx, jobWaitTimeout)
+	waitErr := a.waitForJob(jobContext, jobName, runID, commit, region)
+	stopWaiting()
+	if waitErr != nil {
+		logContext, stopLogs := context.WithTimeout(ctx, 10*time.Second)
 		logs, _ := a.runner.Run(logContext, nil, "kubectl", "-n", "mlp", "logs", jobName)
-		cancel()
+		stopLogs()
 		if len(logs) != 0 {
-			_, _ = a.output.Write(redacted(logs, signing, database, databaseCredential.Password))
+			_, _ = a.output.Write(redacted(logs, signing, database, databaseCredential.Password, encodedPassword(databaseCredential.Password)))
 		}
-		return fmt.Errorf("wait for relay bootstrap Job: %w", err)
+		return waitErr
 	}
 	logs, err := a.runner.Run(ctx, nil, "kubectl", "-n", "mlp", "logs", jobName)
 	if err != nil {
 		return fmt.Errorf("read relay bootstrap Job logs: %w", err)
 	}
 	if len(logs) != 0 {
-		_, _ = a.output.Write(redacted(logs, signing, database, databaseCredential.Password))
+		_, _ = a.output.Write(redacted(logs, signing, database, databaseCredential.Password, encodedPassword(databaseCredential.Password)))
 	}
 	if _, err := fmt.Fprintf(a.output, "live runtime bootstrap complete: %s\n", jobName); err != nil {
 		return fmt.Errorf("write bootstrap completion: %w", err)
@@ -657,7 +769,7 @@ func main() {
 	}
 	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(rootContext, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(rootContext, operatorTimeout)
 	defer cancel()
 	if err := app.run(ctx, *runID, *commit, *region); err != nil {
 		fmt.Fprintln(os.Stderr, err)

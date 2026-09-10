@@ -1,6 +1,12 @@
 # Multi-stage: build with the toolchain, ship without it.
 FROM golang:1.27-alpine AS build
 
+# RDS uses its own CA hierarchy. Pin the fixed us-east-1 bundle so a remote
+# rotation fails the build and receives an explicit review.
+ADD --checksum=sha256:b1711d12bae51838581281e23b6cb97b1074016873b4dafc80ed14002462dd77 \
+    https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem \
+    /etc/ssl/certs/rds-us-east-1-bundle.pem
+
 WORKDIR /src
 
 # go.mod and go.sum change rarely, so this layer stays cached across source
@@ -32,6 +38,7 @@ FROM scratch
 # relay dials Postgres and Kafka over TLS in the M4 (MSK) configuration, and a
 # scratch image has no root certificates at all.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /etc/ssl/certs/rds-us-east-1-bundle.pem /etc/ssl/certs/rds-us-east-1-bundle.pem
 COPY --from=build /out/relay /relay
 COPY --from=build /out/relay-replay /relay-replay
 COPY --from=build /out/relay-bootstrap /relay-bootstrap

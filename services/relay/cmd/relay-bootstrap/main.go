@@ -97,10 +97,12 @@ func redact(message string, sensitive ...string) string {
 func safeError(err error) string {
 	databaseURL := os.Getenv("DATABASE_URL")
 	password := ""
+	encodedPassword := ""
 	if parsed, parseErr := url.Parse(databaseURL); parseErr == nil && parsed.User != nil {
 		password, _ = parsed.User.Password()
+		_, encodedPassword, _ = strings.Cut(parsed.User.String(), ":")
 	}
-	return redact(err.Error(), os.Getenv("RELAY_SIGNING_SECRET"), databaseURL, password)
+	return redact(err.Error(), os.Getenv("RELAY_SIGNING_SECRET"), databaseURL, password, encodedPassword)
 }
 
 func main() {

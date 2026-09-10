@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -493,6 +494,90 @@ func TestAWSPodIdentityNamesMatchTerraform(t *testing.T) {
 	podIdentityMap := strings.SplitN(text, "  } : {}", 2)[0]
 	if strings.Contains(podIdentityMap, "sink = {") {
 		t.Error("Terraform gives the sink a Pod Identity role")
+	}
+}
+
+func TestAWSRelayTopicContractMatchesSharedBootstrap(t *testing.T) {
+	shared, err := os.ReadFile(relayTopicSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedTopics := make(map[string]int)
+	for _, match := range sharedTopicLine.FindAllStringSubmatch(string(shared), -1) {
+		partitions, err := strconv.Atoi(match[2])
+		if err != nil {
+			t.Fatal(err)
+		}
+		sharedTopics[match[1]] = partitions
+	}
+	if len(sharedTopics) != 2 {
+		t.Fatalf("shared relay topic count = %d, want 2", len(sharedTopics))
+	}
+
+	runtime, err := os.ReadFile("../../infra/terraform/envs/dev/runtime_contract.tf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := func(name string) string {
+		t.Helper()
+		expression := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*"?([^"\s]+)"?\s*$`)
+		match := expression.FindStringSubmatch(string(runtime))
+		if len(match) != 2 {
+			t.Fatalf("Terraform runtime contract omits %s", name)
+		}
+		return match[1]
+	}
+	deliveryPartitions, err := strconv.Atoi(field("delivery_partitions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlqPartitions, err := strconv.Atoi(field("dead_letter_partitions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terraformed := map[string]int{
+		field("delivery_topic"):    deliveryPartitions,
+		field("dead_letter_topic"): dlqPartitions,
+	}
+	if !reflect.DeepEqual(sharedTopics, terraformed) {
+		t.Fatalf("shared relay topics %v do not match Terraform %v", sharedTopics, terraformed)
+	}
+}
+
+func TestRelayImageCarriesTheRDSBundleAndOutlivesTheBootstrapBinary(t *testing.T) {
+	dockerfile, err := os.ReadFile("../../services/relay/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, err := os.ReadFile("../../tools/m4-bootstrap/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile("../../services/relay/cmd/relay-bootstrap/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"ADD --checksum=sha256:",
+		"https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem",
+		"COPY --from=build /etc/ssl/certs/rds-us-east-1-bundle.pem /etc/ssl/certs/rds-us-east-1-bundle.pem",
+	} {
+		if !strings.Contains(string(dockerfile), required) {
+			t.Errorf("relay Dockerfile omits %q", required)
+		}
+	}
+	if !strings.Contains(string(operator), `rdsRootCertificatePath = "/etc/ssl/certs/rds-us-east-1-bundle.pem"`) {
+		t.Error("database URL does not reference the RDS bundle copied into the image")
+	}
+	jobMatch := regexp.MustCompile(`jobActiveDeadline\s*=\s*(\d+)`).FindStringSubmatch(string(operator))
+	binaryMatch := regexp.MustCompile(`bootstrapTimeout\s*=\s*(\d+)\s*\*\s*time.Minute`).FindStringSubmatch(string(binary))
+	if len(jobMatch) != 2 || len(binaryMatch) != 2 {
+		t.Fatal("could not parse bootstrap deadlines")
+	}
+	jobSeconds, _ := strconv.Atoi(jobMatch[1])
+	binaryMinutes, _ := strconv.Atoi(binaryMatch[1])
+	if jobSeconds <= binaryMinutes*60 {
+		t.Fatalf("Job deadline %ds must exceed binary timeout %dm", jobSeconds, binaryMinutes)
 	}
 }
 

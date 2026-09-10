@@ -189,12 +189,16 @@ make argocd-install-aws \
 
 `aws-runtime-bootstrap` verifies that the current Kubernetes context points at
 the EKS endpoint from Terraform state. It also requires a fresh live-controller
-heartbeat for the run and commit. It creates the namespace and service
+heartbeat for the run and commit, clamps itself to the earlier of its five-minute
+limit and the controller's destroy deadline, then rechecks the controller before
+each mutation and while the Job runs. It creates the namespace and service
 accounts, applies the rendered runtime ConfigMap, retrieves or creates the
-signing value, streams `relay-secrets`, creates a one-shot Job from the approved
-relay image, waits up to three minutes, and prints only topic names, partition
-counts, and the active-subscription count. Repeating it reuses the signing value
-and reruns idempotent topic and database setup.
+signing value, streams `relay-secrets` with server-side apply, creates a one-shot
+Job from the approved relay image, waits up to four minutes, and prints only
+topic names, partition counts, and the active-subscription count. The relay
+image carries the checksum-pinned `us-east-1` RDS CA bundle used by
+`sslmode=verify-full`. Repeating the command reuses the signing value and reruns
+idempotent topic and database setup.
 
 Those commands target the current Kubernetes context. Their presence is not
 permission to run them. #95 rehearses their ordering locally, #136 packages the
