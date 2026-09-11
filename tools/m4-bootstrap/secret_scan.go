@@ -157,6 +157,9 @@ func (s *secretScan) record(name, value string) error {
 		return errors.New("invalid sensitive value or scan state")
 	}
 	for representation, text := range secretRepresentations(value) {
+		// SHA-256 is an equality fingerprint for leak detection over AWS-generated
+		// high-entropy credentials, not a password verifier or credential store.
+		// codeql[go/weak-sensitive-data-hashing]
 		s.Entries = append(s.Entries, scanEntry{name, representation, len([]byte(text)), fmt.Sprintf("%x", sha256.Sum256([]byte(text)))})
 	}
 	return s.save()
