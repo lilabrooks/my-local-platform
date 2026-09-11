@@ -16,6 +16,9 @@ data:
   RELAY_TOPIC: mlp.relay.deliveries
   RELAY_DLQ_TOPIC: mlp.relay.deliveries.dlq
   RELAY_CONSUMER_GROUP: relay-deliver
+  # The M4 local capture verifies the same trace as AWS. Local Tempo and its
+  # collector run in compose; the AWS overlay uses its in-cluster collector.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://host.minikube.internal:4317
 
   # The `demo` preset here, unlike compose. 15s to reach the dead-letter queue
   # is the point when someone is watching a demo, and the cost when a smoke

@@ -111,6 +111,32 @@ class FakeRunner:
 
 
 class ImageStageTest(unittest.TestCase):
+    def test_operator_address_rejects_changed_broad_or_unreachable_ip(self):
+        runner = mock.Mock()
+        runner.json.return_value = {
+            "variables": {"eks_operator_cidr": {"value": "198.51.100.4/32"}}
+        }
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"198.51.100.4\n"
+        with mock.patch.object(
+            STAGE.urllib.request, "urlopen", return_value=response
+        ) as request:
+            STAGE.verify_operator_address(Path("saved-plan"), runner)
+            response.__enter__.return_value.read.return_value = b"198.51.100.5\n"
+            with self.assertRaisesRegex(STAGE.StageError, "changed"):
+                STAGE.verify_operator_address(Path("saved-plan"), runner)
+            runner.json.return_value["variables"]["eks_operator_cidr"]["value"] = (
+                "198.51.100.0/24"
+            )
+            with self.assertRaises(STAGE.StageError):
+                STAGE.verify_operator_address(Path("saved-plan"), runner)
+            runner.json.return_value["variables"]["eks_operator_cidr"]["value"] = (
+                "198.51.100.4/32"
+            )
+            request.side_effect = OSError("unreachable")
+            with self.assertRaises(STAGE.StageError):
+                STAGE.verify_operator_address(Path("saved-plan"), runner)
+
     def valid_price_input(self, run_id: str, now: datetime) -> dict:
         value = STAGE.price_template(run_id, COMMIT)
         value.update(
@@ -594,6 +620,9 @@ class ImageStageTest(unittest.TestCase):
             plan_path = run / "reviewed.tfplan"
             plan_path.write_bytes(b"reviewed plan")
             summary_path = run / "03-plan-summary.json"
+            summary = json.loads(summary_path.read_text())
+            summary["plan_sha256"] = STAGE.hash_file(plan_path)
+            summary_path.write_text(json.dumps(summary))
 
             with mock.patch.object(STAGE, "ROOT", root):
                 packet = STAGE.build_go_no_go(
@@ -615,6 +644,77 @@ class ImageStageTest(unittest.TestCase):
                     plan_path,
                     summary_path,
                 )
+
+                identity = run / "01-identity.txt"
+                original = identity.read_bytes()
+                identity.write_bytes(original + b"\n")
+                with self.assertRaisesRegex(
+                    STAGE.StageError, "staged identity changed"
+                ):
+                    STAGE.verify_go_no_go(
+                        run_id,
+                        COMMIT,
+                        "us-east-1",
+                        packet_path,
+                        plan_path,
+                        summary_path,
+                    )
+                identity.write_bytes(original)
+
+                from datetime import timedelta
+
+                now = datetime.now(timezone.utc)
+                near_expiry = json.loads(original)
+                near_expiry["captured_at"] = (
+                    now - timedelta(hours=23, minutes=55)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                identity.write_text(json.dumps(near_expiry))
+                packet["input_sha256"]["identity"] = STAGE.hash_file(identity)
+                packet_path.write_text(json.dumps(packet))
+                STAGE.verify_go_no_go(
+                    run_id,
+                    COMMIT,
+                    "us-east-1",
+                    packet_path,
+                    plan_path,
+                    summary_path,
+                    now=now,
+                )
+                with self.assertRaisesRegex(
+                    STAGE.StageError, "original identity observation"
+                ):
+                    STAGE.verify_go_no_go(
+                        run_id,
+                        COMMIT,
+                        "us-east-1",
+                        packet_path,
+                        plan_path,
+                        summary_path,
+                        now=now,
+                        before_session=True,
+                    )
+                identity.write_bytes(original)
+                packet["input_sha256"]["identity"] = STAGE.hash_file(identity)
+
+                future = datetime.now(timezone.utc) + timedelta(hours=25)
+                packet["generated_at"] = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+                packet_path.write_text(json.dumps(packet))
+                with self.assertRaisesRegex(
+                    STAGE.StageError, "original identity observation"
+                ):
+                    STAGE.verify_go_no_go(
+                        run_id,
+                        COMMIT,
+                        "us-east-1",
+                        packet_path,
+                        plan_path,
+                        summary_path,
+                        now=future,
+                    )
+                packet["generated_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                packet_path.write_text(json.dumps(packet))
 
                 plan_path.write_bytes(b"replaced plan")
                 with self.assertRaisesRegex(STAGE.StageError, "reviewed plan"):

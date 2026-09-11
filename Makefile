@@ -22,10 +22,13 @@ AWS_IMAGE_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/05-images.json
 AWS_PRICE_INPUT ?= .evidence/m4/$(AWS_RUN_ID)/price-input.json
 AWS_PRICE_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/02-prices.md
 AWS_GO_NO_GO ?= .evidence/m4/$(AWS_RUN_ID)/06-go-no-go.json
+AWS_KUBECONFIG ?= $(HOME)/.kube/config
+AWS_KUBE_CONTEXT ?= mlp-aws-$(AWS_RUN_ID)
 AWS_REAL_ENV = env -i \
 	HOME="$(HOME)" \
 	PATH="$(PATH)" \
 	TMPDIR="$(TMPDIR)" \
+	KUBECONFIG="$(abspath $(AWS_KUBECONFIG))" \
 	AWS_PROFILE="$(AWS_PROFILE_NAME)" \
 	AWS_REGION="$(AWS_REAL_REGION)" \
 	AWS_DEFAULT_REGION="$(AWS_REAL_REGION)" \
@@ -508,7 +511,7 @@ aws-preflight-check: ## Check the account-independent M4 repository contract
 .PHONY: aws-preflight
 aws-preflight: ## Run the complete local M4 preflight and write its receipt
 	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required (UTC YYYYMMDDTHHMMSSZ)" >&2; exit 2; }
-	AWS_RUN_ID="$(AWS_RUN_ID)" python3 scripts/m4-preflight.py run
+	AWS_RUN_ID="$(AWS_RUN_ID)" M4_LOCAL_RUN_ID="$(M4_LOCAL_RUN_ID)" python3 scripts/m4-preflight.py run
 	AWS_RUN_ID="$(AWS_RUN_ID)" python3 scripts/m4-evidence.py init
 
 .PHONY: aws-inventory-empty
@@ -617,6 +620,18 @@ m4-local-demo: ## Run the machine-checked minikube demo and record local evidenc
 	@test -n "$(M4_LOCAL_RUN_ID)" || { echo "M4_LOCAL_RUN_ID is required" >&2; exit 2; }
 	python3 scripts/m4-local-demo.py --output "$(M4_DEMO_EVIDENCE)"
 
+.PHONY: m4-local-capture
+m4-local-capture: ## Exercise bounded machine capture in local mlp (no AWS)
+	@test -n "$(M4_LOCAL_RUN_ID)" || { echo "M4_LOCAL_RUN_ID is required" >&2; exit 2; }
+	python3 scripts/m4-live-capture.py --environment local --context "$(MINIKUBE_PROFILE)" \
+	  --run-id "$(M4_LOCAL_RUN_ID)" --commit "$(M4_SOURCE_COMMIT)" --image relay:dev \
+	  --tempo-url http://127.0.0.1:3200
+
+.PHONY: aws-live-capture
+aws-live-capture: ## Deploy and capture inside an already authorized paid controller window
+	python3 scripts/m4-live-capture.py --environment aws --context "$(AWS_KUBE_CONTEXT)" \
+	  --run-id "$(AWS_RUN_ID)" --commit "$(AWS_APPROVED_COMMIT)" --deploy
+
 .PHONY: aws-k8s-render
 aws-k8s-render: ## Render the untracked AWS deployment bundle (no cluster mutation)
 	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
@@ -666,7 +681,7 @@ aws-runtime-bootstrap: ## Initialize live MSK, RDS, and relay secrets inside the
 aws-kubeconfig: ## Point kubectl at the live EKS cluster recorded in dev state
 	@$(AWS_REAL_ENV) bash -c 'set -euo pipefail; \
 	  cluster="$$(terraform -chdir=infra/terraform/envs/dev output -raw eks_cluster_name)"; \
-	  aws eks update-kubeconfig --name "$$cluster" --region "$(AWS_REAL_REGION)"'
+	  aws eks update-kubeconfig --name "$$cluster" --region "$(AWS_REAL_REGION)" --alias "$(AWS_KUBE_CONTEXT)"'
 
 .PHONY: k8s-status
 k8s-status: ## Show ArgoCD applications and the mlp namespace
@@ -846,6 +861,10 @@ aws-state-empty: ## Require the initialized dev Terraform state to contain no re
 	  echo "dev Terraform state is empty"
 
 .PHONY: aws-cost
+.PHONY: aws-cost-final
+aws-cost-final: ## Collect settled session-date account costs (read-only AWS)
+	python3 scripts/m4-evidence.py collect-final-cost --run-id "$(AWS_RUN_ID)"
+
 aws-cost: ## Month-to-date spend on the account
 	@$(AWS_REAL_ENV) aws ce get-cost-and-usage \
 	  --time-period Start=$$(date -u +%Y-%m-01),End=$$(date -u -v+1d +%Y-%m-%d) \

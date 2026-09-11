@@ -2,6 +2,10 @@ locals {
   create_pod_identities = var.enable_eks && var.enable_msk
 
   pod_identities = local.create_pod_identities ? {
+    relay-capture = {
+      namespace       = "mlp"
+      service_account = "relay-capture"
+    }
     relay-bootstrap = {
       namespace       = "mlp"
       service_account = "relay-bootstrap"
@@ -35,6 +39,10 @@ locals {
     "%s/%s",
     replace(aws_msk_serverless_cluster.relay[0].arn, ":cluster/", ":group/"),
     local.delivery_group,
+  ) : null
+  capture_group_arn = var.enable_msk ? format(
+    "%s/relay-capture",
+    replace(aws_msk_serverless_cluster.relay[0].arn, ":cluster/", ":group/"),
   ) : null
 }
 
@@ -126,6 +134,36 @@ data "aws_iam_policy_document" "relay_bootstrap" {
   }
 }
 
+data "aws_iam_policy_document" "relay_capture" {
+  count = local.create_pod_identities ? 1 : 0
+
+  statement {
+    sid       = "Connect"
+    actions   = ["kafka-cluster:Connect"]
+    resources = [local.msk_cluster_arn]
+  }
+
+  # Direct partition readers do not join or alter the delivery consumer group.
+  statement {
+    sid       = "ReadProofTopics"
+    actions   = ["kafka-cluster:DescribeTopic", "kafka-cluster:ReadData"]
+    resources = [local.delivery_topic_arn, local.dead_letter_topic_arn]
+  }
+
+  statement {
+    sid       = "ProduceControlledPoison"
+    actions   = ["kafka-cluster:WriteData"]
+    resources = [local.delivery_topic_arn]
+  }
+
+  # AWS documents these as ReadData dependencies. Never grant the delivery group.
+  statement {
+    sid       = "CaptureReadDependencies"
+    actions   = ["kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
+    resources = [local.capture_group_arn]
+  }
+}
+
 data "aws_iam_policy_document" "relay_deliver" {
   count = local.create_pod_identities ? 1 : 0
 
@@ -187,6 +225,7 @@ data "aws_iam_policy_document" "keda_operator" {
 
 locals {
   pod_identity_policies = local.create_pod_identities ? {
+    relay-capture   = data.aws_iam_policy_document.relay_capture[0].json
     relay-bootstrap = data.aws_iam_policy_document.relay_bootstrap[0].json
     relay-ingest    = data.aws_iam_policy_document.relay_ingest[0].json
     relay-deliver   = data.aws_iam_policy_document.relay_deliver[0].json

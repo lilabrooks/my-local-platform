@@ -37,6 +37,9 @@ func (f *fakeExecutor) Run(arguments []string, environment []string, output io.W
 	if len(arguments) > 1 {
 		target = arguments[1]
 	}
+	if len(arguments) > 2 && arguments[0] == "python3" {
+		target = arguments[2]
+	}
 	values := f.statuses[target]
 	status := 0
 	if len(values) > 0 {
@@ -198,6 +201,51 @@ func TestValidateSessionRequiresFixedDeadlines(t *testing.T) {
 	session.DestroyDeadline = utcText(testStarted.Add(149 * time.Minute))
 	if _, _, _, err := validateSession(session, testRunID, testCommit); err == nil || !strings.Contains(err.Error(), "fixed deadlines") {
 		t.Fatalf("got %v, want fixed deadline error", err)
+	}
+}
+
+func TestPreSessionRefusalDoesNotSpendRunOrDestroy(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(".evidence/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", ".gitignore"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git fixture: %v %s", err, out)
+		}
+	}
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = root
+	head, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.TrimSpace(string(head))
+	raw := prepareRun(t, root)
+	for _, name := range []string{"00-preflight.json", "capture-plan.json", "06-go-no-go.json"} {
+		path := filepath.Join(raw, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(data), testCommit, commit)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &fakeExecutor{statuses: map[string][]int{"verify-go-no-go": {2}}}
+	c := &controller{root: root, runID: testRunID, commit: commit, profile: "fixture", region: "us-east-1", executor: executor}
+	if status := c.run(make(chan os.Signal)); status != 2 {
+		t.Fatalf("status = %d", status)
+	}
+	if len(executor.calls) != 1 || !slices.Contains(executor.calls[0], "--before-session") {
+		t.Fatalf("unexpected commands: %v", executor.calls)
+	}
+	for _, name := range []string{"00-session.json", "controller-state.json", ".controller.lock"} {
+		if _, err := os.Stat(filepath.Join(raw, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("refusal left %s: %v", name, err)
+		}
 	}
 }
 

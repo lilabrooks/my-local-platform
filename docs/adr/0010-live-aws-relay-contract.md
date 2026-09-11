@@ -79,15 +79,31 @@ M4 uses EKS Pod Identity rather than IRSA. AWS recommends Pod Identity for new
 EKS workloads when the SDK supports it, and the pinned KEDA 2.20.2 build uses
 an AWS SDK version newer than the published Pod Identity minimum.
 
-Five Kubernetes service accounts define the boundary:
+Six Kubernetes service accounts define the boundary:
 
 | Service account | AWS role authority |
 |---|---|
 | `relay-bootstrap` | connect to MSK and create or describe the two exact relay topics |
+| `relay-capture` | connect to MSK, describe/read both exact relay topics, write controlled poison to the delivery topic; describe/alter only the separate `relay-capture` group |
 | `relay-ingest` | connect to MSK, describe the delivery topic and consumer group, write the delivery topic, and read broker group offsets for metrics |
 | `relay-deliver` | connect to MSK, describe/read the delivery topic and group, alter the consumer group, and write the DLQ |
 | `keda-operator` | connect to MSK and read only the delivery topic and `relay-deliver` group lag |
 | `sink` | none |
+
+The owner approved the dedicated capture identity on 2026-09-10. The existing
+roles could not read the DLQ, leaving the planned evidence collector without
+authority for its proof. Extending the delivery role would put those reads in
+the long-running workload; reusing the bootstrap role would combine evidence
+capture with topic creation. The separate role is used only by operator-created
+short-lived capture Jobs. No Deployment uses it.
+
+The collector reads fixed partition offsets without joining a consumer group.
+[AWS documents group permissions as dependencies of ReadData](https://docs.aws.amazon.com/msk/latest/developerguide/kafka-actions.html),
+so the policy includes them on the separate `relay-capture` group only. It
+cannot alter `relay-deliver`, create topics, or write the DLQ. Replay remains
+on the delivery identity, after its consumers stop. Local tests cannot prove
+MSK authorization; a live authorization failure ends the attempt and starts
+cleanup. Any wider permissions require another owner decision.
 
 Policies use the exact cluster, topic, and group ARNs created for the run. KEDA
 uses `identityOwner: keda`, so the scaler uses the operator association rather
@@ -152,20 +168,53 @@ which avoids the client-side last-applied annotation. Secret values never enter
 command arguments, command output, an evidence file, or a temporary credential
 file. The Secret supplies:
 
-- `DATABASE_URL` to relay and the database seed Job;
+- `DATABASE_URL` to relay, the database seed Job, and the operator-only capture Job;
 - the signing key to the sink and seed Job.
 
 The seed Job inserts the same signing key into the subscription row. Relay
 therefore continues to read subscriber secrets from Postgres, as it does
-locally. A retry reuses the signing value already in Secrets Manager, then
-reruns the idempotent topic and database setup. The short-lived Kubernetes
+locally. Topic and database setup remain idempotent, but the operator command
+now claims each run once. A failed bootstrap ends that attempt. The short-lived Kubernetes
 Secret is scoped to namespace `mlp`, consumed only by the named workload and
-bootstrap specifications, and disappears with the cluster.
+bootstrap and capture specifications, and disappears with the cluster.
 
 The original accepted mechanism used a mode-0600 temporary directory with a
 cleanup trap. Packaging the operator in Go made that handoff unnecessary. The
 implemented path keeps the same secret boundary and removes the
 credential-file cleanup failure mode.
+
+### Post-destroy secret scanning
+
+The preparation implementation writes a private `secret-scan.json`, bound to
+the run, source commit, and exact session-receipt hash. It contains byte lengths
+and SHA-256 digests, never credential values. The controller initializes it as
+`not_started`; bootstrap claims the run exclusively, persists `collecting`
+before retrieval, and records a generated signing key before storing that key.
+Only complete password, signing-key, and database-URL coverage permits a full
+publication. Partial coverage permits a failed packet containing only typed
+cleanup statuses, with all free-text diagnostics withheld.
+
+The fixed representation profile covers raw UTF-8, Go and Python ASCII JSON
+escaping, URL userinfo and query escaping, padded standard base64, and unpadded
+URL-safe base64. The complete database URL is fingerprinted separately because
+base64 of a URL does not contain base64 of its password. The publisher checks
+raw and sanitized text, including JSON string carriers and decoded Kafka
+`key`, `value`, and `raw_value` base64 carriers up to four layers, and
+binds its receipt to the private fingerprint file. Capture checks artifacts
+before writing them; command failures withhold raw stderr and Job diagnostics.
+
+This detects covered representations of known credentials. It does not inspect
+pixels, secret fragments, arbitrary encodings, or secrets obtained outside this
+bootstrap. A local writer could replace both evidence and hashes; this is not
+an authenticated attestation. Fingerprints also permit guesses against weak
+values, so they stay mode `0600` in the ignored run directory, retained through
+final publication. Human screenshot review remains required.
+
+Implementation verification on 2026-09-10: `go -C tools/m4-bootstrap test ./...`
+and the later `make test` Go phase passed a Go-produced/Python-consumed receipt
+test, raw and encoded canary rejection, a competing bootstrap claim, and a
+fingerprint-write failure before Secrets Manager mutation. This is local test
+evidence; live bootstrap and post-destroy publication have not run.
 
 The relay image includes the checksum-pinned `us-east-1` RDS CA bundle. Both
 the bootstrap Job and relay use it with `sslmode=verify-full`, so the private
@@ -250,7 +299,7 @@ lives under `docs/evidence/m4/<run-id>/` and uses these names:
 | `01-identity.txt` | redacted repository and caller identity, state backend, budget, quota capacity, regional offerings, and EKS support |
 | `02-prices.md` | dated source URLs, rates, quantities, arithmetic, and $1.25/hour gate result |
 | `03-plan-summary.json` | capture time, Terraform input hash, resource addresses, types, counts, and enforced topology result; no secret values |
-| `04-inventory-before.json` | tagged inventory plus service-native EKS, MSK, RDS, EC2, EBS, Elastic IP, ELB, ECR, NAT, and log-group queries |
+| `04-inventory-before.json` | tagged inventory plus service-native EKS, MSK, RDS, EC2, EBS, Elastic IP, ELBv2, ECR, NAT, and log-group queries |
 | `05-images.json` | source commit, both immutable tags, and deployed digests |
 | `06-go-no-go.json` | one run-and-commit-bound decision over identity, prices, plan, empty inventory, images, capture order, limits, and cleanup owner |
 | `10-event.json` | accepted event, idempotent repeat, and persisted event identity |
@@ -263,7 +312,7 @@ lives under `docs/evidence/m4/<run-id>/` and uses these names:
 | `20-destroy.txt` | destroy command, exit status, and empty dev Terraform state |
 | `21-inventory-after.json` | the same inventories as `04`, with no runtime resource remaining |
 | `22-cost-immediate.txt` | provisional Cost Explorer and month-to-date output |
-| `23-cost-final.txt` | final attributed cost captured after billing data has settled |
+| `23-cost-final.txt` | validated JSON with settled account-wide daily service totals over the session's UTC dates; not exact M4 attribution |
 
 The screenshot set is `grafana-lag.png`, `tempo-trace.png`,
 `argocd-apps.png`, and `terminal-demo.png`. Console screenshots are optional;
@@ -281,13 +330,47 @@ The tagging API is not cleanup proof because it omits some untagged or
 service-created resources. The before and after inventories therefore pair it
 with service-native queries. Destroy is complete only when Terraform reports
 no dev resources and the explicit queries find no M4 EKS cluster, MSK cluster,
-RDS instance, NAT gateway, Elastic IP, load balancer, worker instance or
+RDS instance, NAT gateway, Elastic IP, ELBv2 load balancer, worker instance or
 volume, dev ECR repository, or M4 CloudWatch log group. The bootstrap state
-bucket survives.
+bucket survives. Load-balancer coverage is limited to ELBv2 names or Project
+tags matched by the inventory helper. Classic ELBs and arbitrary untagged
+resources are outside that proof; any unexpected resource still stops the run
+and requires explicit recovery evidence.
 
-The immediate cost capture is provisional. `23-cost-final.txt` is captured no
-earlier than 48 hours after destroy, or later if AWS still reports incomplete
-data. Closing #97 requires that final cost and the empty inventories.
+The owner approved the following evidence changes on 2026-09-11:
+
+- #96 may publish its own sanitized, historical staging packet under
+  `docs/evidence/m4-staging/<run-id>/` from a separate checkout. It binds the
+  eight GO inputs and grants no execution authority. #97 need not run first.
+  Historical verification binds GO's recorded plan hash to its preserved
+  summary; it does not require the shared executable plan to survive later
+  runs. The paid execution gate still requires that exact binary plan.
+- A failed or lost controller keeps an immutable failed-publication snapshot.
+  Missing command outcomes remain `unknown`, or `not_run` when the controller
+  explicitly records an identity refusal. Manual cleanup produces a separate
+  append-only packet under `docs/evidence/m4-recovery/<run-id>/<observation-id>/`.
+  Fresh identity, intended dev S3 backend/default workspace, empty state, and
+  in-scope empty inventory are required to claim recovery. The demonstration
+  remains failed.
+- Final cost accepts clearly labeled shared-account totals. `make aws-cost-final`
+  collects no earlier than 48 hours after cleanup, using daily `UnblendedCost`
+  grouped by `SERVICE`, filtered to the intended `LINKED_ACCOUNT`. The UTC
+  interval includes the apply-start date through the cleanup-finish date, with
+  the next date as the exclusive end. Every page and date must be present and
+  every AWS `Estimated` flag false. Collection time and session/controller
+  hashes bind the result. These totals cannot establish exact M4 attribution.
+
+The immediate cost capture remains provisional. Closing #97 requires a passing
+demonstration, successful controller evidence, empty inventories, and that
+settled final-cost packet. Overdue cleanup or a controller evidence error
+cannot publish as a full pass, even when resources are gone.
+
+Exact resource-level attribution would require a different billing contract
+and evidence source. Revisit this choice if the account totals are needed to
+compare M4 runs or audit the $5 per-run maximum; the accepted totals cannot
+answer either question. Keeping recovery in the original controller record
+would erase its failure history, and tying staging publication to a live pass
+would leave #96 without its own completion evidence.
 
 ## Issue handoff and terminal conditions
 
@@ -660,6 +743,35 @@ No AWS command ran for these checks. Real account identity, state, budget,
 quota, regional availability, inventory, ECR, and price evidence still belong
 to the separately authorized staging run.
 
+Verification of the 2026-09-11 preparation revision, without an AWS account call
+or cluster mutation:
+
+- `make test` passed all 7 race-enabled Go modules and 169 Python tests. The
+  tests cover delayed Deployment creation and initial scrapes, queued-load
+  cancellation, pre-session refusal, duplicate/read-only capture, publication
+  receipt binding, base64 secret carriers, settled-cost pagination across UTC
+  month boundaries, failed snapshots, scoped recovery, and standalone staging.
+- `make terraform-check` validated all 3 stacks and passed 8 mocked contracts.
+  `make k8s-validate` found 104 valid resources, 59 intentional skips, and no
+  invalid resources or errors. `make aws-preflight-check` passed the repository
+  and capture-protocol checks.
+- A targeted Codex subagent source review found no remaining material defect
+  in the revised proof-result checks, recovery bindings, or staging publisher.
+  It did not run the tests or review the full implementation again. Claude's
+  final rereview and the clean-candidate cluster rehearsal remain outstanding.
+
+These checks establish local behavior. Real credentials, backend metadata,
+cost responses, IAM authorization, and cleanup still require the separately
+authorized staging and live runs.
+
+The next 2026-09-11 follow-up separated historical GO verification from the
+executable plan, retaining strict binary checks for paid execution. After the
+metric-retry and wait-deadline corrections, Python discovery passed 176 tests
+and the focused capture/staging/publication suites passed 50. Offline
+`helm template` against cached chart 88.5.4 with the shared and AWS values
+confirmed no scrape-interval override for kube-state-metrics; the chart values
+document a 30-second default. Monitoring configuration stayed unchanged.
+
 ## Sources
 
 - [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
@@ -679,4 +791,5 @@ to the separately authorized staging run.
 - [ECR `DescribeImages`](https://docs.aws.amazon.com/AmazonECR/latest/APIReference/API_DescribeImages.html)
 - [Docker build platform option](https://docs.docker.com/reference/cli/docker/buildx/build/#set-the-target-platforms-for-the-build---platform)
 - [AWS Budgets data refresh](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html)
+- [Cost Explorer GetCostAndUsage](https://docs.aws.amazon.com/cli/latest/reference/ce/get-cost-and-usage.html)
 - [Resource Groups Tagging API `GetResources`](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/API_GetResources.html)

@@ -8,10 +8,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import ipaddress
 import os
 from pathlib import Path
 import re
 import subprocess
+import urllib.request
 import sys
 import tempfile
 from typing import Any
@@ -139,6 +141,7 @@ def parse_args() -> argparse.Namespace:
     verify.add_argument("--plan", required=True, type=Path)
     verify.add_argument("--summary", required=True, type=Path)
     verify.add_argument("--output", required=True, type=Path)
+    verify.add_argument("--before-session", action="store_true")
     return parser.parse_args()
 
 
@@ -1127,16 +1130,16 @@ def build_go_no_go(
     }
 
 
-def verify_go_no_go(
+def verify_go_receipt(
     run_id: str,
     commit: str,
     region: str,
     packet_path: Path,
-    plan_path: Path,
     summary_path: Path,
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    """Validate dated GO inputs without reading the shared executable plan."""
     packet = read_json(packet_path, "go/no-go packet")
     require_bound(packet, "go/no-go packet", run_id, commit, region)
     require_passed_gate(packet, "go/no-go packet")
@@ -1149,17 +1152,122 @@ def verify_go_no_go(
         timedelta(hours=24),
     )
     plan = packet.get("plan")
-    if not isinstance(plan, dict) or plan.get("sha256") != hash_file(plan_path):
-        raise StageError("go/no-go packet does not match the reviewed plan")
+    summary = read_json(summary_path, "plan summary")
+    if (
+        not isinstance(plan, dict)
+        or not isinstance(plan.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", plan["sha256"])
+        or plan["sha256"] != summary.get("plan_sha256")
+    ):
+        raise StageError("go/no-go packet does not match the recorded plan hash")
     inputs = packet.get("input_sha256")
     if not isinstance(inputs, dict) or inputs.get("plan") != hash_file(summary_path):
         raise StageError("go/no-go packet does not match the reviewed summary")
+    names = {
+        "preflight": "00-preflight.json",
+        "identity": "01-identity.txt",
+        "prices_markdown": PRICE_OUTPUT_NAME,
+        "prices": PRICE_DATA_NAME,
+        "plan": "03-plan-summary.json",
+        "inventory": "04-inventory-before.json",
+        "images": OUTPUT_NAME,
+        "capture_plan": "capture-plan.json",
+    }
+    if set(inputs) != set(names):
+        raise StageError("go/no-go packet has an incomplete input manifest")
+    raw = packet_path.parent
+    current = now or datetime.now(timezone.utc)
+    for name, filename in names.items():
+        path = ensure_private_run_path(run_id, raw / filename, filename)
+        if not path.is_file() or inputs[name] != hash_file(path):
+            raise StageError(
+                f"staged {name} changed after go/no-go; regenerate the packet"
+            )
+    for name, field in (
+        ("identity", "captured_at"),
+        ("plan", "captured_at"),
+        ("inventory", "captured_at"),
+        ("prices", "checked_at"),
+    ):
+        value = read_json(raw / names[name], name)
+        parse_recent_utc(
+            value.get(field),
+            f"original {name} observation",
+            current,
+            timedelta(hours=24),
+        )
+    revalidate_price_receipt(
+        read_json(raw / PRICE_DATA_NAME, "prices"), run_id, commit, region, now=current
+    )
     cleanup_owner = packet.get("cleanup_owner")
     if not isinstance(cleanup_owner, str) or not cleanup_owner.strip():
         raise StageError("go/no-go packet has no cleanup owner")
     if packet.get("abort_command") != "make aws-down":
         raise StageError("go/no-go packet has the wrong abort command")
     return packet
+
+
+def verify_go_no_go(
+    run_id: str,
+    commit: str,
+    region: str,
+    packet_path: Path,
+    plan_path: Path,
+    summary_path: Path,
+    *,
+    now: datetime | None = None,
+    before_session: bool = False,
+) -> dict[str, Any]:
+    """Execution additionally requires the exact binary plan, with no fallback."""
+    current = now or datetime.now(timezone.utc)
+    packet = verify_go_receipt(
+        run_id, commit, region, packet_path, summary_path, now=current
+    )
+    if packet["plan"]["sha256"] != hash_file(plan_path):
+        raise StageError("go/no-go packet does not match the reviewed plan")
+    if before_session:
+        # Validate at actual time first (including future-date rejection), then
+        # leave the full controller-to-apply allowance within every expiry.
+        verify_go_no_go(
+            run_id,
+            commit,
+            region,
+            packet_path,
+            plan_path,
+            summary_path,
+            now=current + timedelta(minutes=15),
+        )
+    return packet
+
+
+def verify_operator_address(plan_path: Path, runner: Runner) -> None:
+    """Read the saved plan, not current tfvars, before starting the paid clock."""
+    plan = runner.json(
+        [
+            "terraform",
+            "-chdir=infra/terraform/envs/dev",
+            "show",
+            "-json",
+            str(plan_path.absolute()),
+        ]
+    )
+    value = plan.get("variables", {}).get("eks_operator_cidr", {}).get("value")
+    try:
+        network = ipaddress.IPv4Network(value, strict=True)
+        if network.prefixlen != 32:
+            raise ValueError("not a /32")
+        with urllib.request.urlopen(
+            "https://checkip.amazonaws.com", timeout=10
+        ) as response:
+            address = ipaddress.IPv4Address(response.read(128).decode().strip())
+    except (OSError, ValueError, TypeError) as error:
+        raise StageError(
+            "could not validate the current operator IPv4 against the saved plan"
+        ) from error
+    if address != network.network_address:
+        raise StageError(
+            "operator IPv4 changed; re-plan and review a new GO packet before starting"
+        )
 
 
 def main() -> int:
@@ -1211,7 +1319,11 @@ def main() -> int:
                 output,
                 args.plan,
                 args.summary,
+                before_session=args.before_session,
             )
+            if args.before_session:
+                require_clean_commit(args.commit, Runner())
+                verify_operator_address(args.plan, Runner())
             result = f"verified GO packet: {output}"
         else:
             output = ensure_private_run_path(args.run_id, args.output)

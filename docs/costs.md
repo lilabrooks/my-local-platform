@@ -164,8 +164,10 @@ the short-lived signing value, streams the Kubernetes Secret, and runs the
 idempotent MSK topic and RDS schema setup inside the VPC. Its deadline cannot
 outlive the paid session, and it rechecks the controller before mutations and
 throughout the Job. A stale input, stopped controller, wrong cluster context,
-or failed bootstrap stops deployment; the paid-session deadline remains
-unchanged.
+or failed bootstrap ends the attempt. Run deployment through
+`make aws-live-capture`: it requests controller cleanup on failure and skips
+the remaining commands. Do not retry inside the paid window. The controller's
+deadline remains the backstop, not the normal response to a failed bootstrap.
 
 The apply does not create a fresh plan. It requires a fresh
 `06-go-no-go.json`, checks that packet against the binary plan and safe summary,
@@ -245,6 +247,18 @@ controller deletes project-prefixed EKS and MSK groups before it runs the final
 inventory. A manual recovery must do the same.
 
 ## A note on billing alerts
+
+For #97, `make aws-cost-final AWS_RUN_ID=<run-id>` collects settled daily
+`UnblendedCost` by service over the session's UTC dates, filtered to the
+intended account. It requires at least 48 hours after cleanup, all response
+pages, every date, and `Estimated: false`. The receipt is validated before
+final publication.
+
+The owner accepted this scope on 2026-09-11. Shared-account totals include
+unrelated activity and cannot establish exact M4 attribution or audit the
+$5 per-run maximum. The foreground controller's deadlines and reviewed
+resource shape remain the operational spend controls. See
+[the accepted evidence contract](adr/0010-live-aws-relay-contract.md#evidence-and-redaction).
 
 The persistent budget sends email when actual monthly spend passes $4, when it
 passes $5, or when forecasted monthly spend passes $5. The account gate refuses

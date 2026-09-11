@@ -17,6 +17,108 @@ SPEC.loader.exec_module(PREFLIGHT)
 
 
 class M4PreflightTest(unittest.TestCase):
+    def test_rehearsals_require_clean_exact_candidate_and_actual_cleanup_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_id = "20260910T180000Z"
+            commit = "a" * 40
+            raw = root / ".evidence" / "m4-local" / run_id
+            raw.mkdir(parents=True)
+            base = {
+                "schema_version": 1,
+                "result": "passed",
+                "source_commit": commit,
+                "worktree_clean": True,
+            }
+            values = {
+                "k8s-sigterm.json": {
+                    **base,
+                    "cleanup": {
+                        k: True
+                        for k in (
+                            "sink_baseline_restored",
+                            "keda_pause_restored",
+                            "port_forwards_stopped",
+                            "database_lock_released",
+                        )
+                    },
+                },
+                "demo-rehearsal.json": {
+                    **base,
+                    "cleanup": {
+                        k: True
+                        for k in (
+                            "keda_pause_absent",
+                            "sink_baseline_restored",
+                            "verification_port_forward_stopped",
+                        )
+                    },
+                    "observations": {
+                        "final_lag": 0,
+                        "final_consumers": 1,
+                        "peak_lag": 500,
+                        "peak_consumers": 5,
+                        "replay_completed": True,
+                    },
+                },
+                "abort-rehearsal.json": {
+                    **base,
+                    "signal": "SIGTERM",
+                    **{
+                        k: True
+                        for k in (
+                            "resource_audit_empty",
+                            "temporary_credentials_removed",
+                            "temporary_workspace_removed",
+                            "credential_canary_absent",
+                        )
+                    },
+                },
+                "capture-result.json": {
+                    **base,
+                    "run_id": run_id,
+                    "environment": "local",
+                    "cleanup_verified": True,
+                    "provenance": {
+                        role: [
+                            {
+                                "image_revision": commit,
+                                "pod": role,
+                                "pod_uid": "fixture-uid",
+                                "image_id": "sha256:fixture",
+                            }
+                        ]
+                        for role in ("relay-ingest", "relay-deliver", "sink")
+                    },
+                    "files": {
+                        name: PREFLIGHT.hashlib.sha256(b"{}").hexdigest()
+                        for name in PREFLIGHT.CAPTURE_FILES
+                    },
+                },
+            }
+            for filename in PREFLIGHT.CAPTURE_FILES:
+                (raw / filename).write_text("{}")
+            for filename, value in values.items():
+                (raw / filename).write_text(json.dumps(value))
+            self.assertEqual(
+                len(PREFLIGHT.check_local_rehearsals(root, run_id, commit)["sha256"]), 4
+            )
+            artifact = raw / "10-event.json"
+            artifact.write_text("changed")
+            with self.assertRaisesRegex(PREFLIGHT.PreflightError, "artifact changed"):
+                PREFLIGHT.check_local_rehearsals(root, run_id, commit)
+            artifact.write_text("{}")
+            path = raw / "k8s-sigterm.json"
+            for change in (
+                {"source_commit": "b" * 40},
+                {"worktree_clean": False},
+                {"result": "failed"},
+                {"cleanup": {}},
+            ):
+                path.write_text(json.dumps({**values[path.name], **change}))
+                with self.assertRaises(PREFLIGHT.PreflightError):
+                    PREFLIGHT.check_local_rehearsals(root, run_id, commit)
+
     def terraform_fixture(self, root: Path) -> Path:
         directory = root / "infra" / "terraform" / "envs" / "dev"
         directory.mkdir(parents=True)

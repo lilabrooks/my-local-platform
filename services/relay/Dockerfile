@@ -26,7 +26,10 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/relay-replay ./cmd/relay-replay && \
     CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w" \
-      -o /out/relay-bootstrap ./cmd/relay-bootstrap
+      -o /out/relay-bootstrap ./cmd/relay-bootstrap && \
+    CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w" \
+      -o /out/relay-capture ./cmd/relay-capture
 
 # scratch: no shell, no package manager, nothing to exploit.
 #
@@ -42,6 +45,7 @@ COPY --from=build /etc/ssl/certs/rds-us-east-1-bundle.pem /etc/ssl/certs/rds-us-
 COPY --from=build /out/relay /relay
 COPY --from=build /out/relay-replay /relay-replay
 COPY --from=build /out/relay-bootstrap /relay-bootstrap
+COPY --from=build /out/relay-capture /relay-capture
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.revision="${VERSION}"

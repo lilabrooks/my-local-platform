@@ -1,6 +1,8 @@
 # Live AWS relay validation runbook
 
-Status: Contract accepted on 2026-09-05. The deployment render, local
+Status: Review fixes implemented on 2026-09-11; clean-candidate rehearsal and
+separate staging approval still required.
+Contract accepted on 2026-09-05. The deployment render, local
 rehearsal, staging gates, live-run controller, persistent cost alert, capture
 order, and evidence sanitizer are implemented. The real-account receipts and
 live AWS validation remain open. No command on this page authorizes an AWS
@@ -37,7 +39,7 @@ Only the EKS API endpoint is public, limited to the operator's current address.
 Use `kubectl port-forward` for the sink, ArgoCD, Grafana, and Tempo. Do not add
 an ingress or load balancer during the session.
 
-Pod Identity associations belong to `relay-bootstrap`, `relay-ingest`,
+Pod Identity associations belong to `relay-capture`, `relay-bootstrap`, `relay-ingest`,
 `relay-deliver`, and `keda-operator`. The sink has no AWS role. KEDA uses
 `identityOwner: keda`.
 
@@ -100,8 +102,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=<in-cluster collector>
 Topic names, the `relay-deliver` group, retry schedule, application behavior,
 metrics, and traces remain the M3 contract.
 
-The relay image contains `/relay` and the operator-only `/relay-replay`
-command. Both use the settings above for every broker operation. In IAM mode,
+The relay image contains `/relay`, `/relay-replay`, and the operator-only
+`/relay-capture` command. All use the settings above for broker operations. In IAM mode,
 relay loads the ambient AWS SDK credential provider once at startup and keeps
 its refresh-aware credential cache. The adapter asks the pinned AWS MSK IAM
 signer for a fresh 15-minute token from kafka-go's per-connection SASL `Start`
@@ -145,18 +147,18 @@ The AWS root Application is deliberately untracked. #96 records the approved
 commit and two ECR digests. Render the bundle during #97 only after its
 separately authorized apply has also produced the MSK IAM broker endpoint:
 
-```bash
-make aws-kubeconfig
-make aws-k8s-render \
-  AWS_RUN_ID="$run_id" \
-  AWS_APPROVED_COMMIT="$commit" \
-  AWS_RELAY_IMAGE="$relay_image_by_digest" \
-  AWS_SINK_IMAGE="$sink_image_by_digest" \
-  AWS_MSK_BOOTSTRAP="$msk_iam_brokers"
-```
+Use `make aws-live-capture` after successful apply, as shown under Live proof.
+It reads `.image_references.relay` and `.image_references.sink` from
+`06-go-no-go.json`, and reads `msk_bootstrap_brokers` from dev Terraform state
+under that packet's AWS profile. These are the renderer's inputs; the operator
+does not transcribe them. The helper writes a run-private kubeconfig, verifies
+its explicit context against the EKS API endpoint, and passes that same path
+and context to bootstrap and all three installers.
 
-The command writes only beneath ignored `.evidence/m4/<run-id>/rendered/`. It
-does not contact Kubernetes or mutate AWS. It also requires both image values
+The `aws-k8s-render` subcommand writes only beneath ignored
+`.evidence/m4/<run-id>/rendered/` and does not contact Kubernetes or mutate AWS.
+The enclosing `aws-live-capture` command deploys and runs the proof inside the
+authorized live window. The renderer also requires both image values
 to match `06-go-no-go.json` for this run and commit. Its outputs are:
 
 | File | Role |
@@ -175,17 +177,10 @@ Issue #136 owns those broker and database initialization steps; it runs only
 after #97's separately authorized infrastructure apply has produced the
 endpoints and the live controller reports a successful apply.
 Install KEDA and the AWS monitoring values before the child Applications sync,
-then pass the generated root directly to the installer:
-
-```bash
-make aws-runtime-bootstrap \
-  AWS_RUN_ID="$run_id" \
-  AWS_APPROVED_COMMIT="$commit"
-make keda-install
-make monitoring-install-aws
-make argocd-install-aws \
-  AWS_ROOT_APPLICATION=".evidence/m4/$run_id/rendered/root-app.json"
-```
+then pass the generated root directly to the installer. The bounded capture
+helper owns this ordering. It stops on the first failed command and requests
+controller cleanup before returning failure. Do not run the individual
+installers as an alternative paid workflow.
 
 `aws-runtime-bootstrap` verifies that the current Kubernetes context points at
 the EKS endpoint from Terraform state. It also requires a fresh live-controller
@@ -197,13 +192,33 @@ signing value, streams `relay-secrets` with server-side apply, creates a one-sho
 Job from the approved relay image, waits up to four minutes, and prints only
 topic names, partition counts, and the active-subscription count. The relay
 image carries the checksum-pinned `us-east-1` RDS CA bundle used by
-`sslmode=verify-full`. Repeating the command reuses the signing value and reruns
-idempotent topic and database setup.
+`sslmode=verify-full`. Bootstrap is a single attempt per run ID. Any failure
+ends the attempt; do not retry it inside the same paid window.
 
-Those commands target the current Kubernetes context. Their presence is not
+The helper targets the verified explicit context. Its presence is not
 permission to run them. #95 rehearses their ordering locally, #136 packages the
 adapter, #96 stages the inputs with separate owner approval, and #97 is the only
 issue authorized to use the paid EKS cluster after a new approval.
+
+Deployment has its own deadline: the controller's destroy deadline minus a
+20-minute proof reserve. Bootstrap, KEDA, monitoring, and ArgoCD command bounds
+are 330, 660, 660, and 1,860 seconds respectively, covering their child waits.
+The earlier deployment/session deadline still wins. The helper waits for
+ArgoCD-created Deployments and Services before rollout and port-forward, then
+allows up to 180 seconds for a fresh one-member, one-replica, zero-lag baseline.
+The proof gets at most 20 minutes; no timeout extends the paid session.
+
+Metric samples allow up to 30 seconds of age for the relay's 15-second scrape
+interval, and 60 seconds for the chart-managed replica series. The cached
+88.5.4 chart documents a 30-second default; rendering the AWS values leaves
+kube-state-metrics on that default. This changes the observation tolerance,
+not the monitoring configuration. Recheck it when changing the chart or scrape
+intervals.
+
+A missing or stale sample is retried within the original baseline, 480-second
+load, or 120-second replay-drain window. It cannot prove scale, release the
+sink delay, or satisfy the final drain. Persistent staleness fails at the
+existing deadline; other capture errors still stop immediately.
 
 All rendered workload Services are `ClusterIP`; no AWS overlay contains an
 Ingress. Grafana and ArgoCD are reached through `kubectl port-forward`. Tempo
@@ -214,12 +229,31 @@ cluster.
 
 ## Before staging
 
-First run the controlled Kubernetes shutdown rehearsal from the candidate
-commit. Keep its receipt outside the live packet:
+With the local stack and telemetry running, build and load the exact clean
+candidate first. Keep ArgoCD synced to that candidate; a different Git-managed
+image or ConfigMap makes this rehearsal invalid.
+
+```bash
+commit=$(git rev-parse HEAD)
+make m4-images M4_SOURCE_COMMIT="$commit"
+minikube image load relay:dev sink:dev -p mlp
+kubectl --context mlp -n mlp rollout restart \
+  deployment/relay-ingest deployment/relay-deliver deployment/sink
+for app in relay-ingest relay-deliver sink; do
+  kubectl --context mlp -n mlp rollout status "deployment/$app" --timeout=180s
+done
+```
+
+Then run the controlled Kubernetes shutdown rehearsal. Keep its receipt outside
+the live packet:
 
 ```bash
 local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
 make m4-k8s-sigterm M4_LOCAL_RUN_ID="$local_run_id"
+make m4-local-demo M4_LOCAL_RUN_ID="$local_run_id"
+make m4-local-capture M4_LOCAL_RUN_ID="$local_run_id"
+make aws-live-rehearse
+make m4-local-abort M4_LOCAL_RUN_ID="$local_run_id"
 ```
 
 This deliberately terminates one local ingest pod and one local delivery pod.
@@ -230,13 +264,19 @@ inside the configured grace period. See
 for prerequisites and the exact checks. A passing local receipt is not AWS
 authorization.
 
+Build and load the candidate's relay and sink images first, with the local
+stack and telemetry running. All four receipts must name this exact clean
+commit and a passing result; the capture receipt must include image provenance
+and verified local control restoration. A dirty-tree development pass cannot
+substitute for this gate. Complete the visual rehearsal as well.
+
 Create a UTC run id, then run the account-independent preflight from the exact
 commit whose images will be staged:
 
 ```bash
 run_id=$(date -u +%Y%m%dT%H%M%SZ)
 commit=$(git rev-parse HEAD)
-make aws-preflight AWS_RUN_ID="$run_id"
+make aws-preflight AWS_RUN_ID="$run_id" M4_LOCAL_RUN_ID="$local_run_id"
 ```
 
 The command requires a clean worktree. It checks the recorded M3 closure,
@@ -265,7 +305,22 @@ The #96 staging issue must capture these files under the raw evidence directory:
 - `06-go-no-go.json`: one cross-check of every staged gate, the cleanup owner,
   image digests, capture order, and stop limits.
 
-Create the persistent cost alert first under the separate #96 approval. Copy
+Inspect the account-scoped state bucket before initializing guardrails. Under
+the separate #96 approval, confirm the intended account, then make this
+read-only check using the selected profile:
+
+```bash
+make aws-whoami
+env -i HOME="$HOME" PATH="$PATH" AWS_REGION=us-east-1 \
+  AWS_PROFILE="${AWS_PROFILE_NAME:-aws-public-change-feed}" \
+  bash -c 'aws s3api head-bucket --bucket "mlp-tfstate-$(aws sts get-caller-identity --query Account --output text)"'
+```
+
+An access error does not prove absence. Resolve it before proceeding. Only if
+the bucket is confirmed absent and the #96 approval covers its creation, run
+`make aws-bootstrap`. Both guardrails and dev use this bucket.
+
+Then create the persistent cost alert under the separate #96 approval. Copy
 the private variable example, replace its email address, review the saved plan,
 and apply that exact plan:
 
@@ -335,10 +390,33 @@ unknown or missing rate, a different run or commit, and a recomputed total over
 $1.25/hour. It writes itemized `02-prices.md` plus a private JSON sidecar used by
 the release gate. This step reads local files only.
 
+Apply the cheap dev tier before capturing inventory or staging images. Keep
+hourly flags disabled in ignored variable files and pass them explicitly here:
+
+```bash
+make aws-plan AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit" \
+  AWS_TF_ARGS='-var enable_eks=false -var enable_msk=false -var enable_rds=false'
+jq '{shape, planned_hourly_resource_counts, created_hourly_resource_counts, gate}' \
+  ".evidence/m4/$run_id/03-plan-summary.json"
+```
+
+Review all actions, including deletions and migrations. Stop unless every
+hourly flag is false, every hourly resource count is zero, and the gate passes.
+Only after that review and the separate cheap-apply approval:
+
+```bash
+cp -p ".evidence/m4/$run_id/03-plan-summary.json" \
+  ".evidence/m4/$run_id/03-plan-summary-cheap.json"
+make aws-up AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit"
+```
+
+This applies the saved plan. Keep the cheap summary privately because the next
+plan replaces `03-plan-summary.json`.
+
 The inventory combines `resourcegroupstaggingapi get-resources` with explicit
 EKS, MSK, RDS, EC2, EBS, Elastic IP, ELB, ECR, NAT gateway, and CloudWatch
 log-group queries. The tagging API alone is insufficient. Capture the
-pre-apply inventory with the account selected for staging:
+pre-hourly-apply inventory after cheap apply, with the account selected for staging:
 
 ```bash
 make aws-inventory-empty \
@@ -349,7 +427,8 @@ make aws-inventory-empty \
 
 The helper writes only to the ignored run directory with mode `0600`. It checks
 project tags, names, Kubernetes cluster tags, and service-native results. ECR
-repositories are allowed because they belong to the cheap tier. Any matching
+repositories are allowed before the run; GO requires exactly the two staged
+repositories. They are forbidden in `21-inventory-after.json`. Any matching
 EKS, MSK, RDS, EC2, EBS, Elastic IP, load balancer, NAT gateway, or log group
 makes the command fail after preserving the receipt. Reuse the same command
 after destroy with `AWS_INVENTORY_FILE` set to
@@ -380,6 +459,21 @@ make aws-inspect-images \
   AWS_APPROVED_COMMIT="$commit"
 ```
 
+Now replace the cheap plan with the hourly plan, without applying it:
+
+```bash
+operator_ip=$(curl -fsS https://checkip.amazonaws.com)
+make aws-plan AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit" \
+  AWS_TF_ARGS="-var enable_eks=true -var enable_msk=true -var enable_rds=true -var eks_operator_cidr=$operator_ip/32"
+jq '{shape, planned_hourly_resource_counts, created_hourly_resource_counts, gate}' \
+  ".evidence/m4/$run_id/03-plan-summary.json"
+```
+
+Require all three flags true, the fixed resource counts, the intended IPv4
+`/32`, and a passing gate. Every re-plan removes the previous plan, summary,
+and GO packet. Replanning or rewriting a receipt requires a new GO and another
+review; do not apply or alter the state after this plan is approved.
+
 After identity, budget, quota, availability, plan, inventory, and image
 receipts all pass, write the final staging decision:
 
@@ -394,9 +488,33 @@ The target makes no AWS request. It checks that every input names this run,
 commit, and region, requires a clean exact HEAD, recomputes the price comparison,
 checks both digest-pinned `linux/amd64` images, and records SHA-256 hashes of its
 inputs. The controller makes `make aws-up` read this packet again, compare its
-plan and summary hashes, and verify the fresh controller receipt immediately
+complete input manifest and original observation ages, and verify the fresh controller receipt immediately
 before apply. An hourly `make aws-up` outside the controller is refused. Any
 missing, stale, or mixed receipt leaves the paid apply blocked.
+
+Before creating `00-session.json`, the controller repeats GO validation with
+a 15-minute freshness reserve, covering the guarded apply's 15-minute allowance.
+Original observation ages remain authoritative at apply.
+
+Issue #96 may publish independently after its staging criteria pass. Supply a separate
+checkout so tracked evidence cannot dirty the candidate awaiting #97:
+
+```bash
+python3 scripts/m4-publication-extra.py stage --run-id "$run_id" \
+  --redactions-file ".evidence/m4/$run_id/redactions.json" \
+  --publication-root /absolute/path/to/evidence-checkout
+```
+
+Use `verify-stage` with the same arguments to read it back. The packet under
+`docs/evidence/m4-staging/<run-id>/` records the dated GO inputs; it does not
+claim they remain fresh or authorize a later apply.
+
+Historical publication checks the plan hash recorded in GO against the
+run-specific, hash-bound plan summary. It never reads the shared executable
+plan, which may have been removed or replaced by a later run. Execution still
+requires that binary plan and a matching hash. Preserve GO and all eight input
+files: replanning under the same run ID removes its GO and summary, and those
+missing historical inputs cannot be reconstructed from a later plan.
 
 Trace one image and configuration value through its producer, generated AWS
 Application, ArgoCD load, Deployment, running pod, and evidence output. Trace
@@ -406,6 +524,12 @@ consumer, and a denied action outside its authority.
 ## Live proof
 
 The paid run repeats M3's outcome on the fixed AWS topology:
+
+Refresh the selected SSO login with `make aws-login` immediately before the
+run. Check credential recovery for cleanup; login alone does not prove a
+three-hour credential lifetime. The controller rechecks the current IPv4
+against the planned `/32` before spending the run ID. A changed address needs
+a new plan, GO, and review.
 
 Start the controller in a dedicated terminal after the separate hourly-run
 approval:
@@ -421,6 +545,24 @@ Starting this target authorizes both the reviewed apply and automatic cleanup.
 It uses `caffeinate -i` on macOS, creates `00-session.json` immediately before
 apply, and remains in the foreground. Keep the Mac powered, open, and online.
 Use another terminal for the capture commands below.
+
+After the controller reports a successful apply, execute the single bounded
+deployment and machine-capture path in that second terminal:
+
+```bash
+make aws-live-capture AWS_RUN_ID="$run_id" AWS_APPROVED_COMMIT="$commit" \
+  AWS_KUBE_CONTEXT="mlp-aws-$run_id"
+```
+
+It owns port-forwards, the fixed cohorts, capture Jobs, and output validation.
+Every command rechecks the controller. Failure requests cleanup and skips all
+remaining proof steps. Do not retry bootstrap or capture within the same run.
+On success, take the screenshots below and request stop promptly.
+
+A failure after session creation spends the run ID and triggers full dev
+destroy, including staged ECR images. The pre-session refusal is earlier and
+does not spend it. Any later attempt needs fresh evidence and separate owner
+authority for the staging and paid work it requires.
 
 The guarded apply must reach its final controller check within 15 minutes of
 that timestamp. This allows for backend initialization and the last plan,
@@ -448,42 +590,12 @@ make aws-live-stop AWS_RUN_ID="$run_id"
 
 Replay uses the same consumer group as `relay-deliver`. Kafka refuses the
 offset reset while that group has an active member, and KEDA's minimum of one
-means `kubectl scale` cannot hold the Deployment at zero. Pause the
-ScaledObject, wait for every delivery pod to leave the group, create the
-generated Job, and always remove the pause annotation afterward:
-
-```bash
-(
-set -euo pipefail
-
-restore_relay() {
-  kubectl -n mlp annotate scaledobject relay-deliver \
-    autoscaling.keda.sh/paused-replicas-
-}
-trap restore_relay EXIT INT TERM
-
-kubectl -n mlp annotate scaledobject relay-deliver \
-  autoscaling.keda.sh/paused-replicas=0 --overwrite
-kubectl -n mlp wait --for=delete pod \
-  -l app.kubernetes.io/name=relay-deliver --timeout=120s
-
-replay_job=$(kubectl -n mlp create \
-  -f ".evidence/m4/$run_id/rendered/relay-replay.json" -o name)
-kubectl -n mlp wait --for=condition=complete "$replay_job" --timeout=90s
-kubectl -n mlp logs "$replay_job" \
-  | tee ".evidence/m4/$run_id/16-replay.txt"
-
-restore_relay
-trap - EXIT INT TERM
-)
-```
-
-Use `kubectl create`, not `kubectl apply`: the Job deliberately uses
-`generateName` so every replay has a distinct evidence source. Preserve its
-stdout before deleting the Job; it is the raw offset-reset input that #97
-correlates with event and delivery results in `16-replay.json`. If pausing,
-waiting, replay, or evidence capture fails, the trap still restores normal
-delivery; keep the failure as evidence rather than extending the paid run.
+means `kubectl scale` cannot hold the Deployment at zero. The capture helper
+pauses the ScaledObject, waits for delivery pods to leave, creates a one-shot
+replay Job under `relay-deliver`, then removes the pause. Its export retains
+the offset-reset result, selected event, before/after successful delivery
+counts, and final lag and replica sample. A failure ends the paid proof and
+requests destroy; it does not authorize a manual replay retry.
 
 Save the machine-readable results as `10-event.json`, `11-attempts.json`,
 `12-metrics.txt`, `13-trace.json`, `14-keda.txt`, `15-dlq.json`, and
@@ -604,10 +716,14 @@ to both the terminal and `20-destroy.txt`. Its direct AWS CLI calls use a
 10-second connection timeout, a 30-second read timeout, one CLI attempt, and a
 45-second process limit. The controller owns the visible identity retry.
 
-Cleanup is complete only when the dev Terraform state is empty and no M4 EKS
+Cleanup requires an empty dev Terraform state and no matching M4 EKS
 cluster, MSK cluster, RDS instance, NAT gateway, Elastic IP, load balancer,
 worker instance or volume, dev ECR repository, or M4 log group remains. An
-empty tagging response on its own does not pass.
+empty tagging response on its own does not pass. The inventory covers ELBv2
+load balancers matched by name or Project tag, not Classic ELBs or every
+possible untagged resource. This is a check of the fixed topology, not an
+account-wide absence guarantee; an unexpected resource ends the proof and
+requires explicit recovery evidence.
 
 `cleanup_verified: true` records those two empty checks. Cost Explorer,
 destroy, log cleanup, and transcript failures keep their own exit fields. If
@@ -622,17 +738,39 @@ start a resource hunt solely because immediate cost capture failed.
 heartbeat is more than 5 seconds old. A spent run cannot be restarted because
 `00-session.json` already exists. Keep its files and recover in this order:
 
-1. Run `make aws-whoami` and compare the account with
-   `.evidence/m4/$run_id/01-identity.txt`. Stop if they differ.
-2. Run `make aws-init`, then `make aws-down`. If destroy reports
+First preserve the failed snapshot, before refreshing any raw identity receipt:
+
+```bash
+make aws-evidence-publish AWS_RUN_ID="$run_id" AWS_EVIDENCE_PHASE=failed \
+  AWS_REDACTIONS_FILE=".evidence/m4/$run_id/redactions.json"
+```
+
+If already published, use `aws-evidence-verify` with those arguments. Never edit
+the controller result to claim a pass or overwrite its original exports. The
+snapshot binds the original account and profile for recovery.
+Older failed packets without those snapshot bindings fail verification. Do not
+backfill them from refreshed raw inputs; preserve them and request owner review.
+
+1. Set `profile=$(jq -er '.aws_profile' ".evidence/m4/$run_id/failed-publication/06-go-no-go.json")`.
+   If credentials expired, run `make aws-login AWS_PROFILE_NAME="$profile"`.
+   A failed login or identity
+   check leaves cleanup unverified. Then run
+   `make aws-whoami AWS_PROFILE_NAME="$profile"` and compare the account with
+   `.evidence/m4/$run_id/failed-publication/01-identity.txt`. Stop if they differ.
+2. Confirm that the controller and every Terraform process from this attempt
+   are gone. Check `terraform -chdir=infra/terraform/envs/dev workspace show`
+   in a shell without `TF_WORKSPACE` or `TF_DATA_DIR` overrides; require
+   `default`. An unexpected workspace requires owner review before recovery.
+   Run `make aws-init AWS_PROFILE_NAME="$profile" AWS_REAL_REGION=us-east-1`,
+   then `make aws-down AWS_PROFILE_NAME="$profile" AWS_REAL_REGION=us-east-1`.
+   If destroy reports
    `Error acquiring the state lock`, first confirm that no Terraform apply or
    destroy process from this run is active. Copy the lock ID from the error,
    then release that exact lock and retry destroy:
 
    ```bash
    lock_id=replace-with-the-lock-id-from-terraform
-   profile=${AWS_PROFILE_NAME:-aws-public-change-feed}
-   region=${AWS_REAL_REGION:-us-east-1}
+   region=us-east-1
    env -i \
      HOME="$HOME" \
      PATH="$PATH" \
@@ -641,6 +779,7 @@ heartbeat is more than 5 seconds old. A spent run cannot be restarted because
      AWS_REGION="$region" \
      AWS_DEFAULT_REGION="$region" \
      TF_VAR_region="$region" \
+     TF_WORKSPACE=default \
      terraform -chdir=infra/terraform/envs/dev force-unlock "$lock_id"
    make aws-down AWS_PROFILE_NAME="$profile" AWS_REAL_REGION="$region"
    ```
@@ -650,7 +789,6 @@ heartbeat is more than 5 seconds old. A spent run cannot be restarted because
    `/aws/msk/mlp-`:
 
    ```bash
-   profile=${AWS_PROFILE_NAME:-aws-public-change-feed}
    for prefix in /aws/eks/mlp- /aws/msk/mlp-; do
      aws logs describe-log-groups \
        --profile "$profile" \
@@ -669,17 +807,49 @@ heartbeat is more than 5 seconds old. A spent run cannot be restarted because
    done
    ```
 
-4. Run `make aws-state-empty`.
-5. Run the after-destroy `make aws-inventory-empty` command above with
-   `AWS_INVENTORY_FILE=".evidence/m4/$run_id/21-inventory-after.json"`.
-6. Run `make aws-cost >".evidence/m4/$run_id/22-cost-immediate.txt"`.
+4. Once the controller and Terraform processes are gone, collect a new read-only
+   recovery observation and publish it:
 
-The run remains failed even after manual cleanup. Keep the recovery output with
-its spent run id.
+   ```bash
+   observation_id=$(date -u +%Y%m%dT%H%M%SZ)
+   python3 scripts/m4-publication-extra.py collect-recovery \
+     --run-id "$run_id" --observation-id "$observation_id" \
+     --redactions-file ".evidence/m4/$run_id/redactions.json"
+   python3 scripts/m4-publication-extra.py publish-recovery \
+     --run-id "$run_id" --observation-id "$observation_id" \
+     --redactions-file ".evidence/m4/$run_id/redactions.json"
+   ```
 
-No earlier than 48 hours after destroy, capture the settled attributed cost in
-`23-cost-final.txt`. Wait longer if AWS still marks the data incomplete. #97
-closes only after the final cost and empty inventories are present.
+Use `verify-recovery` with the same arguments to read it back. The collector
+checks fresh STS identity, the initialized dev S3 backend and default workspace,
+empty Terraform state, and the complete scoped inventory including ECR. It
+rejects backend credential/endpoint overrides. Failed or absent checks yield
+`cleanup_unverified`; a later attempt gets a new observation ID. These commands
+perform no destroy, login, initialization, or lock repair. The destructive
+recovery steps above remain subject to owner authority and process checks.
+
+The original demonstration remains failed after recovery. Both the failed
+snapshot and the linked recovery packet are retained; #97 stays open.
+
+Failed and recovery publication write beneath `docs/evidence/` in the
+executing checkout, so that checkout becomes dirty. They run after the failed
+attempt and do not offer staging's separate-publication-root option. Preserve
+the packets for review and a separately authorized commit; use another clean
+checkout of the approved candidate for a later attempt. Do not delete recovery
+history to satisfy the clean-tree gate. Keep the private run directory with
+its public packets for verification.
+
+### Settled cost after a passing run
+
+At least 48 hours after cleanup, run
+`make aws-cost-final AWS_RUN_ID="$run_id"`. It writes validated JSON to
+`23-cost-final.txt` using the session's UTC dates and intended account, grouped
+daily by service. It follows all pages and refuses any estimated result or
+missing date. Keep waiting if AWS still reports estimated data.
+
+The owner accepted these shared-account totals on 2026-09-11. They include
+other activity in the same account and do not establish exact M4 attribution
+or prove the $5 per-run maximum. `make aws-cost` remains a month-to-date view.
 
 ## Sanitizing evidence
 
@@ -695,20 +865,26 @@ offsets, metrics, and exit status.
 Before staging the sanitized directory, scan it for the known account id,
 endpoints, and secret values. Any match blocks the commit.
 
-Do this after destroy. Create a mode-0600 JSON file under the raw run directory
-with the exact values the scanner must remove. Keep the real file ignored:
+Do this after destroy. Bootstrap has already recorded private fingerprints of
+the credentials and their supported encodings, bound to the session receipt.
+Keep `secret-scan.json` until final publication. Do not recover or copy deleted
+credentials. Create a mode-0600 JSON file for the non-credential redactions:
 
 ```json
 {
   "schema_version": 1,
   "values": {
     "ACCOUNT_ID": "replace-with-the-known-account-id",
-    "DATABASE_PASSWORD": "replace-with-the-fetched-database-password",
-    "OPERATOR": "replace-with-the-session-username",
-    "SIGNING_SECRET": "replace-with-the-fetched-signing-secret"
+    "OPERATOR": "replace-with-the-session-username"
   }
 }
 ```
+
+The publisher rejects plaintext credential fields, missing or incomplete scan
+coverage, changed session bindings, and known raw or encoded credentials.
+For a failed attempt, use `AWS_EVIDENCE_PHASE=failed`: this publishes only typed
+terminal cleanup statuses, never a demonstration pass. It works with a valid
+`not_started` or partial scan receipt while withholding raw diagnostics.
 
 Record a human visual review in ignored `visual-review.json`. It must name the
 run id, reviewer, UTC review time, `"result": "passed"`, and every required
@@ -748,10 +924,14 @@ The command copies only the named allowlist, replaces sensitive text with
 stable bracketed tokens, validates every JSON file, checks the screenshot
 review, and records SHA-256 hashes in `publication.json`. Any missing file,
 unknown published file, leak, malformed screenshot, or later edit fails
-verification.
+verification. Full publication also requires a clean passing AWS capture,
+unchanged export hashes, and a successful, non-overdue controller with every
+cleanup and evidence check passing. Desired replicas alone cannot prove scale:
+the capture requires fresh broker group membership above one, then one member
+with zero lag and one desired replica at the end.
 
-At least 48 hours after destroy, write `23-cost-final.txt` under the raw run
-directory and repeat the command with `AWS_EVIDENCE_PHASE=final`. This verifies
+After `aws-cost-final` succeeds, repeat the publication command with
+`AWS_EVIDENCE_PHASE=final`. This verifies
 the provisional packet before adding the settled cost. Use
 `make aws-evidence-verify` with the same variables to recheck either phase.
 
