@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -236,6 +238,11 @@ func writeRunFiles(t *testing.T, root string, now time.Time, msk string) {
 			t.Fatal(err)
 		}
 	}
+	session, err := os.ReadFile(filepath.Join(raw, "00-session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRunFile(t, root, "secret-scan.json", secretScan{Version: 1, RunID: testRunID, Commit: testCommit, SessionHash: fmt.Sprintf("%x", sha256.Sum256(session)), Profile: "m4-secret-representations-v1", State: "not_started", Entries: []scanEntry{}})
 }
 
 func readRunFile[T any](t *testing.T, root, name string) T {
@@ -528,6 +535,9 @@ func TestRunBindsInputsAndKeepsSecretsOutOfArgumentsAndOutput(t *testing.T) {
 	sessionDeadline := now.Add(time.Minute)
 	session.DestroyDeadline = sessionDeadline.Format(time.RFC3339)
 	writeRunFile(t, root, "00-session.json", session)
+	scan := readRunFile[secretScan](t, root, "secret-scan.json")
+	scan.SessionHash = fmt.Sprintf("%x", sha256.Sum256(jsonBytes(t, session)))
+	writeRunFile(t, root, "secret-scan.json", scan)
 	outputs := outputDocument(t, map[string]string{
 		"eks_cluster_name":        "mlp-dev",
 		"msk_bootstrap_brokers":   msk,
@@ -536,7 +546,7 @@ func TestRunBindsInputsAndKeepsSecretsOutOfArgumentsAndOutput(t *testing.T) {
 		"sink_signing_secret_arn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:signing-secret",
 	})
 	signing := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	password := "p@ss word"
+	password := "p@ss word long enough"
 	var console bytes.Buffer
 	runner := &fakeRunner{requireDeadline: true, handle: func(_ []byte, arguments []string) ([]byte, error) {
 		joined := strings.Join(arguments, " ")
@@ -654,7 +664,7 @@ func TestRunStopsBeforeJobWhenControllerStartsDestroying(t *testing.T) {
 		case strings.Contains(joined, "get-secret-value") && strings.Contains(joined, "secret:signing"):
 			return secretJSON(t, signing), nil
 		case strings.Contains(joined, "get-secret-value") && strings.Contains(joined, "secret:rds"):
-			return secretJSON(t, `{"username":"platform","password":"private"}`), nil
+			return secretJSON(t, `{"username":"platform","password":"private password long"}`), nil
 		case joined == "kubectl apply --server-side --field-manager=mlp-bootstrap -f -" && bytes.Contains(stdin, []byte(signing)):
 			state := readRunFile[controllerState](t, root, "controller-state.json")
 			state.Phase = "destroying"
@@ -706,7 +716,7 @@ func TestWaitForJobReturnsFailedConditionImmediately(t *testing.T) {
 		processRunning: func(int) bool { return true },
 	}
 	err := app.waitForJob(context.Background(), "job.batch/relay-bootstrap-failed", testRunID, testCommit, "us-east-1")
-	if err == nil || !strings.Contains(err.Error(), "BackoffLimitExceeded: container exited 1") {
+	if err == nil || err.Error() != "relay bootstrap Job failed" {
 		t.Fatalf("error = %v", err)
 	}
 	if len(runner.calls) != 1 {

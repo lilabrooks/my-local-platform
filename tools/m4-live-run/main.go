@@ -103,29 +103,30 @@ type accountReceipt struct {
 }
 
 type controllerState struct {
-	SchemaVersion      int    `json:"schema_version"`
-	RunID              string `json:"run_id"`
-	Commit             string `json:"commit"`
-	Operator           string `json:"operator"`
-	Region             string `json:"region"`
-	ControllerPID      int    `json:"controller_pid"`
-	CreatedAt          string `json:"created_at"`
-	UpdatedAt          string `json:"updated_at"`
-	Phase              string `json:"phase"`
-	Result             string `json:"result,omitempty"`
-	StopReason         string `json:"stop_reason,omitempty"`
-	ApplyExit          *int   `json:"apply_exit,omitempty"`
-	DestroyStartedAt   string `json:"destroy_started_at,omitempty"`
-	DestroyExit        *int   `json:"destroy_exit,omitempty"`
-	LogCleanupPassed   *bool  `json:"log_cleanup_passed,omitempty"`
-	TerraformStateExit *int   `json:"terraform_state_exit,omitempty"`
-	TranscriptPassed   *bool  `json:"transcript_passed,omitempty"`
-	InventoryExit      *int   `json:"inventory_exit,omitempty"`
-	CostExit           *int   `json:"cost_exit,omitempty"`
-	CleanupFinishedAt  string `json:"cleanup_finished_at,omitempty"`
-	CleanupOverdue     bool   `json:"cleanup_overdue"`
-	CleanupVerified    *bool  `json:"cleanup_verified,omitempty"`
-	Error              string `json:"error,omitempty"`
+	SchemaVersion        int    `json:"schema_version"`
+	RunID                string `json:"run_id"`
+	Commit               string `json:"commit"`
+	Operator             string `json:"operator"`
+	Region               string `json:"region"`
+	ControllerPID        int    `json:"controller_pid"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
+	Phase                string `json:"phase"`
+	Result               string `json:"result,omitempty"`
+	StopReason           string `json:"stop_reason,omitempty"`
+	ApplyExit            *int   `json:"apply_exit,omitempty"`
+	DestroyStartedAt     string `json:"destroy_started_at,omitempty"`
+	DestroyExit          *int   `json:"destroy_exit,omitempty"`
+	LogCleanupPassed     *bool  `json:"log_cleanup_passed,omitempty"`
+	TerraformStateExit   *int   `json:"terraform_state_exit,omitempty"`
+	TranscriptPassed     *bool  `json:"transcript_passed,omitempty"`
+	InventoryExit        *int   `json:"inventory_exit,omitempty"`
+	CostExit             *int   `json:"cost_exit,omitempty"`
+	CleanupFinishedAt    string `json:"cleanup_finished_at,omitempty"`
+	CleanupBlockedReason string `json:"cleanup_blocked_reason,omitempty"`
+	CleanupOverdue       bool   `json:"cleanup_overdue"`
+	CleanupVerified      *bool  `json:"cleanup_verified,omitempty"`
+	Error                string `json:"error,omitempty"`
 }
 
 type stopRequest struct {
@@ -961,6 +962,7 @@ func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
 		c.state.Error = identityErr.Error()
 		c.state.TranscriptPassed = boolPointer(transcriptPassed)
 		c.state.CleanupVerified = boolPointer(false)
+		c.state.CleanupBlockedReason = "identity_unverified"
 		_ = c.updateState("cleanup_failed")
 		fmt.Fprintln(os.Stderr, identityErr)
 		fmt.Fprintln(os.Stderr, recovery)
@@ -1111,6 +1113,18 @@ func (c *controller) run(signalChannel <-chan os.Signal) (exitCode int) {
 	_, _ = fmt.Fprintf(lock, "%d\n", os.Getpid())
 	_ = lock.Close()
 	defer func() { _ = os.Remove(lockPath) }()
+
+	// Refuse stale or rewritten staging inputs and a changed operator IP before
+	// creating a spent session or entering the cleanup path that deletes ECR.
+	if status := c.executor.Run([]string{
+		"python3", filepath.Join(c.root, "scripts", "m4-stage.py"), "verify-go-no-go",
+		"--run-id", c.runID, "--commit", c.commit, "--region", c.region,
+		"--plan", filepath.Join(c.root, "infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan"),
+		"--summary", filepath.Join(c.raw, "03-plan-summary.json"),
+		"--output", filepath.Join(c.raw, "06-go-no-go.json"), "--before-session",
+	}, restrictedAWSEnvironment(c.profile, c.region), os.Stderr); status != 0 {
+		return status
+	}
 
 	c.state = controllerState{
 		SchemaVersion: 1,

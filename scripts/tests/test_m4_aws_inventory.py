@@ -22,6 +22,18 @@ def tagged() -> list[dict[str, str]]:
 
 
 class InventoryTest(unittest.TestCase):
+    def test_after_inventory_rejects_ecr_while_staging_allows_it(self):
+        inventory = {
+            "counts": {"ecr": 2},
+            "runtime_empty": True,
+            "runtime_resources_present": {},
+        }
+        INVENTORY.require_cleanup_inventory(inventory, Path("04-inventory-before.json"))
+        self.assertTrue(inventory["runtime_empty"])
+        INVENTORY.require_cleanup_inventory(inventory, Path("21-inventory-after.json"))
+        self.assertFalse(inventory["runtime_empty"])
+        self.assertEqual(inventory["runtime_resources_present"]["ecr"], 2)
+
     def responses(self) -> dict[tuple[str, str], dict]:
         return {
             ("resourcegroupstaggingapi", "get-resources"): {

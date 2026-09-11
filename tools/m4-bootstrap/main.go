@@ -45,11 +45,9 @@ type commandError struct {
 }
 
 func (e *commandError) Error() string {
-	detail := strings.TrimSpace(e.stderr)
-	if detail == "" {
-		detail = e.err.Error()
-	}
-	return fmt.Sprintf("%s: %s", strings.Join(e.arguments, " "), detail)
+	// Subprocess diagnostics can echo Secret stdin or secret API responses.
+	// Keep stderr in memory for typed error handling, never in a transcript.
+	return fmt.Sprintf("%s failed: %v", e.arguments[0], e.err)
 }
 
 func (e *commandError) Unwrap() error { return e.err }
@@ -345,12 +343,23 @@ func (a *application) getSecret(ctx context.Context, arn string) (string, error)
 	return parseSecret(value, "Secrets Manager response")
 }
 
-func (a *application) signingSecret(ctx context.Context, arn string, beforeStore func() error) (string, error) {
+func (a *application) signingSecret(ctx context.Context, arn string, beforeStore func() error, recorders ...func(string) error) (string, error) {
+	record := func(value string) error {
+		for _, recorder := range recorders {
+			if err := recorder(value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	existing, err := a.getSecret(ctx, arn)
 	if err == nil {
 		decoded, decodeErr := base64.RawURLEncoding.DecodeString(existing)
 		if decodeErr != nil || len(decoded) != 32 {
 			return "", errors.New("existing sink signing secret is not a 256-bit base64url value")
+		}
+		if err := record(existing); err != nil {
+			return "", err
 		}
 		return existing, nil
 	}
@@ -362,6 +371,9 @@ func (a *application) signingSecret(ctx context.Context, arn string, beforeStore
 		return "", fmt.Errorf("generate sink signing secret: %w", err)
 	}
 	generated := base64.RawURLEncoding.EncodeToString(randomBytes)
+	if err := record(generated); err != nil {
+		return "", err
+	}
 	if beforeStore != nil {
 		if err := beforeStore(); err != nil {
 			return "", fmt.Errorf("controller stopped before storing sink signing secret: %w", err)
@@ -426,10 +438,22 @@ func secretManifest(database, signing string) ([]byte, error) {
 }
 
 func redacted(value []byte, sensitive ...string) []byte {
-	text := string(value)
+	// Only the bootstrap binary's fixed non-secret success records may leave
+	// this process. Arbitrary diagnostics can contain nested encoded secrets.
+	var allowed strings.Builder
+	for _, line := range strings.Split(string(value), "\n") {
+		if line == "topic mlp.relay.deliveries partitions=12 ready" ||
+			line == "topic mlp.relay.deliveries.dlq partitions=1 ready" ||
+			line == "relay database ready active_subscriptions=19" {
+			allowed.WriteString(line + "\n")
+		}
+	}
+	text := allowed.String()
 	for _, secret := range sensitive {
 		if secret != "" {
-			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+			for _, representation := range secretRepresentations(secret) {
+				text = strings.ReplaceAll(text, representation, "[REDACTED]")
+			}
 		}
 	}
 	return []byte(text)
@@ -585,8 +609,7 @@ func (a *application) waitForJob(ctx context.Context, jobName, runID, commit, re
 			case "Complete":
 				return nil
 			case "Failed":
-				detail := strings.TrimSpace(strings.Join([]string{condition.Reason, condition.Message}, ": "))
-				return fmt.Errorf("relay bootstrap Job failed: %s", detail)
+				return errors.New("relay bootstrap Job failed")
 			}
 		}
 		select {
@@ -656,7 +679,14 @@ func (a *application) run(ctx context.Context, runID, commit, region string) err
 	if err := controllerActive(); err != nil {
 		return err
 	}
-	signing, err := a.signingSecret(ctx, signingSecretARN, controllerActive)
+	scanner, err := openSecretScan(a.root, runID, commit)
+	if err != nil {
+		return err
+	}
+	if err := scanner.begin(); err != nil {
+		return err
+	}
+	signing, err := a.signingSecret(ctx, signingSecretARN, controllerActive, func(value string) error { return scanner.record("SIGNING_SECRET", value) })
 	if err != nil {
 		return err
 	}
@@ -671,6 +701,15 @@ func (a *application) run(ctx context.Context, runID, commit, region string) err
 	var databaseCredential rdsSecret
 	if err := json.Unmarshal([]byte(rdsValue), &databaseCredential); err != nil {
 		return errors.New("RDS master secret changed after validation")
+	}
+	if err := scanner.record("DATABASE_PASSWORD", databaseCredential.Password); err != nil {
+		return err
+	}
+	if err := scanner.record("DATABASE_URL", database); err != nil {
+		return err
+	}
+	if err := scanner.complete(); err != nil {
+		return err
 	}
 	secret, err := secretManifest(database, signing)
 	if err != nil {
@@ -713,7 +752,7 @@ func (a *application) run(ctx context.Context, runID, commit, region string) err
 	}
 	jobName := strings.TrimSpace(string(created))
 	if !jobPattern.MatchString(jobName) {
-		return fmt.Errorf("kubectl returned invalid bootstrap Job name %q", jobName)
+		return errors.New("kubectl returned invalid bootstrap Job name")
 	}
 	jobContext, stopWaiting := context.WithTimeout(ctx, jobWaitTimeout)
 	waitErr := a.waitForJob(jobContext, jobName, runID, commit, region)

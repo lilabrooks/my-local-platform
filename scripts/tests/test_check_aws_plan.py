@@ -223,9 +223,7 @@ class GuardScriptTest(unittest.TestCase):
         account_id = "".join(("1234", "5678", "9012"))
         source_commit = "a" * 40
         evidence_root = self.repository / ".evidence" / "m4"
-        run_id = datetime(1970, 1, 1, tzinfo=timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ"
-        )
+        run_id = datetime(1970, 1, 1, tzinfo=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         evidence = evidence_root / run_id
         evidence.mkdir(parents=True)
         self.run_id = run_id
@@ -393,6 +391,25 @@ esac
         )
 
     def _write_go_packet(self):
+        from scripts.tests.test_m4_stage import ImageStageTest
+
+        fixture = self.evidence.parent.parent.parent / "release-fixture"
+        release = ImageStageTest().write_release_inputs(fixture, self.run_id)
+        names = {
+            "preflight": "00-preflight.json",
+            "identity": "01-identity.txt",
+            "prices_markdown": "02-prices.md",
+            "prices": "02-prices.json",
+            "plan": "03-plan-summary.json",
+            "inventory": "04-inventory-before.json",
+            "images": "05-images.json",
+            "capture_plan": "capture-plan.json",
+        }
+        for key, filename in names.items():
+            if key not in {"preflight", "plan"}:
+                (self.evidence / filename).write_bytes(
+                    (release / filename).read_bytes()
+                )
         packet = {
             "schema_version": 1,
             "run_id": self.run_id,
@@ -406,7 +423,8 @@ esac
             "cleanup_owner": "test-operator",
             "abort_command": "make aws-down",
             "input_sha256": {
-                "plan": hashlib.sha256(self.summary.read_bytes()).hexdigest(),
+                key: hashlib.sha256((self.evidence / name).read_bytes()).hexdigest()
+                for key, name in names.items()
             },
             "gate": {"passed": True, "failures": []},
         }
@@ -423,9 +441,9 @@ esac
                     "region": "us-east-1",
                     "operator": "test-operator",
                     "billable_started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "destroy_deadline": (
-                        started + timedelta(minutes=150)
-                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "destroy_deadline": (started + timedelta(minutes=150)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
                     "hard_deadline": (started + timedelta(minutes=180)).strftime(
                         "%Y-%m-%dT%H:%M:%SZ"
                     ),

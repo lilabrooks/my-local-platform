@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterable, Mapping
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,16 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 M3_RECEIPT = ROOT / "docs" / "evidence" / "m3" / "20260905" / "closure.json"
 HOURLY_FLAGS = ("enable_eks", "enable_msk", "enable_rds")
+CAPTURE_FILES = (
+    "10-event.json",
+    "11-attempts.json",
+    "12-metrics.txt",
+    "13-trace.json",
+    "14-keda.txt",
+    "15-dlq.json",
+    "16-replay.json",
+    "application-logs.txt",
+)
 REQUIRED_COMMANDS = (
     "aws",
     "docker",
@@ -536,6 +547,128 @@ def require_commands() -> None:
         raise PreflightError("required command(s) missing: " + ", ".join(missing))
 
 
+def check_local_rehearsals(
+    root: Path, local_run_id: str, commit: str
+) -> dict[str, Any]:
+    """Require exact-candidate machine receipts; this does not attest AWS behavior."""
+    validate_run_id(local_run_id)
+    raw = root / ".evidence" / "m4-local" / local_run_id
+    ensure_no_symlink(raw, root)
+    receipts = {}
+    hashes = {}
+    for filename in (
+        "k8s-sigterm.json",
+        "demo-rehearsal.json",
+        "abort-rehearsal.json",
+        "capture-result.json",
+    ):
+        path = raw / filename
+        ensure_no_symlink(path, root)
+        if not path.is_file() or path.stat().st_size > 1024 * 1024:
+            raise PreflightError(
+                f"local rehearsal receipt missing or oversized: {filename}"
+            )
+        try:
+            value = json.loads(path.read_text())
+        except (ValueError, OSError) as error:
+            raise PreflightError(
+                f"invalid local rehearsal receipt: {filename}"
+            ) from error
+        if (
+            not isinstance(value, dict)
+            or type(value.get("schema_version")) is not int
+            or value.get("schema_version") != 1
+            or value.get("result") != "passed"
+            or value.get("source_commit") != commit
+            or value.get("worktree_clean") is not True
+        ):
+            raise PreflightError(
+                f"local rehearsal is not a clean pass for the candidate: {filename}"
+            )
+        receipts[filename] = value
+        hashes[filename] = hashlib.sha256(path.read_bytes()).hexdigest()
+    cleanup = {
+        "k8s-sigterm.json": (
+            "sink_baseline_restored",
+            "keda_pause_restored",
+            "port_forwards_stopped",
+            "database_lock_released",
+        ),
+        "demo-rehearsal.json": (
+            "keda_pause_absent",
+            "sink_baseline_restored",
+            "verification_port_forward_stopped",
+        ),
+    }
+    for filename, fields in cleanup.items():
+        value = receipts[filename].get("cleanup")
+        if not isinstance(value, dict) or any(value.get(k) is not True for k in fields):
+            raise PreflightError(f"local cleanup incomplete: {filename}")
+    demo = receipts["demo-rehearsal.json"].get("observations", {})
+    if (
+        demo.get("final_lag") != 0
+        or demo.get("final_consumers") != 1
+        or demo.get("replay_completed") is not True
+        or not isinstance(demo.get("peak_lag"), (int, float))
+        or demo["peak_lag"] <= 0
+        or not isinstance(demo.get("peak_consumers"), int)
+        or demo["peak_consumers"] <= 1
+    ):
+        raise PreflightError("local demonstration observations are incomplete")
+    abort = receipts["abort-rehearsal.json"]
+    if abort.get("signal") != "SIGTERM" or any(
+        abort.get(k) is not True
+        for k in (
+            "resource_audit_empty",
+            "temporary_credentials_removed",
+            "temporary_workspace_removed",
+            "credential_canary_absent",
+        )
+    ):
+        raise PreflightError("local abort evidence is incomplete")
+    capture = receipts["capture-result.json"]
+    if (
+        capture.get("run_id") != local_run_id
+        or capture.get("environment") != "local"
+        or capture.get("cleanup_verified") is not True
+        or not capture.get("provenance")
+    ):
+        raise PreflightError("local capture provenance or cleanup is incomplete")
+    provenance = capture["provenance"]
+    if not isinstance(provenance, dict) or set(provenance) != {
+        "relay-ingest",
+        "relay-deliver",
+        "sink",
+    }:
+        raise PreflightError("local capture image provenance is incomplete")
+    for pods in provenance.values():
+        if not isinstance(pods, list) or not pods:
+            raise PreflightError("local capture image provenance is incomplete")
+        for pod in pods:
+            if (
+                not isinstance(pod, dict)
+                or pod.get("image_revision") != commit
+                or not all(
+                    isinstance(pod.get(k), str) and pod[k]
+                    for k in ("pod", "pod_uid", "image_id")
+                )
+            ):
+                raise PreflightError("local capture image provenance does not match")
+    files = capture.get("files")
+    if not isinstance(files, dict) or set(files) != set(CAPTURE_FILES):
+        raise PreflightError("local capture artifact manifest is incomplete")
+    for filename in CAPTURE_FILES:
+        path = raw / filename
+        ensure_no_symlink(path, root)
+        if (
+            not path.is_file()
+            or path.stat().st_size > 8 * 1024 * 1024
+            or files[filename] != hashlib.sha256(path.read_bytes()).hexdigest()
+        ):
+            raise PreflightError("local capture artifact changed or is missing")
+    return {"run_id": local_run_id, "source_commit": commit, "sha256": hashes}
+
+
 def check_clean_head(root: Path) -> str:
     commit = command_output(["git", "rev-parse", "HEAD"], cwd=root).strip()
     if not COMMIT_RE.fullmatch(commit):
@@ -655,6 +788,9 @@ def run_preflight(root: Path, run_id: str, environment: Mapping[str, str]) -> Pa
         )
         commit = check_clean_head(root)
         payload["commit"] = commit
+        payload["local_rehearsals"] = check_local_rehearsals(
+            root, environment.get("M4_LOCAL_RUN_ID", ""), commit
+        )
         checks.append(
             {"name": "clean source commit", "command": "git status", "result": "passed"}
         )
@@ -662,6 +798,7 @@ def run_preflight(root: Path, run_id: str, environment: Mapping[str, str]) -> Pa
         lint_environment.update({"LINT_STRICT": "1", "LINT_SKIP_OK": "golangci-lint"})
         run_step("repository lint", ["make", "lint"], checks, lint_environment)
         run_step("local tests", ["make", "test"], checks)
+        run_step("live controller rehearsal", ["make", "aws-live-rehearse"], checks)
         run_step(
             "M4 workload images",
             ["make", "m4-images", f"M4_SOURCE_COMMIT={commit}"],

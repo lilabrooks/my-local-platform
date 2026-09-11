@@ -154,8 +154,10 @@ run "live_runtime_matches_the_accepted_shape" {
 
   assert {
     condition = (
-      length(aws_iam_role.pod_identity) == 4 &&
-      length(aws_eks_pod_identity_association.runtime) == 4 &&
+      length(aws_iam_role.pod_identity) == 5 &&
+      length(aws_eks_pod_identity_association.runtime) == 5 &&
+      aws_eks_pod_identity_association.runtime["relay-capture"].namespace == "mlp" &&
+      aws_eks_pod_identity_association.runtime["relay-capture"].service_account == "relay-capture" &&
       aws_eks_pod_identity_association.runtime["relay-bootstrap"].namespace == "mlp" &&
       aws_eks_pod_identity_association.runtime["relay-bootstrap"].service_account == "relay-bootstrap" &&
       aws_eks_pod_identity_association.runtime["relay-ingest"].namespace == "mlp" &&
@@ -165,7 +167,30 @@ run "live_runtime_matches_the_accepted_shape" {
       aws_eks_pod_identity_association.runtime["keda-operator"].namespace == "keda" &&
       aws_eks_pod_identity_association.runtime["keda-operator"].service_account == "keda-operator"
     )
-    error_message = "The enabled runtime must create four distinct Pod Identity roles and associations."
+    error_message = "The enabled runtime must create five distinct Pod Identity roles and associations."
+  }
+
+  assert {
+    condition = (
+      toset(flatten([for s in data.aws_iam_policy_document.relay_capture[0].statement : s.actions])) == toset([
+        "kafka-cluster:Connect", "kafka-cluster:DescribeTopic", "kafka-cluster:ReadData",
+        "kafka-cluster:WriteData", "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup",
+      ]) &&
+      alltrue([for s in data.aws_iam_policy_document.relay_capture[0].statement :
+        toset(s.resources) == toset([local.delivery_topic_arn, local.dead_letter_topic_arn])
+        if s.sid == "ReadProofTopics"
+      ]) &&
+      alltrue([for s in data.aws_iam_policy_document.relay_capture[0].statement :
+        toset(s.resources) == toset([local.delivery_topic_arn])
+        if s.sid == "ProduceControlledPoison"
+      ]) &&
+      alltrue([for s in data.aws_iam_policy_document.relay_capture[0].statement :
+        toset(s.resources) == toset([local.capture_group_arn])
+        if s.sid == "CaptureReadDependencies"
+      ]) &&
+      local.capture_group_arn != local.delivery_group_arn
+    )
+    error_message = "Capture may only read the two proof topics, write deliveries, and use its own group; no delivery-group or topic-management authority."
   }
 
   assert {
@@ -228,7 +253,7 @@ run "eks_and_msk_without_rds_has_the_workload_boundary" {
     condition = (
       length(aws_db_instance.main) == 0 &&
       length(aws_secretsmanager_secret.sink_signing_key) == 1 &&
-      length(aws_eks_pod_identity_association.runtime) == 4 &&
+      length(aws_eks_pod_identity_association.runtime) == 5 &&
       length(aws_vpc_security_group_ingress_rule.msk_from_eks) == 1
     )
     error_message = "EKS and MSK without RDS must retain the sink secret, identities, and private Kafka ingress boundary."

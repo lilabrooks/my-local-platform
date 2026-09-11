@@ -289,12 +289,20 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
         raise
 
 
+def require_cleanup_inventory(inventory: dict[str, Any], output: Path) -> None:
+    """ECR is allowed while staging and must be gone after dev destroy."""
+    if output.name == "21-inventory-after.json" and inventory["counts"]["ecr"]:
+        inventory["runtime_resources_present"]["ecr"] = inventory["counts"]["ecr"]
+        inventory["runtime_empty"] = False
+
+
 def main() -> int:
     args = parse_args()
     try:
         output = validate_destination(args.run_id, args.output)
         require_preflight(args.run_id, args.commit)
         inventory = collect(args.region)
+        require_cleanup_inventory(inventory, output)
         inventory["run_id"] = args.run_id
         inventory["source_commit"] = args.commit
         write_json(output, inventory)

@@ -111,6 +111,7 @@ func TestAWSWorkloadsKeepIdentityAndExposureBoundaries(t *testing.T) {
 
 	relay := awsDocs(t, "relay")
 	findNamed(t, relay, "ServiceAccount", "relay-bootstrap")
+	findNamed(t, relay, "ServiceAccount", "relay-capture")
 	ingest := findNamed(t, relay, "Deployment", "relay-ingest")
 	if nested(ingest, "spec")["replicas"] != float64(2) {
 		t.Errorf("relay-ingest replicas = %v, want 2", nested(ingest, "spec")["replicas"])
@@ -472,6 +473,7 @@ func TestAWSPodIdentityNamesMatchTerraform(t *testing.T) {
 	}
 	text := string(body)
 	for _, block := range []string{
+		"relay-capture = {\n      namespace       = \"mlp\"\n      service_account = \"relay-capture\"",
 		"relay-bootstrap = {\n      namespace       = \"mlp\"\n      service_account = \"relay-bootstrap\"",
 		"relay-ingest = {\n      namespace       = \"mlp\"\n      service_account = \"relay-ingest\"",
 		"relay-deliver = {\n      namespace       = \"mlp\"\n      service_account = \"relay-deliver\"",

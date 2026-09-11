@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import datetime
+from decimal import Decimal, InvalidOperation
 import hashlib
 import ipaddress
 import json
@@ -13,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 from typing import Any, Mapping
@@ -25,9 +29,17 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REDACTION_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 REQUIRED_REDACTION_NAMES = {
     "ACCOUNT_ID",
-    "DATABASE_PASSWORD",
     "OPERATOR",
-    "SIGNING_SECRET",
+}
+SECRET_NAMES = {"DATABASE_PASSWORD", "SIGNING_SECRET", "DATABASE_URL"}
+SECRET_REPRESENTATIONS = {
+    "raw",
+    "json-go",
+    "json-ascii",
+    "userinfo",
+    "url-query",
+    "base64",
+    "base64url",
 }
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -53,6 +65,7 @@ PROVISIONAL_TEXT = (
     "22-cost-immediate.txt",
 )
 FINAL_TEXT = PROVISIONAL_TEXT + ("23-cost-final.txt",)
+CAPTURE_FILES = PROVISIONAL_TEXT[7:14] + ("application-logs.txt",)
 REQUIRED_SCREENSHOTS = (
     "argocd-apps.png",
     "terminal-demo.png",
@@ -137,9 +150,20 @@ def evidence_paths(root: Path, run_id: str) -> tuple[Path, Path]:
     return raw, published
 
 
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise EvidenceError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def read_json_object(path: Path, description: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object
+        )
     except FileNotFoundError as error:
         raise EvidenceError(f"{description} is missing: {path}") from error
     except json.JSONDecodeError as error:
@@ -159,7 +183,10 @@ def write_json_exclusive(path: Path, payload: Mapping[str, Any], mode: int) -> N
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(payload, output, indent=2, sort_keys=True)
             output.write("\n")
-        os.replace(temporary, path)
+        os.link(
+            temporary, path
+        )  # Atomic installation which cannot overwrite a receipt.
+        temporary.unlink()
         path.chmod(mode)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -188,7 +215,7 @@ def write_json_atomic(path: Path, payload: Mapping[str, Any], mode: int) -> None
 
 def capture_steps() -> list[dict[str, Any]]:
     """Return the fixed export order used by staging and the live run."""
-    return [
+    steps = [
         {
             "order": 1,
             "phase": "before_paid_window",
@@ -210,7 +237,8 @@ def capture_steps() -> list[dict[str, Any]]:
             "phase": "before_paid_window",
             "output": "03-plan-summary.json",
             "source": "reviewed Terraform plan",
-            "command": "make aws-plan AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_PLAN_SUMMARY=$RAW_EVIDENCE/03-plan-summary.json",
+            "command": 'make aws-plan AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_PLAN_SUMMARY=$RAW_EVIDENCE/03-plan-summary.json AWS_TF_ARGS="-var enable_eks=true -var enable_msk=true -var enable_rds=true -var eks_operator_cidr=${AWS_OPERATOR_CIDR:?set the reviewed IPv4 /32}"',
+            "precondition": "cheap tier applied, inventory and images staged; AWS_OPERATOR_CIDR is the current reviewed IPv4 /32; plan only, no apply",
         },
         {
             "order": 4,
@@ -262,24 +290,22 @@ def capture_steps() -> list[dict[str, Any]]:
             "order": 12,
             "phase": "live_window",
             "output": "12-metrics.txt",
-            "source": "Prometheus instant and range queries",
+            "source": "fresh Prometheus instant samples during the bounded cohort; source timestamps checked before aggregation",
             "command": "python3 scripts/m4-live-capture.py metrics --prometheus-url $PROMETHEUS_URL --output $RAW_EVIDENCE/12-metrics.txt",
             "implemented_by": "#97",
             "queries": [
                 'max(relay_consumer_group_lag_total{group="relay-deliver"})',
-                'max(relay_consumer_group_members{group="relay-deliver"})',
-                'sum(relay_consumer_assigned_partitions{group="relay-deliver"})',
-                'sum(relay_consumer_idle_members{group="relay-deliver"})',
-                'count(relay_build_info{role="deliver"})',
-                "sum(relay_dead_letters_total) or vector(0)",
-                'sum(relay_deliveries_total{outcome="delivered"}) or vector(0)',
+                'max(relay_group_members{group="relay-deliver"})',
+                'max(relay_topic_partitions_unassigned{group="relay-deliver"})',
+                'max(relay_group_unassigned_members{group="relay-deliver"})',
+                'kube_deployment_spec_replicas{namespace="mlp",deployment="relay-deliver"}',
             ],
         },
         {
             "order": 13,
             "phase": "live_window",
             "output": "13-trace.json",
-            "source": "Tempo trace API using the trace id printed by smoke",
+            "source": "Tempo trace API joined to the capture event and persisted attempt coordinates",
             "command": "curl -fsS $TEMPO_URL/api/traces/$TRACE_ID | jq . >$RAW_EVIDENCE/13-trace.json",
         },
         {
@@ -339,10 +365,26 @@ def capture_steps() -> list[dict[str, Any]]:
             "order": 23,
             "phase": "after_billing_settles",
             "output": "23-cost-final.txt",
-            "source": "final attributed cost, at least 48 hours after destroy",
-            "command": "make aws-cost >$RAW_EVIDENCE/23-cost-final.txt",
+            "source": "settled account-wide daily service totals over session UTC dates; not exact M4 attribution",
+            "command": "make aws-cost-final AWS_RUN_ID=$AWS_RUN_ID",
         },
     ]
+    command = (
+        "python3 scripts/m4-live-capture.py --environment aws "
+        '--context "$AWS_KUBE_CONTEXT" --run-id "$AWS_RUN_ID" '
+        '--commit "$AWS_APPROVED_COMMIT"'
+    )
+    for step in steps:
+        if step["phase"] == "live_window":
+            step["command"] = command + (
+                " --deploy"
+                if step["order"] == 10
+                else " --verify-output " + step["output"]
+            )
+            step["execution"] = (
+                "one bounded run at step 10; later commands verify its exports without repeating the load"
+            )
+    return steps
 
 
 def screenshot_steps() -> list[dict[str, Any]]:
@@ -485,7 +527,7 @@ def initialize_plan(root: Path, run_id: str) -> Path:
 
 
 def parse_utc(value: str, field: str) -> datetime.datetime:
-    if not UTC_RE.fullmatch(value):
+    if not isinstance(value, str) or not UTC_RE.fullmatch(value):
         raise EvidenceError(f"{field} must use UTC YYYY-MM-DDTHH:MM:SSZ")
     try:
         return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
@@ -509,6 +551,8 @@ def start_session(
     if region != "us-east-1":
         raise EvidenceError("M4 uses the fixed us-east-1 region")
     path = raw / "00-session.json"
+    if (raw / "secret-scan.json").exists() or (raw / "secret-scan.json").is_symlink():
+        raise EvidenceError("secret scan receipt already exists; run ID is spent")
     if path.exists():
         raise EvidenceError(f"session receipt already exists: {path}")
     payload = {
@@ -527,6 +571,19 @@ def start_session(
         "limits": {"maximum_hourly_usd": 1.25, "maximum_total_usd": 5.0},
     }
     write_json_exclusive(path, payload, 0o600)
+    write_json_exclusive(
+        raw / "secret-scan.json",
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "commit": receipt["commit"],
+            "session_sha256": hash_file(path),
+            "profile": "m4-secret-representations-v1",
+            "state": "not_started",
+            "entries": [],
+        },
+        0o600,
+    )
     return path
 
 
@@ -548,11 +605,12 @@ def validate_live_controller(
     *,
     now: datetime.datetime | None = None,
     pid_check: Any = process_is_running,
+    phase: str = "applying",
 ) -> dict[str, Any]:
     validate_run_id(run_id)
     if not COMMIT_RE.fullmatch(commit):
         raise EvidenceError("approved commit must be a full lowercase git SHA")
-    if controller_pid <= 0:
+    if type(controller_pid) is not int or controller_pid <= 0:
         raise EvidenceError("hourly apply requires the live-run controller PID")
     raw, _ = evidence_paths(root, run_id)
     session = read_json_object(raw / "00-session.json", "session receipt")
@@ -577,13 +635,18 @@ def validate_live_controller(
         or state.get("commit") != commit
         or state.get("region") != "us-east-1"
         or state.get("controller_pid") != controller_pid
-        or state.get("phase") != "applying"
+        or phase not in {"applying", "live"}
+        or state.get("phase") != phase
+        or (
+            phase == "live"
+            and (type(state.get("apply_exit")) is not int or state["apply_exit"] != 0)
+        )
     ):
         raise EvidenceError("controller state does not authorize this apply")
     current = (now or datetime.datetime.now(datetime.UTC)).astimezone(datetime.UTC)
     if started > current + datetime.timedelta(seconds=30):
         raise EvidenceError("session start is in the future")
-    if current - started > APPLY_START_MAX_AGE:
+    if phase == "applying" and current - started > APPLY_START_MAX_AGE:
         raise EvidenceError("session is too old to start an hourly apply")
     if current >= destroy:
         raise EvidenceError("destroy deadline has already passed")
@@ -614,6 +677,10 @@ def load_redactions(path: Path) -> dict[str, str]:
         )
     result: dict[str, str] = {}
     for name, value in payload["values"].items():
+        if name in SECRET_NAMES:
+            raise EvidenceError(
+                "plaintext credential fields are forbidden; use the bootstrap secret scan receipt"
+            )
         if not isinstance(name, str) or not REDACTION_NAME_RE.fullmatch(name):
             raise EvidenceError(f"invalid redaction name: {name!r}")
         if not isinstance(value, str) or len(value) < 3:
@@ -628,6 +695,164 @@ def load_redactions(path: Path) -> dict[str, str]:
     if missing := sorted(REQUIRED_REDACTION_NAMES - set(result)):
         raise EvidenceError("redactions file is missing: " + ", ".join(missing))
     return result
+
+
+def load_secret_scan(
+    raw: Path, run_id: str, *, complete: bool = True
+) -> dict[str, Any]:
+    path = raw / "secret-scan.json"
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_mode & 0o777 != 0o600
+        or path.stat().st_size > 32768
+    ):
+        raise EvidenceError("private secret scan receipt is missing or unsafe")
+    scan = read_json_object(path, "secret scan")
+    preflight = validate_preflight(raw, run_id)
+    if (
+        set(scan)
+        != {
+            "schema_version",
+            "run_id",
+            "commit",
+            "session_sha256",
+            "profile",
+            "state",
+            "entries",
+        }
+        or type(scan.get("schema_version")) is not int
+        or scan.get("schema_version") != 1
+        or scan.get("run_id") != run_id
+        or scan.get("commit") != preflight["commit"]
+        or scan.get("session_sha256") != hash_file(raw / "00-session.json")
+        or scan.get("profile") != "m4-secret-representations-v1"
+        or not isinstance(scan.get("state"), str)
+        or scan.get("state") not in {"not_started", "collecting", "complete"}
+    ):
+        raise EvidenceError("secret scan receipt binding or state mismatch")
+    entries = scan.get("entries")
+    if not isinstance(entries, list) or len(entries) > 21:
+        raise EvidenceError("invalid secret scan entries")
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {
+            "name",
+            "representation",
+            "byte_length",
+            "sha256",
+        }:
+            raise EvidenceError("invalid secret scan entry")
+        name, representation = entry["name"], entry["representation"]
+        length, digest = entry["byte_length"], entry["sha256"]
+        if (
+            not isinstance(name, str)
+            or name not in SECRET_NAMES
+            or not isinstance(representation, str)
+            or representation not in SECRET_REPRESENTATIONS
+            or type(length) is not int
+            or not 16 <= length <= 24576
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or (name, representation) in seen
+        ):
+            raise EvidenceError("invalid or duplicate secret scan entry")
+        seen.add((name, representation))
+    if scan["state"] == "not_started" and entries:
+        raise EvidenceError("not_started scan contains credential entries")
+    if complete or scan["state"] == "complete":
+        if scan["state"] != "complete" or seen != {
+            (n, r) for n in SECRET_NAMES for r in SECRET_REPRESENTATIONS
+        }:
+            raise EvidenceError("secret scan coverage is incomplete")
+    return scan
+
+
+def scan_secret_bytes(content: bytes, scan: Mapping[str, Any], filename: str) -> None:
+    if len(content) > 8 * 1024 * 1024:
+        raise EvidenceError(f"secret scan size limit exceeded: {filename}")
+    by_length: dict[int, dict[str, str]] = {}
+    for entry in scan["entries"]:
+        by_length.setdefault(entry["byte_length"], {})[entry["sha256"]] = entry["name"]
+    pending = [(content, 0)]
+    scanned = set()
+    total = 0
+    while pending:
+        value, depth = pending.pop()
+        if value in scanned:
+            continue
+        scanned.add(value)
+        total += len(value)
+        if total > 32 * 1024 * 1024:
+            raise EvidenceError("decoded secret scan size limit exceeded")
+        for length, digests in by_length.items():
+            for start in range(len(value) - length + 1):
+                digest = hashlib.sha256(value[start : start + length]).hexdigest()
+                if digest in digests:
+                    raise EvidenceError(
+                        f"credential match {digests[digest]} in {filename}"
+                    )
+        # Inspect JSON string carriers as well as their serialized bytes. This
+        # includes JSON log lines wrapped in a larger exported JSON artifact.
+        for line in [value, *value.splitlines()]:
+            line = re.sub(rb"^\[pod/[^\]\r\n]{1,512}\]\s*", b"", line)
+            try:
+                decoded = json.loads(line, object_pairs_hook=unique_json_object)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if depth >= 4 and isinstance(decoded, (dict, list, str)):
+                raise EvidenceError("JSON carrier exceeds secret scan depth limit")
+            objects = [decoded]
+            while objects:
+                item = objects.pop()
+                if isinstance(item, str):
+                    pending.append((item.encode(), depth + 1))
+                elif isinstance(item, dict):
+                    # Kafka record byte fields use base64, including a JSON
+                    # payload containing a credential rather than only the
+                    # credential's standalone encoding. Decode known carriers.
+                    if {"topic", "partition", "offset"} <= item.keys():
+                        for key in ("key", "value", "raw_value"):
+                            encoded = item.get(key)
+                            if encoded is None:
+                                continue
+                            if not isinstance(encoded, str):
+                                raise EvidenceError("invalid Kafka byte carrier")
+                            if depth >= 4:
+                                raise EvidenceError(
+                                    "Kafka carrier exceeds secret scan depth limit"
+                                )
+                            try:
+                                pending.append(
+                                    (
+                                        base64.b64decode(encoded, validate=True),
+                                        depth + 1,
+                                    )
+                                )
+                            except (ValueError, binascii.Error) as error:
+                                raise EvidenceError(
+                                    "invalid Kafka base64 carrier"
+                                ) from error
+                    objects.extend(item.keys())
+                    objects.extend(item.values())
+                elif isinstance(item, list):
+                    objects.extend(item)
+
+
+def scan_secret_files(
+    directory: Path, names: list[str], scan: Mapping[str, Any]
+) -> None:
+    for name in names:
+        path = directory / name
+        if path.suffix == ".png":
+            continue  # Pixel review is explicit and separate.
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 8 * 1024 * 1024
+        ):
+            raise EvidenceError(f"secret scan input is missing or unsafe: {name}")
+        scan_secret_bytes(path.read_bytes(), scan, name)
 
 
 def replace_public_ipv4(match: re.Match[str]) -> str:
@@ -828,6 +1053,329 @@ def sanitize_one(
     destination.chmod(0o644)
 
 
+def validate_proof(raw: Path, run_id: str) -> dict[str, str]:
+    preflight = validate_preflight(raw, run_id)
+    capture = read_json_object(raw / "capture-result.json", "capture result")
+    state = read_json_object(raw / "controller-state.json", "controller result")
+    if (
+        type(capture.get("schema_version")) is not int
+        or capture["schema_version"] != 1
+        or capture.get("run_id") != run_id
+        or capture.get("source_commit") != preflight["commit"]
+        or capture.get("environment") != "aws"
+        or capture.get("worktree_clean") is not True
+        or capture.get("result") != "passed"
+        or not isinstance(capture.get("files"), dict)
+        or set(capture["files"]) != set(CAPTURE_FILES)
+    ):
+        raise EvidenceError(
+            "publication requires a clean passing AWS capture for this run"
+        )
+    for name in CAPTURE_FILES:
+        path = raw / name
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 8 * 1024 * 1024
+            or capture["files"][name] != hash_file(path)
+        ):
+            raise EvidenceError(f"capture export changed or is missing: {name}")
+    if (
+        type(state.get("schema_version")) is not int
+        or state["schema_version"] != 1
+        or state.get("run_id") != run_id
+        or state.get("commit") != preflight["commit"]
+        or state.get("phase") != "complete"
+        or state.get("result") != "passed"
+        or state.get("cleanup_verified") is not True
+        or state.get("cleanup_overdue") is not False
+        or state.get("log_cleanup_passed") is not True
+        or state.get("transcript_passed") is not True
+        or any(
+            type(state.get(key)) is not int or state[key] != 0
+            for key in (
+                "apply_exit",
+                "destroy_exit",
+                "terraform_state_exit",
+                "inventory_exit",
+                "cost_exit",
+            )
+        )
+    ):
+        raise EvidenceError(
+            "publication requires completed controller apply and verified cleanup"
+        )
+    started = parse_utc(capture.get("started_at"), "capture start")
+    finished = parse_utc(capture.get("finished_at"), "capture finish")
+    cleanup = parse_utc(state.get("cleanup_finished_at"), "cleanup finish")
+    if (
+        not started
+        <= finished
+        <= cleanup
+        <= datetime.datetime.now(datetime.timezone.utc)
+    ):
+        raise EvidenceError("capture and cleanup chronology is invalid")
+    return {
+        name: hash_file(raw / name)
+        for name in ("capture-result.json", "controller-state.json", "00-session.json")
+    }
+
+
+def cost_context(raw: Path, run_id: str) -> tuple[dict, datetime.datetime, dict]:
+    preflight = validate_preflight(raw, run_id)
+    session = read_json_object(raw / "00-session.json", "session")
+    state = read_json_object(raw / "controller-state.json", "controller")
+    if (
+        session.get("run_id") != run_id
+        or session.get("commit") != preflight["commit"]
+        or state.get("run_id") != run_id
+        or state.get("commit") != preflight["commit"]
+        or state.get("phase") != "complete"
+        or state.get("cleanup_verified") is not True
+        or any(
+            type(state.get(key)) is not int or state[key] != 0
+            for key in ("terraform_state_exit", "inventory_exit")
+        )
+    ):
+        raise EvidenceError(
+            "final cost requires a matching session and completed cleanup"
+        )
+    start = parse_utc(session.get("billable_started_at"), "billable start")
+    finish = parse_utc(state.get("cleanup_finished_at"), "cleanup finish")
+    if finish < start or finish - start > datetime.timedelta(days=366):
+        raise EvidenceError("invalid billable interval")
+    account = (
+        read_json_object(raw / "01-identity.txt", "identity")
+        .get("aws", {})
+        .get("account_id")
+    )
+    if not isinstance(account, str) or not re.fullmatch(r"\d{12}", account):
+        raise EvidenceError("cost account binding missing")
+    query = {
+        "TimePeriod": {
+            "Start": start.date().isoformat(),
+            "End": (finish.date() + datetime.timedelta(days=1)).isoformat(),
+        },
+        "Granularity": "DAILY",
+        "Metrics": ["UnblendedCost"],
+        "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
+        "Filter": {"Dimensions": {"Key": "LINKED_ACCOUNT", "Values": [account]}},
+    }
+    return query, finish, preflight
+
+
+def validate_final_cost(raw: Path, run_id: str, value: dict | None = None) -> dict:
+    value = (
+        value
+        if value is not None
+        else read_json_object(raw / "23-cost-final.txt", "final cost JSON")
+    )
+    query, finish, preflight = cost_context(raw, run_id)
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema_version",
+            "run_id",
+            "source_commit",
+            "session_sha256",
+            "controller_sha256",
+            "collected_at",
+            "attribution",
+            "tag_filter_used",
+            "query",
+            "pages",
+        }
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or value.get("run_id") != run_id
+        or value.get("source_commit") != preflight["commit"]
+        or value.get("query") != query
+        or value.get("tag_filter_used") is not False
+        or value.get("attribution")
+        != "account-wide daily service totals; not exact M4 attribution"
+        or value.get("session_sha256") != hash_file(raw / "00-session.json")
+        or value.get("controller_sha256") != hash_file(raw / "controller-state.json")
+    ):
+        raise EvidenceError(
+            "final cost receipt does not match the session query and attribution"
+        )
+    collected = parse_utc(value.get("collected_at"), "cost collection")
+    if (
+        not finish + datetime.timedelta(hours=48)
+        <= collected
+        <= datetime.datetime.now(datetime.timezone.utc)
+    ):
+        raise EvidenceError(
+            "final cost must be collected at least 48 hours after cleanup and not in the future"
+        )
+    pages = value.get("pages")
+    if not isinstance(pages, list) or not 1 <= len(pages) <= 100:
+        raise EvidenceError("final cost pages missing or excessive")
+    days = {}
+    tokens = set()
+    for index, page in enumerate(pages):
+        if (
+            not isinstance(page, dict)
+            or page.get("GroupDefinitions") != query["GroupBy"]
+        ):
+            raise EvidenceError("final cost grouping is invalid")
+        token = page.get("NextPageToken")
+        if index < len(pages) - 1:
+            if not isinstance(token, str) or not token or token in tokens:
+                raise EvidenceError("final cost pagination is incomplete or repeated")
+            tokens.add(token)
+        elif token:
+            raise EvidenceError("final cost pagination is incomplete")
+        results = page.get("ResultsByTime")
+        if not isinstance(results, list) or not results:
+            raise EvidenceError("final cost has no daily results")
+        for result in results:
+            if not isinstance(result, dict) or result.get("Estimated") is not False:
+                raise EvidenceError("final cost contains estimated or invalid days")
+            period = result.get("TimePeriod", {})
+            try:
+                day = datetime.date.fromisoformat(period["Start"])
+                end = datetime.date.fromisoformat(period["End"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise EvidenceError("invalid cost day") from error
+            if end != day + datetime.timedelta(days=1):
+                raise EvidenceError("cost result is not daily")
+            services = days.setdefault(day.isoformat(), set())
+            groups = result.get("Groups")
+            if not isinstance(groups, list):
+                raise EvidenceError("cost service groups missing")
+            for group in groups:
+                if not isinstance(group, dict) or not isinstance(
+                    group.get("Metrics"), dict
+                ):
+                    raise EvidenceError("invalid cost service group")
+                keys = group.get("Keys", [])
+                metric = group.get("Metrics", {}).get("UnblendedCost", {})
+                if (
+                    not isinstance(keys, list)
+                    or len(keys) != 1
+                    or not isinstance(metric, dict)
+                    or not isinstance(keys[0], str)
+                    or not keys[0]
+                    or keys[0] in services
+                    or metric.get("Unit") != "USD"
+                    or not isinstance(metric.get("Amount"), str)
+                ):
+                    raise EvidenceError("invalid or duplicate cost service group")
+                try:
+                    if not Decimal(metric["Amount"]).is_finite():
+                        raise InvalidOperation
+                except InvalidOperation as error:
+                    raise EvidenceError("invalid cost amount") from error
+                services.add(keys[0])
+    first = datetime.date.fromisoformat(query["TimePeriod"]["Start"])
+    last = datetime.date.fromisoformat(query["TimePeriod"]["End"])
+    expected = {
+        (first + datetime.timedelta(days=i)).isoformat()
+        for i in range((last - first).days)
+    }
+    if set(days) != expected:
+        raise EvidenceError("final cost days do not cover the session interval")
+    return value
+
+
+def private_aws_json(raw: Path, arguments: list[str]) -> dict:
+    profile = read_json_object(raw / "06-go-no-go.json", "GO").get("aws_profile")
+    if not isinstance(profile, str) or not profile:
+        raise EvidenceError("AWS profile binding is missing")
+    environment = {
+        k: os.environ[k] for k in ("HOME", "PATH", "TMPDIR") if k in os.environ
+    }
+    environment.update(
+        AWS_PROFILE=profile,
+        AWS_REGION="us-east-1",
+        AWS_DEFAULT_REGION="us-east-1",
+        AWS_MAX_ATTEMPTS="1",
+        AWS_PAGER="",
+    )
+    try:
+        result = subprocess.run(
+            [
+                "aws",
+                *arguments,
+                "--output",
+                "json",
+                "--cli-connect-timeout",
+                "10",
+                "--cli-read-timeout",
+                "30",
+            ],
+            env=environment,
+            capture_output=True,
+            timeout=45,
+            check=True,
+        )
+        if len(result.stdout) > 8 * 1024 * 1024:
+            raise EvidenceError("AWS result exceeds evidence limit")
+        value = json.loads(result.stdout, object_pairs_hook=unique_json_object)
+        if not isinstance(value, dict):
+            raise EvidenceError("AWS result is not an object")
+        return value
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise EvidenceError(
+            "read-only AWS evidence query failed; diagnostics withheld"
+        ) from error
+
+
+def collect_final_cost(root: Path, run_id: str) -> Path:
+    raw, _ = evidence_paths(root, run_id)
+    query, finish, preflight = cost_context(raw, run_id)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now < finish + datetime.timedelta(hours=48):
+        raise EvidenceError(
+            "wait at least 48 hours after cleanup before final cost collection"
+        )
+    if (
+        private_aws_json(raw, ["sts", "get-caller-identity"]).get("Account")
+        != query["Filter"]["Dimensions"]["Values"][0]
+    ):
+        raise EvidenceError("cost collection identity does not match the run")
+    pages, tokens = [], set()
+    token = None
+    for _ in range(100):
+        arguments = [
+            "ce",
+            "get-cost-and-usage",
+            "--no-paginate",
+            "--cli-input-json",
+            json.dumps(query),
+        ]
+        if token:
+            arguments.extend(["--next-page-token", token])
+        page = private_aws_json(raw, arguments)
+        pages.append(page)
+        token = page.get("NextPageToken")
+        if not token:
+            break
+        if not isinstance(token, str) or token in tokens:
+            raise EvidenceError("repeated or invalid cost pagination token")
+        tokens.add(token)
+    value = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "source_commit": preflight["commit"],
+        "session_sha256": hash_file(raw / "00-session.json"),
+        "controller_sha256": hash_file(raw / "controller-state.json"),
+        "collected_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "attribution": "account-wide daily service totals; not exact M4 attribution",
+        "tag_filter_used": False,
+        "query": query,
+        "pages": pages,
+    }
+    validate_final_cost(raw, run_id, value)
+    path = raw / "23-cost-final.txt"
+    write_json_exclusive(path, value, 0o600)
+    return path
+
+
 def create_publication(
     raw: Path,
     destination: Path,
@@ -866,6 +1414,12 @@ def create_publication(
             "files": screenshots,
         },
         "files": files,
+        "proof_receipts": validate_proof(raw, run_id),
+        **(
+            {"final_cost_sha256": hash_file(raw / "23-cost-final.txt")}
+            if phase == "final"
+            else {}
+        ),
     }
 
 
@@ -874,6 +1428,8 @@ def verify_publication(
     run_id: str,
     phase: str,
     redactions: Mapping[str, str],
+    *,
+    raw: Path | None = None,
 ) -> dict[str, Any]:
     receipt_path = destination / "publication.json"
     receipt = read_json_object(receipt_path, "publication receipt")
@@ -889,7 +1445,10 @@ def verify_publication(
             "redaction_names",
             "visual_review",
             "files",
+            "secret_scan_sha256",
+            "proof_receipts",
         }
+        | ({"final_cost_sha256"} if phase == "final" else set())
         or receipt.get("schema_version") != 1
         or receipt.get("run_id") != run_id
         or receipt.get("phase") != phase
@@ -901,6 +1460,13 @@ def verify_publication(
         or not isinstance(files, dict)
     ):
         raise EvidenceError("publication receipt does not match this run and phase")
+    raw = raw or destination.parents[3] / ".evidence" / "m4" / run_id
+    if receipt["proof_receipts"] != validate_proof(raw, run_id):
+        raise EvidenceError("private proof receipts changed since publication")
+    if phase == "final":
+        validate_final_cost(raw, run_id)
+        if receipt["final_cost_sha256"] != hash_file(raw / "23-cost-final.txt"):
+            raise EvidenceError("final cost changed since publication")
     receipt_text = receipt_path.read_text(encoding="utf-8")
     if leaks := sensitive_matches(receipt_text, redactions):
         raise EvidenceError(
@@ -956,11 +1522,21 @@ def verify_publication(
 
 
 def publish(root: Path, run_id: str, phase: str, redactions_path: Path) -> Path:
+    if phase == "failed":
+        return publish_failed(root, run_id, redactions_path)
     raw, destination = evidence_paths(root, run_id)
     validate_preflight(raw, run_id)
     if not (raw / "capture-plan.json").is_file():
         raise EvidenceError("capture-plan.json is missing; run init first")
     redactions = load_redactions(redactions_path)
+    scan = load_secret_scan(raw, run_id)
+    scan_names = list(required_text(phase))
+    if (raw / "application-logs.txt").exists():
+        scan_names.append("application-logs.txt")
+    scan_secret_files(raw, scan_names, scan)
+    validate_proof(raw, run_id)
+    if phase == "final":
+        validate_final_cost(raw, run_id)
 
     if destination.exists():
         if phase != "final":
@@ -968,29 +1544,255 @@ def publish(root: Path, run_id: str, phase: str, redactions_path: Path) -> Path:
                 f"published evidence destination already exists: {destination}"
             )
         verify_publication(destination, run_id, "provisional", redactions)
+        verify_secret_publication(raw, destination, run_id)
         target = destination / "23-cost-final.txt"
         if target.exists():
             raise EvidenceError(f"final cost evidence already exists: {target}")
         sanitize_one(raw / target.name, target, redactions)
         old = read_json_object(destination / "publication.json", "publication receipt")
         old["phase"] = "final"
+        old["final_cost_sha256"] = hash_file(raw / "23-cost-final.txt")
         old["files"][target.name] = {"sha256": hash_file(target)}
         receipt_path = destination / "publication.json"
         write_json_atomic(receipt_path, old, 0o644)
         verify_publication(destination, run_id, "final", redactions)
+        verify_secret_publication(raw, destination, run_id)
         return destination
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=destination.parent))
     try:
         receipt = create_publication(raw, temporary, run_id, phase, redactions)
+        receipt["secret_scan_sha256"] = hash_file(raw / "secret-scan.json")
         write_json_exclusive(temporary / "publication.json", receipt, 0o644)
         verify_publication(temporary, run_id, phase, redactions)
+        verify_secret_publication(raw, temporary, run_id)
         os.replace(temporary, destination)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
     return destination
+
+
+def verify_secret_publication(raw: Path, destination: Path, run_id: str) -> None:
+    scan = load_secret_scan(raw, run_id)
+    publication = read_json_object(destination / "publication.json", "publication")
+    if publication.get("secret_scan_sha256") != hash_file(raw / "secret-scan.json"):
+        raise EvidenceError("private secret scan changed since publication")
+    scan_secret_files(destination, [p.name for p in destination.iterdir()], scan)
+
+
+def failed_summary(raw: Path, run_id: str) -> dict[str, Any]:
+    scan = load_secret_scan(raw, run_id, complete=False)
+    preflight = validate_preflight(raw, run_id)
+    state = read_json_object(raw / "controller-state.json", "controller result")
+    if (
+        state.get("schema_version") != 1
+        or state.get("run_id") != run_id
+        or state.get("commit") != preflight["commit"]
+        or state.get("phase")
+        not in {
+            "applying",
+            "live",
+            "destroying",
+            "verifying",
+            "complete",
+            "cleanup_failed",
+            "verifying_identity",
+        }
+    ):
+        raise EvidenceError(
+            "failed publication requires a controller observation for this run"
+        )
+    # Never copy free-text diagnostics when bootstrap coverage is incomplete.
+    # This allowlist also keeps operator names, raw logs and endpoints private.
+    checks = {}
+    for key in (
+        "apply_exit",
+        "destroy_exit",
+        "terraform_state_exit",
+        "inventory_exit",
+        "cost_exit",
+    ):
+        value = state.get(key)
+        if value is not None and (type(value) is not int or not -1 <= value <= 255):
+            raise EvidenceError("terminal controller has an invalid exit status")
+        checks[key] = {
+            "reported_exit": value,
+            "status": ("passed" if value == 0 else "failed")
+            if value is not None
+            else (
+                "not_run"
+                if state.get("cleanup_blocked_reason") == "identity_unverified"
+                and key != "apply_exit"
+                else "unknown"
+            ),
+        }
+    for key in (
+        "cleanup_verified",
+        "cleanup_overdue",
+        "log_cleanup_passed",
+        "transcript_passed",
+    ):
+        value = state.get(key)
+        if value is not None and type(value) is not bool:
+            raise EvidenceError("terminal controller has incomplete cleanup status")
+        checks[key] = value
+    finished = state.get("cleanup_finished_at")
+    if finished:
+        parse_utc(finished, "cleanup completion")
+    checks["cleanup_verified"] = bool(
+        state.get("phase") == "complete"
+        and finished
+        and checks["cleanup_verified"] is True
+        and state.get("terraform_state_exit") == 0
+        and state.get("inventory_exit") == 0
+    )
+    if not finished:
+        checks["cleanup_overdue"] = None
+    return {
+        "schema_version": 1,
+        "run_id": run_id,
+        "source_commit": preflight["commit"],
+        "result": "failed",
+        "demonstration_passed": False,
+        "controller_phase": state["phase"],
+        "cleanup_finished_at": finished,
+        "checks": checks,
+        "secret_scan_state": scan["state"],
+        "publication_scope": "last controller observation; unknown outcomes are not teardown proof; raw diagnostics and screenshots withheld",
+    }
+
+
+def snapshot_failed_attempt(raw: Path, run_id: str) -> Path:
+    destination = raw / "failed-publication"
+    ensure_beneath(destination, raw)
+    if destination.exists():
+        failed_summary(destination, run_id)
+        return destination
+    temporary = Path(tempfile.mkdtemp(prefix=".failed-publication-", dir=raw))
+    try:
+        for name in (
+            "00-preflight.json",
+            "00-session.json",
+            "01-identity.txt",
+            "06-go-no-go.json",
+            "secret-scan.json",
+            "controller-state.json",
+        ):
+            source = raw / name
+            if (
+                source.is_symlink()
+                or not source.is_file()
+                or source.stat().st_size > 1024 * 1024
+            ):
+                raise EvidenceError("failed snapshot source missing or unsafe")
+            shutil.copyfile(source, temporary / name)
+            (temporary / name).chmod(0o600)
+        failed_summary(temporary, run_id)
+        write_json_exclusive(
+            temporary / "observation.json",
+            {
+                "observed_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+            },
+            0o600,
+        )
+        os.rename(temporary, destination)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return destination
+
+
+def publish_failed(root: Path, run_id: str, redactions_path: Path) -> Path:
+    raw, destination = evidence_paths(root, run_id)
+    redactions = load_redactions(redactions_path)
+    raw = snapshot_failed_attempt(raw, run_id)
+    summary = failed_summary(raw, run_id)
+    scan = load_secret_scan(raw, run_id, complete=False)
+    if destination.exists():
+        raise EvidenceError("failed evidence destination already exists")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=destination.parent))
+    try:
+        write_json_exclusive(temporary / "failed-attempt.json", summary, 0o644)
+        receipt = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "phase": "failed",
+            "result": "failed",
+            "secret_scan_sha256": hash_file(raw / "secret-scan.json"),
+            "controller_snapshot_sha256": hash_file(raw / "controller-state.json"),
+            "authority_sha256": {
+                name: hash_file(raw / name)
+                for name in ("01-identity.txt", "06-go-no-go.json")
+            },
+            "observed_at": read_json_object(raw / "observation.json", "observation")[
+                "observed_at"
+            ],
+            "files": {
+                "failed-attempt.json": {
+                    "sha256": hash_file(temporary / "failed-attempt.json")
+                }
+            },
+        }
+        write_json_exclusive(temporary / "publication.json", receipt, 0o644)
+        scan_secret_files(temporary, ["failed-attempt.json", "publication.json"], scan)
+        for path in temporary.iterdir():
+            if sensitive_matches(path.read_text(), redactions):
+                raise EvidenceError("failed summary contains a known sensitive value")
+        os.replace(temporary, destination)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    verify_failed(root, run_id, redactions)
+    return destination
+
+
+def verify_failed(root: Path, run_id: str, redactions: Mapping[str, str]) -> None:
+    raw, destination = evidence_paths(root, run_id)
+    raw = raw / "failed-publication"
+    ensure_beneath(raw, root)
+    if {p.name for p in destination.iterdir()} != {
+        "failed-attempt.json",
+        "publication.json",
+    }:
+        raise EvidenceError("unexpected failed publication contents")
+    scan = load_secret_scan(raw, run_id, complete=False)
+    scan_secret_files(destination, ["failed-attempt.json", "publication.json"], scan)
+    expected = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "phase": "failed",
+        "result": "failed",
+        "secret_scan_sha256": hash_file(raw / "secret-scan.json"),
+        "controller_snapshot_sha256": hash_file(raw / "controller-state.json"),
+        "authority_sha256": {
+            name: hash_file(raw / name)
+            for name in ("01-identity.txt", "06-go-no-go.json")
+        },
+        "observed_at": read_json_object(raw / "observation.json", "observation")[
+            "observed_at"
+        ],
+        "files": {
+            "failed-attempt.json": {
+                "sha256": hash_file(destination / "failed-attempt.json")
+            }
+        },
+    }
+    if read_json_object(
+        destination / "publication.json", "publication"
+    ) != expected or read_json_object(
+        destination / "failed-attempt.json", "failed attempt"
+    ) != failed_summary(raw, run_id):
+        raise EvidenceError(
+            "failed publication does not match the private controller evidence"
+        )
+    for path in destination.iterdir():
+        if sensitive_matches(path.read_text(), redactions):
+            raise EvidenceError("failed summary contains a known sensitive value")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -999,6 +1801,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "check-protocol", help="validate the account-independent capture contract"
     )
+    cost = commands.add_parser(
+        "collect-final-cost", help="collect settled daily account costs (read-only AWS)"
+    )
+    cost.add_argument("--run-id", required=True)
     init = commands.add_parser(
         "init", help="write the fixed capture and screenshot plan"
     )
@@ -1022,13 +1828,15 @@ def parser() -> argparse.ArgumentParser:
     publish_parser = commands.add_parser("publish", help="sanitize and verify evidence")
     publish_parser.add_argument("--run-id", default=os.environ.get("AWS_RUN_ID", ""))
     publish_parser.add_argument(
-        "--phase", choices=("provisional", "final"), required=True
+        "--phase", choices=("provisional", "final", "failed"), required=True
     )
     publish_parser.add_argument("--redactions-file", type=Path, required=True)
 
     verify = commands.add_parser("verify", help="recheck a published evidence packet")
     verify.add_argument("--run-id", default=os.environ.get("AWS_RUN_ID", ""))
-    verify.add_argument("--phase", choices=("provisional", "final"), required=True)
+    verify.add_argument(
+        "--phase", choices=("provisional", "final", "failed"), required=True
+    )
     verify.add_argument("--redactions-file", type=Path, required=True)
     return result
 
@@ -1038,6 +1846,9 @@ def main() -> int:
     try:
         if args.command == "check-protocol":
             print(json.dumps(validate_protocol(), indent=2, sort_keys=True))
+        elif args.command == "collect-final-cost":
+            path = collect_final_cost(ROOT, args.run_id)
+            print(f"settled shared-account cost receipt: {path.relative_to(ROOT)}")
         elif args.command == "init":
             path = initialize_plan(ROOT, args.run_id)
             print(f"capture plan: {path.relative_to(ROOT)}")
@@ -1053,11 +1864,18 @@ def main() -> int:
             print("live-run controller permit passed")
         elif args.command == "publish":
             path = publish(ROOT, args.run_id, args.phase, args.redactions_file)
-            print(f"{args.phase} evidence passed: {path.relative_to(ROOT)}")
+            print(
+                f"{args.phase} evidence published and verified: {path.relative_to(ROOT)}"
+            )
         else:
-            _, destination = evidence_paths(ROOT, args.run_id)
+            raw, destination = evidence_paths(ROOT, args.run_id)
             redactions = load_redactions(args.redactions_file)
+            if args.phase == "failed":
+                verify_failed(ROOT, args.run_id, redactions)
+                print("failed attempt publication verified; demonstration did not pass")
+                return 0
             verify_publication(destination, args.run_id, args.phase, redactions)
+            verify_secret_publication(raw, destination, args.run_id)
             print(f"{args.phase} evidence passed: {destination.relative_to(ROOT)}")
     except EvidenceError as error:
         print(f"m4 evidence: {error}", file=sys.stderr)
