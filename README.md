@@ -18,6 +18,7 @@ is the reference application across Compose, minikube, and live AWS.
 
 - [Quick start](#quick-start)
 - [What runs here](#what-runs-here)
+- [System diagram](#system-diagram)
 - [Relay](#relay)
 - [Kubernetes and GitOps](#kubernetes-and-gitops)
 - [Real AWS](#real-aws)
@@ -98,6 +99,21 @@ profile measurements, and troubleshooting.
 
 </details>
 <!-- markdownlint-enable MD033 -->
+
+## System diagram
+
+[![Local platform architecture showing Compose services, the minikube GitOps workloads, ArgoCD, KEDA, and both observability stacks](docs/diagrams/local-platform.svg)](docs/diagrams/local-platform.svg)
+
+Open the image for the full-size diagram. Colors distinguish applications,
+data services, telemetry, and deployment controls; arrows label each operation.
+Minikube shares Compose's Kafka, Postgres, and OpenTelemetry Collector through
+`host.minikube.internal`, and runs its own Prometheus and Grafana.
+
+The [editable draw.io source](docs/diagrams/local-platform.drawio) records the
+configured local topology from [Compose](local/docker-compose.yml), the
+[Kubernetes manifests](k8s/manifests/), and the
+[monitoring values](k8s/monitoring-values.yaml). Open it in draw.io to edit;
+export as SVG with a light background and update the image alongside it.
 
 ## Relay
 
