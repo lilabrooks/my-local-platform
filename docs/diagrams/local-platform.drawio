@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" type="device" version="29.0.0">
+  <diagram id="local-platform" name="Local platform">
+    <mxGraphModel dx="1560" dy="1860" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1560" pageHeight="1860" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="my-local-platform" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=36;fontColor=#0F172A;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="20" width="1480" height="48" />
+        </mxCell>
+        <mxCell id="subtitle" value="Local system architecture  •  Docker Compose + minikube profile mlp  •  Repository configuration, September 2026" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=18;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="72" width="1480" height="32" />
+        </mxCell>
+        <mxCell id="l-app" value="&lt;b&gt;Applications / data flow&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="124" width="285" height="44" />
+        </mxCell>
+        <mxCell id="l-data" value="&lt;b&gt;Brokers / storage / APIs&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="350" y="124" width="285" height="44" />
+        </mxCell>
+        <mxCell id="l-obs" value="&lt;b&gt;Telemetry / queries&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="660" y="124" width="285" height="44" />
+        </mxCell>
+        <mxCell id="l-ctl" value="&lt;b&gt;Deployment / scaling&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="970" y="124" width="285" height="44" />
+        </mxCell>
+        <mxCell id="legend" value="Arrows follow the labelled operation.&lt;br&gt;Dashed = optional export." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=14;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1275" y="122" width="250" height="48" />
+        </mxCell>
+        <mxCell id="compose" value="&lt;b&gt;&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fillColor=#F8FAFC;strokeColor=#CBD5E1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="195" width="1480" height="670" />
+        </mxCell>
+        <mxCell id="compose-title" value="01  Docker Compose" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=24;fontColor=#0F172A;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="62" y="207" width="1436" height="30" />
+        </mxCell>
+        <mxCell id="compose-sub" value="Profiles: core, messaging, tools, apps, obs  •  make up starts all profiles" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=16;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="62" y="241" width="1436" height="32" />
+        </mxCell>
+        <mxCell id="app-head" value="Webhook delivery and shared data services" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=18;fontColor=#2563EB;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="277" width="860" height="30" />
+        </mxCell>
+        <mxCell id="client" value="&lt;b&gt;Local clients&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;API calls / smoke&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="335" width="160" height="85" />
+        </mxCell>
+        <mxCell id="ingest" value="&lt;b&gt;relay-ingest&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Events + idempotency&lt;br&gt;host :8082&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="295" y="335" width="215" height="85" />
+        </mxCell>
+        <mxCell id="kafka" value="&lt;b&gt;Apache Kafka&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;KRaft broker&lt;br&gt;deliveries + DLQ&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="565" y="335" width="235" height="85" />
+        </mxCell>
+        <mxCell id="deliver" value="&lt;b&gt;relay-deliver&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Consumer group&lt;br&gt;Retries + dead letters&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="565" y="490" width="235" height="85" />
+        </mxCell>
+        <mxCell id="sink" value="&lt;b&gt;Test sink&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Signed webhooks&lt;br&gt;host :8084&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="295" y="490" width="215" height="85" />
+        </mxCell>
+        <mxCell id="pg" value="&lt;b&gt;Postgres&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;History + tenants&lt;br&gt;Subscriptions&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="490" width="160" height="85" />
+        </mxCell>
+        <mxCell id="client-ingest" value="HTTP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="client" target="ingest">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="ingest-kafka" value="publish" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="ingest" target="kafka">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="kafka-deliver" value="consume / commit" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;startArrow=block;startFill=1;" edge="1" parent="1" source="kafka" target="deliver">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="deliver-sink" value="HMAC HTTP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="deliver" target="sink">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="ingest-pg" value="SQL" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=0;exitY=0.8;entryX=0.5;entryY=0;" edge="1" parent="1" source="ingest" target="pg">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="265" y="455" />
+              <mxPoint x="150" y="455" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="deliver-pg" value="SQL: subscriptions + attempts" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=0.5;exitY=1;entryX=0.5;entryY=1;" edge="1" parent="1" source="deliver" target="pg">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="680" y="607" />
+              <mxPoint x="150" y="607" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="floci" value="&lt;b&gt;floci&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;S3 • SNS → SQS • SES&lt;br&gt;AWS-compatible APIs :4566&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="665" width="255" height="80" />
+        </mxCell>
+        <mxCell id="rabbit" value="&lt;b&gt;RabbitMQ&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;AMQP :5672&lt;br&gt;Management UI :15672&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="380" y="665" width="200" height="80" />
+        </mxCell>
+        <mxCell id="kafkaui" value="&lt;b&gt;Kafka UI&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Kafbat UI :8080&lt;br&gt;Browse broker / topics&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="635" y="665" width="190" height="80" />
+        </mxCell>
+        <mxCell id="kafkaui-kafka" value="inspect" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#64748B;strokeWidth=2;fontColor=#64748B;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="kafkaui" target="kafka">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="850" y="705" />
+              <mxPoint x="850" y="375" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="init" value="floci-init: one-shot volume ownership setup before floci starts." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=15;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="754" width="760" height="28" />
+        </mxCell>
+        <mxCell id="volumes" value="Named volumes persist floci, Postgres, Kafka, RabbitMQ, Prometheus, Tempo and Grafana data." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=15;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="787" width="770" height="50" />
+        </mxCell>
+        <mxCell id="obs-head" value="Observability profile" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=18;fontColor=#15803D;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="920" y="277" width="570" height="30" />
+        </mxCell>
+        <mxCell id="otel" value="&lt;b&gt;OpenTelemetry Collector&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;OTLP :4317 / :4318&lt;br&gt;Logs → debug output&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="920" y="335" width="255" height="85" />
+        </mxCell>
+        <mxCell id="tempo" value="&lt;b&gt;Tempo&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Trace storage&lt;br&gt;Query API :3200&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1255" y="335" width="230" height="85" />
+        </mxCell>
+        <mxCell id="prom" value="&lt;b&gt;Prometheus&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Metrics storage&lt;br&gt;UI / API :9090&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="920" y="490" width="255" height="85" />
+        </mxCell>
+        <mxCell id="grafana" value="&lt;b&gt;Grafana&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Relay dashboard&lt;br&gt;UI :3000&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1255" y="490" width="230" height="85" />
+        </mxCell>
+        <mxCell id="datadog" value="&lt;b&gt;Datadog · external / optional&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Collector config + DD_API_KEY&lt;br&gt;Traces, metrics and logs&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;dashed=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="990" y="665" width="400" height="80" />
+        </mxCell>
+        <mxCell id="otel-tempo" value="OTLP traces" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="otel" target="tempo">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="prom-otel" value="scrape :8889" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="prom" target="otel">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="grafana-prom" value="query metrics" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="grafana" target="prom">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="grafana-tempo" value="query traces" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="grafana" target="tempo">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="otel-dd" value="optional export" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7C3AED;strokeWidth=2;fontColor=#7C3AED;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=0;exitY=0.5;entryX=0.5;entryY=0;dashed=1;" edge="1" parent="1" source="otel" target="datadog">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="895" y="375" />
+              <mxPoint x="895" y="630" />
+              <mxPoint x="1190" y="630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="obs-note" value="Relay roles → Collector: OTLP traces.&lt;br&gt;Prometheus → relay-ingest, relay-deliver and sink: direct /metrics scrapes (DNS discovery)." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=15;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="920" y="768" width="565" height="64" />
+        </mxCell>
+        <mxCell id="k8s" value="&lt;b&gt;&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fillColor=#F5F3FF;strokeColor=#CBD5E1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="895" width="1480" height="790" />
+        </mxCell>
+        <mxCell id="k8s-title" value="02  minikube · profile mlp" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=24;fontColor=#0F172A;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="62" y="907" width="1436" height="30" />
+        </mxCell>
+        <mxCell id="k8s-sub" value="GitOps workloads share the Compose data services above. Prometheus and Grafana also run inside this cluster." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=16;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="62" y="941" width="1436" height="32" />
+        </mxCell>
+        <mxCell id="git" value="&lt;b&gt;Git repository&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;main → k8s/apps/&lt;br&gt;Committed manifests&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="1000" width="255" height="90" />
+        </mxCell>
+        <mxCell id="argo" value="&lt;b&gt;ArgoCD · namespace argocd&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Root Application / project mlp-root&lt;br&gt;Creates child Applications only&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="390" y="1000" width="365" height="90" />
+        </mxCell>
+        <mxCell id="children" value="&lt;b&gt;Child apps · project mlp&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;echo • relay • sink • monitoring&lt;br&gt;Deploy only into namespace mlp&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="825" y="1000" width="340" height="90" />
+        </mxCell>
+        <mxCell id="bootstrap" value="&lt;b&gt;Operator / Make&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Install ArgoCD + KEDA&lt;br&gt;Helm: monitoring stack&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1225" y="1000" width="260" height="90" />
+        </mxCell>
+        <mxCell id="git-argo" value="read / reconcile" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7C3AED;strokeWidth=2;fontColor=#7C3AED;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="git" target="argo">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="argo-child" value="app-of-apps" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7C3AED;strokeWidth=2;fontColor=#7C3AED;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="argo" target="children">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="argoboundary" value="Default ArgoCD project disabled. KEDA and the monitoring Helm chart are installed separately." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=14;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="390" y="1094" width="775" height="26" />
+        </mxCell>
+        <mxCell id="workloads" value="&lt;b&gt;&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fillColor=#EFF6FF;strokeColor=#CBD5E1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="1140" width="720" height="325" />
+        </mxCell>
+        <mxCell id="workloads-title" value="Namespace mlp" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=24;fontColor=#0F172A;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="92" y="1152" width="676" height="30" />
+        </mxCell>
+        <mxCell id="workloads-sub" value="Services, Deployments, relay config / Secret, ScaledObject and monitoring resources" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=16;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="92" y="1186" width="676" height="32" />
+        </mxCell>
+        <mxCell id="kingest" value="&lt;b&gt;relay-ingest&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;2 replicas&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1230" width="195" height="76" />
+        </mxCell>
+        <mxCell id="kdeliver" value="&lt;b&gt;relay-deliver&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;1–12 replicas&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="355" y="1230" width="195" height="76" />
+        </mxCell>
+        <mxCell id="ksink" value="&lt;b&gt;Test sink&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Webhook target&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="610" y="1230" width="155" height="76" />
+        </mxCell>
+        <mxCell id="echo" value="&lt;b&gt;echo&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;2 replicas • HTTP&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1355" width="195" height="76" />
+        </mxCell>
+        <mxCell id="sm" value="&lt;b&gt;ServiceMonitor&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;/metrics per pod&lt;br&gt;release: monitoring&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="355" y="1355" width="195" height="76" />
+        </mxCell>
+        <mxCell id="dash" value="&lt;b&gt;Dashboard&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;ConfigMap&lt;br&gt;relay.json&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="610" y="1355" width="155" height="76" />
+        </mxCell>
+        <mxCell id="child-workload" value="sync workloads + config" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7C3AED;strokeWidth=2;fontColor=#7C3AED;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=0.5;exitY=1;entryX=0.97;entryY=0;" edge="1" parent="1" source="children" target="workloads">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="995" y="1127" />
+              <mxPoint x="770" y="1127" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="kd-sink" value="HMAC HTTP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontColor=#2563EB;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="kdeliver" target="ksink">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="monitoring" value="&lt;b&gt;&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fillColor=#F0FDF4;strokeColor=#CBD5E1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="825" y="1140" width="660" height="325" />
+        </mxCell>
+        <mxCell id="monitoring-title" value="Namespace monitoring" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=24;fontColor=#0F172A;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="847" y="1152" width="616" height="30" />
+        </mxCell>
+        <mxCell id="monitoring-sub" value="kube-prometheus-stack · installed by make monitoring-install" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=16;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="847" y="1186" width="616" height="32" />
+        </mxCell>
+        <mxCell id="kprom" value="&lt;b&gt;Prometheus&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Scrapes each mlp pod&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="850" y="1230" width="235" height="76" />
+        </mxCell>
+        <mxCell id="kgrafana" value="&lt;b&gt;Grafana + sidecar&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Dashboard from mlp&lt;br&gt;Port-forward :3001&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1190" y="1230" width="270" height="76" />
+        </mxCell>
+        <mxCell id="operator" value="&lt;b&gt;Prometheus Operator&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;ServiceMonitor discovery&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="850" y="1355" width="185" height="76" />
+        </mxCell>
+        <mxCell id="alert" value="&lt;b&gt;Alertmanager&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Alert routing&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1060" y="1355" width="175" height="76" />
+        </mxCell>
+        <mxCell id="exporters" value="&lt;b&gt;Cluster metrics&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;kube-state-metrics&lt;br&gt;node-exporter&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#DCFCE7;strokeColor=#15803D;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1260" y="1355" width="200" height="76" />
+        </mxCell>
+        <mxCell id="kg-kp" value="query metrics" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="kgrafana" target="kprom">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="kp-sm" value="discover targets" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=0;exitY=0.5;entryX=0.5;entryY=0;" edge="1" parent="1" source="kprom" target="sm">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="805" y="1268" />
+              <mxPoint x="805" y="1330" />
+              <mxPoint x="455" y="1330" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="dash-grafana" value="load dashboard" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#15803D;strokeWidth=2;fontColor=#15803D;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=0.5;exitY=1;entryX=1;entryY=0.5;" edge="1" parent="1" source="dash" target="kgrafana">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="690" y="1448" />
+              <mxPoint x="1470" y="1448" />
+              <mxPoint x="1470" y="1270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="keda" value="&lt;b&gt;KEDA · namespace keda&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Reads Kafka group lag&lt;br&gt;ScaledObject → HPA&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="1520" width="285" height="100" />
+        </mxCell>
+        <mxCell id="shared" value="&lt;b&gt;Shared Compose endpoints · host.minikube.internal&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;Kafka :9094 ← relay publish / consume + KEDA lag&lt;br&gt;Postgres :5432 ← both relay roles (SQL)&lt;br&gt;Collector :4317 ← both relay roles (OTLP traces)&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="450" y="1520" width="715" height="100" />
+        </mxCell>
+        <mxCell id="controlplane" value="&lt;b&gt;Kubernetes control plane&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;API server • etcd&lt;br&gt;Scheduler • controllers&lt;br&gt;CoreDNS / pod networking&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1225" y="1520" width="260" height="100" />
+        </mxCell>
+        <mxCell id="keda-shared" value="read lag" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7C3AED;strokeWidth=2;fontColor=#7C3AED;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;" edge="1" parent="1" source="keda" target="shared">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="keda-kdeliver" value="HPA scales" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7C3AED;strokeWidth=2;fontColor=#7C3AED;fontFamily=Arial;fontSize=14;labelBackgroundColor=#FFFFFF;jettySize=auto;exitX=1;exitY=0.5;entryX=0.5;entryY=0;" edge="1" parent="1" source="keda" target="kdeliver">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="330" y="1570" />
+              <mxPoint x="330" y="1220" />
+              <mxPoint x="450" y="1220" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="demo-note" value="Cluster demo: stop Compose relay / sink first; keep shared Kafka and Postgres running. Relay lag is measured from broker offsets by relay-ingest." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=15;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="1637" width="1390" height="28" />
+        </mxCell>
+        <mxCell id="tools" value="&lt;b&gt;Host tools: Make • Docker • kubectl • Helm • Go smoke checks&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:15px&quot;&gt;make seed prepares resources / topics / database. make smoke writes and reads back AWS APIs, Kafka, RabbitMQ, Postgres and relay.&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;fillColor=#F1F5F9;strokeColor=#64748B;strokeWidth=1.5;fontColor=#0F172A;fontFamily=Arial;fontSize=19;spacing=10;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="1720" width="1480" height="70" />
+        </mxCell>
+        <mxCell id="scope" value="Scope: configured local components. Optional live AWS / Terraform is a separate, explicitly authorized path; it is outside this local diagram." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Arial;fontSize=16;fontColor=#475569;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="1802" width="1480" height="32" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
