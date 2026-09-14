@@ -1,10 +1,15 @@
 # Repository file checks
 
+Assessed against the tracked CI, Makefile, checker scripts, and dependency
+manifests on **2026-09-13**. This inventory describes configured coverage; it
+doesn't certify a new CI run or remote branch-protection settings.
+
 This repository checks source files, generated artifacts, infrastructure
 contracts, and running behavior. The checks fall into 4 groups:
 
 - `make lint` runs the static linters and repository-owned documentation check.
-- `make test` runs every Go test, including the Kubernetes manifest tests.
+- `make test` runs Go tests with the race detector, including the Kubernetes
+  manifest tests, then the Python `unittest` suite.
 - GitHub Actions adds Terraform validation, image builds, dependency review,
   module discovery, and end-to-end checks.
 - The remaining `make ...verify...` targets exercise behavior that needs a
@@ -15,6 +20,7 @@ Run the checks touched by a change. The usual local set is:
 ```bash
 make lint
 make test
+make terraform-check
 make k8s-validate
 make smoke
 ```
@@ -52,7 +58,7 @@ so the diagram stays editable beside the workflow it describes.
 ```mermaid
 flowchart TD
     event[Pull request or manual dispatch]
-    event --> go[Go: 6-module matrix]
+    event --> go[Go: 7-module matrix]
     event --> terraform[Terraform: 3-stack matrix]
     event --> python[Python tests and M4 repository preflight]
     event --> smoke[Smoke: ordered runtime suite]
@@ -74,8 +80,8 @@ flowchart TD
     push[Push to protected branch] -. documented GitHub setup .-> codeql[CodeQL default setup]
 ```
 
-The 3 matrices expand the 9 tracked job definitions into 18 job instances on a
-pull request: 6 Go jobs, 3 Terraform jobs, Python, smoke, 3 image jobs, module
+The 3 matrices expand the 9 tracked job definitions into 19 job instances on a
+pull request: 7 Go jobs, 3 Terraform jobs, Python, smoke, 3 image jobs, module
 coverage, lint, dependency review, and the aggregate. A manual run has the same
 shape with dependency review skipped.
 
@@ -83,7 +89,7 @@ shape with dependency review skipped.
 
 | Job | Expansion | Timeout | Work performed |
 |---|---:|---:|---|
-| `go` | 6 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
+| `go` | 7 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
 | `terraform` | 3 stacks | 15 minutes | Format, backend-free initialization, configuration validation, and stack tests where present. |
 | `python` | 1 | 5 minutes | Python tests, the Go-backed live-run Make entry-point check, and the account-independent M4 repository preflight. |
 | `smoke` | 1 | 30 minutes | Start the local platform and run smoke, trace, replay, ordering, drain, and crash checks. |
@@ -102,6 +108,7 @@ The Go matrix covers:
 - `services/relay`
 - `services/sink`
 - `k8s/validate`
+- `tools/m4-bootstrap`
 - `tools/m4-live-run`
 
 Each matrix job checks out the repository, installs the Go version named by
@@ -112,7 +119,11 @@ that module's `go.mod`, and runs:
 3. `go vet ./...`.
 4. `go mod tidy`, followed by a clean-diff assertion for `go.mod` and `go.sum`.
 5. golangci-lint 2.13.1 with the root `.golangci.yml`.
-6. `go test -count=1 ./...`.
+6. `go test -race -count=1 ./...` with `RELAY_STORE_TESTS_OPTIONAL=1`.
+
+The `k8s/validate` matrix job also runs the schema and service-configuration
+script after its Go tests. SQL integration tests may skip in the Go matrix;
+the smoke job requires them against seeded Postgres.
 
 The live-run module tests its deadline arithmetic, bounded apply signal
 sequence, process-group delivery, pending-signal reset, state heartbeat,
@@ -153,20 +164,22 @@ The smoke job has an ordered setup and verification path:
    times.
 4. Start the core and messaging profiles and wait for their health checks.
 5. Seed emulator resources, Kafka topics, and relay subscriptions.
-6. Build relay and sink through Docker Bake with separate GitHub cache scopes.
-7. Start relay and the sink without rebuilding.
-8. Run the smoke program with tracing explicitly optional and no observability
+6. Run `go test -count=1 ./internal/subscriptions ./internal/history` in
+   `services/relay`; unavailable Postgres fails this CI step.
+7. Build relay and sink through Docker Bake with separate GitHub cache scopes.
+8. Start relay and the sink without rebuilding.
+9. Run the smoke program with tracing explicitly optional and no observability
    profile running.
-9. Start the observability profile.
-10. Run the smoke program again with tracing required, checking one Tempo trace
+10. Start the observability profile.
+11. Run the smoke program again with tracing required, checking one Tempo trace
     across ingest, Kafka, and every delivery attempt.
-11. Verify replay of acknowledged events.
-12. Verify steady-state per-tenant ordering with the established shell gate.
-13. Run the Go ordering pilot against the same live stack and contract.
-14. Verify graceful shutdown drains and commits the current record.
-15. Verify a crash in the delivery-to-commit window causes redelivery.
-16. On failure, print the final 100 lines from each Compose service.
-17. Always stop the Compose stack and delete its volumes.
+12. Verify replay of acknowledged events.
+13. Verify steady-state per-tenant ordering with the established shell gate.
+14. Run the Go ordering pilot against the same live stack and contract.
+15. Verify graceful shutdown drains and commits the current record.
+16. Verify a crash in the delivery-to-commit window causes redelivery.
+17. On failure, print the final 100 lines from each Compose service.
+18. Always stop the Compose stack and delete its volumes.
 
 The initial no-observability run and the later trace-required run test 2
 different contracts. The first proves the application continues without a
@@ -181,8 +194,11 @@ non-`scratch` base from its Dockerfile, retries each pull up to 3 times, and
 runs:
 
 ```bash
-docker build -t <service>:ci services/<service>
+docker build --build-arg VERSION="$GITHUB_SHA" -t <service>:ci services/<service>
 ```
+
+Each image's `org.opencontainers.image.revision` label must equal
+`GITHUB_SHA` when read back with `docker inspect`.
 
 ### Lint and dependency jobs
 
@@ -207,8 +223,8 @@ Dependency review runs only for pull requests. It uses the pinned
 
 ### Aggregate result
 
-The `required` job uses `if: always()` and waits for Go, Terraform, smoke,
-images, Go-module coverage, lint, and dependency review. It accepts `success`
+The `required` job uses `if: always()` and waits for Go, Terraform, Python,
+smoke, images, Go-module coverage, lint, and dependency review. It accepts `success`
 or `skipped` from each prerequisite and fails on every other result. The
 expected skip is dependency review during a manual dispatch.
 
@@ -253,6 +269,16 @@ The check ignores `.terraform` directories and the generated
 Grafana JSON block whose lines should stay byte-for-byte equal to the source
 dashboard. The Kubernetes tests parse the generated YAML and check that
 contract instead.
+
+### Python: Ruff 0.16.6
+
+`ruff check .` uses [`ruff.toml`](../ruff.toml), which explicitly selects `F`
+(Pyflakes), `E9` (syntax/runtime-error rules), `B` (flake8-bugbear), and `DTZ`
+(flake8-datetimez). This is a lint gate; the script doesn't run Ruff formatting
+or a Python type checker.
+
+The script accepts a matching native Ruff binary or runs
+`ghcr.io/astral-sh/ruff:0.16.6` through Docker.
 
 ### Shell: ShellCheck 0.11.0
 
@@ -313,7 +339,8 @@ ADR titles.
 
 Actionlint checks workflow YAML under `.github/workflows`. Its coverage
 includes workflow structure, expressions, job references, action inputs, and
-shell embedded in `run:` blocks.
+shell embedded in `run:` blocks when ShellCheck is available to actionlint.
+The native path relies on the host's auxiliary checker installation.
 
 Yamllint still checks the same workflow files for general YAML rules.
 
@@ -493,24 +520,21 @@ make test
 - `make fmt` runs `go fmt ./...` in every module.
 - `make vet` runs `go vet ./...` in every module.
 - `make tidy` runs `go mod tidy` in every module.
-- `make test` runs `go test ./...` in every module. It adds `-count=1` for
-  `k8s/validate` because those tests read files outside Go's test-cache inputs.
+- `make test` runs `go test -race ./...` in every module. It adds `-count=1`
+  for `k8s/validate` because those tests read files outside Go's test-cache
+  inputs, then runs `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover
+  -s scripts/tests`.
+
+The relay SQL tests skip when Postgres is unreachable on a normal local run.
+With `CI` set, missing Postgres fails unless `RELAY_STORE_TESTS_OPTIONAL` is
+also set. Reachable Postgres must have the seeded relay schema and subscription
+data; see [the smoke job](#smoke-job) for the mandatory CI execution.
 
 ### CI Go job
 
-For each module in the CI matrix, GitHub Actions runs:
-
-1. `gofmt -l .` and fails if it prints a file.
-2. `go build ./...`.
-3. `go vet ./...`.
-4. `go mod tidy`, followed by a check that `go.mod` and `go.sum` did not
-   change.
-5. golangci-lint 2.13.1.
-6. `go test -count=1 ./...`.
-
-A separate `go-modules-covered` job discovers every `go.mod` and compares the
-result with the CI matrix. It fails for a missing module or a stale matrix
-entry.
+See [Go matrix](#go-matrix) for the complete format, build, vet, tidy, lint,
+race-test, and module-coverage gates. Local `make fmt` and `make tidy` write
+files; the CI equivalents reject unformatted or untidy changes.
 
 ## Security-sensitive behavior tests
 
@@ -585,10 +609,13 @@ the rendered YAML must parse and contain at least 1 document.
 The schema script separately discovers every Kustomize root under
 `k8s/manifests`, `k8s/aws`, and `k8s/apps/aws`. It renders those roots, the
 generated runtime, replay, and AWS root Application, and the pinned
-kube-prometheus-stack chart. Pinned kubeconform schemas validate the built-in
-Kubernetes kinds; focused Go tests cover custom resources. Because Kubernetes
-schema validation cannot parse configuration embedded inside ConfigMaps, the
-script also asks the exact pinned Tempo and OpenTelemetry Collector images to
+kube-prometheus-stack chart. Kubeconform 0.8.0 runs with `-strict`, `-summary`,
+`-ignore-missing-schemas`, and Kubernetes schema version `1.35.0`. Objects
+without a schema are skipped by kubeconform; focused Go tests cover selected
+custom-resource contracts.
+
+Because Kubernetes schema validation cannot parse configuration embedded inside
+ConfigMaps, the script also asks the exact pinned Tempo and OpenTelemetry Collector images to
 validate their own configuration files.
 
 This gate needs Docker, Helm, and kubectl. The first run contacts container,
@@ -686,24 +713,18 @@ scans when those tools recognize their contents.
 
 ## Terraform validation in CI
 
-The CI Terraform job runs against all 3 stacks:
-
-```bash
-terraform fmt -check -recursive
-terraform init -backend=false -input=false
-terraform validate
-```
+See [Terraform matrix](#terraform-matrix) for the 3 stacks and commands.
+`make terraform-check` runs the same sequence with the installed supported
+Terraform version; CI installs 1.15.8.
 
 `terraform validate` checks parsing, references, types, and provider schemas.
 The guardrail stack's mocked test fixes the persistent budget's name, limit,
 and 3 notifications. The dev stack's mocked tests assert that the default has
-no hourly resources and the enabled plan matches ADR 0010. The disabled backend keeps the job away from
-remote state, and the job has no AWS credentials. This validation is separate
-from `make lint`, which runs Terraform formatting and TFLint.
+no hourly resources and the enabled plan matches ADR 0010.
 
-The repository's cost guardrails still apply. Validation never authorizes
-`terraform apply`, `make aws-up`, or another command that creates AWS
-resources.
+Backend-free initialization still downloads providers and modules. The
+repository's cost guardrails apply to any real-AWS operation; validation
+provides no authorization to apply infrastructure.
 
 ## M4 preflight checks in CI
 
@@ -758,38 +779,14 @@ cluster.
 
 ## Container-image checks
 
-CI has an image-build matrix for `echo`, `relay`, and `sink`. Each job:
-
-1. Reads the build-stage base image from the service's Dockerfile.
-2. Retries that image pull up to 3 times.
-3. Builds with `VERSION=$GITHUB_SHA`.
-4. Reads the OCI revision label back from the image and requires the same SHA.
-
-This proves that each service's pinned Dockerfile can produce an image tied to
-the source commit. The separate Hadolint check covers static Dockerfile rules.
+See [Image matrix](#image-matrix) for pinned-base pulls, service builds, and
+revision-label verification. Hadolint checks the Dockerfiles separately.
 
 ## End-to-end CI checks
 
-The CI smoke job starts the local core and messaging services, seeds AWS
-emulator resources, Kafka topics, and relay subscriptions, then builds and
-starts relay and the sink. It runs these checks in order:
-
-1. The smoke program without an observability stack, proving tracing remains
-   optional.
-2. The smoke program with the observability stack, requiring one Tempo trace
-   that spans ingest, Kafka, and every delivery attempt.
-3. `scripts/verify-replay.sh`, proving acknowledged events can be replayed.
-4. `scripts/verify-ordering.sh`, proving per-tenant delivery order in steady
-   state.
-5. `go run ./cmd/relay-verify ordering` from `services/smoke`, running the Go
-   pilot of the same steady-state ordering contract.
-6. `scripts/verify-graceful-drain.sh`, proving SIGTERM drains and commits the
-   current record before exit.
-7. `scripts/verify-duplicate-on-crash.sh`, proving a crash after delivery and
-   before commit redelivers the event and preserves it.
-
-The job dumps container logs on failure and removes its containers and volumes
-at the end.
+See [Smoke job](#smoke-job) for the ordered SQL, round-trip, trace, replay,
+ordering, drain, and crash checks, including teardown. These tests need the
+seeded Compose stack and run in addition to Go unit tests.
 
 ## Operator-run behavioral checks
 
@@ -814,9 +811,9 @@ so CI does not run them. They are investigation and demonstration tools.
 
 ## Dependency, CodeQL, and aggregate checks
 
-Pull requests run GitHub's pinned dependency-review action. It examines
-dependency changes introduced by the pull request. The workflow supplies no
-custom inputs or repository configuration, so the action uses its defaults.
+Dependency review and the protected-branch aggregate are described under
+[Lint and dependency jobs](#lint-and-dependency-jobs) and
+[Aggregate result](#aggregate-result).
 
 The CI workflow records that GitHub CodeQL default setup scans pushes to the
 protected branch. CodeQL configuration and query selection live in GitHub,
@@ -830,26 +827,91 @@ updates for:
 - Compose images;
 - the `echo`, `relay`, and `sink` Dockerfiles;
 - all 3 Terraform stacks;
-- all 6 Go modules.
+- all 7 Go modules.
 
 Dependabot creates update proposals and reports no pass/fail result. Proposed
 updates still pass through the pull-request gates described in this document.
 
-The `required checks` CI job depends on the Go, Terraform, Python, smoke,
-image, Go-module coverage, lint, and dependency-review jobs. It fails unless
-every required predecessor reaches an accepted result. Branch protection can
-depend on this one aggregate result while the individual jobs retain their
-specific failure output.
-
-The tracked workflow also limits its token to `contents: read`, passes no AWS
-credentials, initializes Terraform with its backend disabled, disables checkout
-credential persistence, and pins each action to a full commit SHA. These are
-workflow controls. No separate repository test currently asserts every action
-pin or permission entry.
+The [workflow controls](#full-ci-workflow) are configured directly. No separate
+repository test currently asserts every action pin or permission entry.
 
 Vulnerability reports follow [`.github/SECURITY.md`](../.github/SECURITY.md),
 which directs reporters to GitHub's private vulnerability-reporting form. The
 policy provides reporting instructions and has no executable gate.
+
+## Libraries and execution dependencies
+
+Checker versions appear in the check sections above. This table records the
+runtime and installation dependencies needed to execute those checks.
+
+| Checks | Required dependencies |
+|---|---|
+| `make` targets and shell checks | Make, Bash, Git, and standard shell utilities. Replay, ordering, drain, and crash scripts also use curl and Python 3. |
+| YAML lint | Python plus `yamllint==1.37.1`, installed with its package dependencies; or Docker and `pipelinecomponents/yamllint:0.35.10`. |
+| Python lint | Native Ruff 0.16.6 or Docker with its pinned Ruff image. The selected flake8/Pyflakes rule families are built into Ruff and need no separate plugins. |
+| Markdown lint | `markdownlint-cli2` 0.23.2 with Node.js and its npm dependency tree; Docker image `davidanson/markdownlint-cli2:v0.23.2`; or `npx --yes markdownlint-cli2@0.23.2`. |
+| ADR index | Bash and standard shell utilities, through `scripts/check-adr-index.sh`; no package library. |
+| ShellCheck, actionlint, Hadolint, golangci-lint, Trivy, Gitleaks | Matching native binaries or the pinned container fallbacks in `scripts/lint.sh`. Actionlint's embedded-shell analysis uses ShellCheck when available. Go analysis also needs the module dependency graph. |
+| Go formatting, build, vet, tidy, and tests | Go 1.27 as declared by each `go.mod` (1.27.0 in 6 modules and 1.27 in `tools/m4-bootstrap`), module downloads, and a race-detector-capable host with cgo/C compiler support for `-race`. |
+| Python tests and repository preflight | Python 3.14 in CI; standard-library `unittest`, JSON, hashing, subprocess, and filesystem libraries. Git history, Make, and Go are needed by the preflight and Make-entry-point tests. CI installs no third-party Python requirements for this job. |
+| Terraform format, validate, and mocked tests | Terraform 1.15.8 in CI; provider and module downloads during backend-free initialization. Versions are detailed below. |
+| TFLint | Docker image `ghcr.io/terraform-linters/tflint:v0.64.0`, built-in recommended Terraform rules, and AWS ruleset 0.44.0 downloaded by `tflint --init`. The lint script has no native TFLint path. |
+| Kubernetes rendering and invariants | Go and the YAML libraries below, kubectl's Kustomize renderer, Helm, Docker, Python 3, and `kube-prometheus-stack` chart 88.5.4. |
+| Kubernetes schemas and embedded telemetry configuration | Digest-pinned kubeconform 0.8.0 image, downloaded Kubernetes 1.35.0 schemas, Tempo 3.0.3, and OpenTelemetry Collector Contrib 0.159.0. The schema script runs the service binaries directly in Docker. |
+| Dashboard generation and validation | Python standard-library `json` for generation; Go standard-library JSON plus the Kubernetes YAML libraries for the source/ConfigMap contract. |
+| Container builds and smoke suite | Docker Engine, Compose, Buildx/BuildKit, AWS CLI and curl for emulator seeding, service Go modules, pinned Dockerfile build images, and the Compose images below. SQL tests require seeded Postgres in the smoke job. |
+| Security scanning | Trivy vulnerability database and digest-pinned checks bundle; full checkout history for Gitleaks in CI. These data downloads are separate from executable installation. |
+| Dependency review | GitHub Actions runner and SHA-pinned `actions/dependency-review-action` v5.0.0; no locally installed application library. |
+
+The workflow uses `ubuntu-latest`; host utilities such as Docker, Helm,
+kubectl, AWS CLI, and the C compiler aren't given a complete version lock by the tracked
+workflow. Install Python/npm tools with their resolved package dependencies;
+this repository doesn't separately lock those tools' transitive packages.
+
+### Go libraries
+
+The complete dependency graphs and checksums live in each module's `go.mod`
+and `go.sum`. The libraries directly supporting validation and runtime tests
+are:
+
+| Library | Recorded version | Check or runtime exercised |
+|---|---|---|
+| `sigs.k8s.io/yaml` | 1.6.0 | Kubernetes YAML decoding; depends on `go.yaml.in/yaml/v2` 2.4.2. `k8s/validate` also replaces its relay-module dependency with the local source. |
+| `github.com/jackc/pgx/v5` | 5.10.0 | Postgres round trips and relay store integration tests. |
+| `github.com/segmentio/kafka-go` | 0.4.51 | Kafka round trips, replay, ordering, and consumer checks. |
+| `github.com/rabbitmq/amqp091-go` | 1.14.0 | RabbitMQ round trips in the smoke program. |
+| `github.com/aws/aws-sdk-go-v2` | 1.46.0 | Emulator API checks, with config 1.33.3, credentials 1.20.3, S3 1.111.0, SES 1.41.0, SNS 1.46.0, and SQS 1.51.0 modules. |
+| `github.com/aws/aws-msk-iam-sasl-signer-go` | 1.0.4 | Relay's MSK IAM authentication code, compiled and tested with the relay module. |
+| `go.opentelemetry.io/otel`, `/sdk`, `/trace`, and OTLP trace gRPC exporter | 1.46.0 | Trace creation, propagation, export, and sensitive-data containment tests. |
+| `google.golang.org/grpc` | 1.83.2 | Relay gRPC/OTLP behavior; also resolved indirectly by the smoke module. |
+| `github.com/prometheus/client_golang` | 1.24.1 | Relay's metric behavior and exposition tests. |
+
+`services/echo`, `services/sink`, `tools/m4-bootstrap`, and `tools/m4-live-run`
+have no third-party Go module requirements. Their tests use the Go standard
+library; subprocess tests can still require external commands.
+
+### Terraform providers and modules
+
+All 3 stacks lock `hashicorp/aws` at 6.63.0. The dev stack also locks
+`hashicorp/cloudinit` 2.4.0, `hashicorp/null` 3.3.1, `hashicorp/time` 0.14.1,
+and `hashicorp/tls` 4.3.0 in its `.terraform.lock.hcl`.
+
+The dev configuration declares `terraform-aws-modules/vpc/aws` with `~> 6.7`
+and `terraform-aws-modules/eks/aws` with `~> 21.25`. These are version
+constraints; provider lock files don't pin registry module resolutions.
+Initialization can download modules even when hourly resources are disabled.
+
+### Local integration services
+
+[`local/docker-compose.yml`](../local/docker-compose.yml) supplies floci
+2.0.1, Postgres 18-alpine, Kafka 4.3.1, RabbitMQ 4.3-management, and an Alpine
+3.24 initialization container. Relay and sink are built from repository source.
+
+The trace stage adds OpenTelemetry Collector Contrib 0.160.0, Prometheus
+v3.14.0, Tempo 3.0.3, and Grafana 13.2.1. The Compose collector version differs
+from the 0.159.0 AWS configuration-validation image described above. Container
+tags retain their recorded precision; a tag alone doesn't establish an immutable
+digest.
 
 ## Current coverage boundaries
 
