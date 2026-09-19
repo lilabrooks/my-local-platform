@@ -13,6 +13,8 @@ locals {
   eks_node_maximum  = 3
   eks_node_desired  = 2
 
+  rds_engine_version = "17.11"
+
   hourly_enabled = var.enable_eks || var.enable_msk || var.enable_rds
 
   # Rates checked for ADR 0010 on 2026-09-05. The gate deliberately prices

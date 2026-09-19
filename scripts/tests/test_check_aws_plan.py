@@ -36,6 +36,7 @@ def shape(**overrides):
             "node_desired": 2,
             "node_maximum": 3,
         },
+        "rds": {"engine_version": "17.11"},
         "kafka": {
             "delivery_partitions": 12,
             "dead_letter_partitions": 1,
@@ -339,7 +340,24 @@ case "$1 $2" in
   'budgets describe-subscribers-for-notification')
     printf '%s\\n' "${MLP_FAKE_SUBSCRIBER_COUNT:-1}"
     ;;
-  'eks describe-cluster-versions') printf '1\\n' ;;
+  'eks describe-cluster-versions')
+    case " $* " in
+      *' --cluster-versions '*)
+        case " $* " in
+          *' --version-status '*|*' --status '*)
+            echo 'conflicting EKS version filters' >&2
+            exit 254
+            ;;
+        esac
+        ;;
+    esac
+    [ "${MLP_FAKE_EKS_ERROR:-}" != 1 ] || exit 42
+    if [ -n "${MLP_FAKE_EKS_RESPONSE:-}" ]; then
+      printf '%s\\n' "$MLP_FAKE_EKS_RESPONSE"
+    else
+      printf '%s\\n' '{"clusterVersions":[{"clusterVersion":"1.35","versionStatus":"STANDARD_SUPPORT"}]}'
+    fi
+    ;;
   *) exit 2 ;;
 esac
 """.replace("@ACCOUNT@", account_id)
@@ -486,6 +504,95 @@ esac
         support = next(i for i, call in enumerate(calls) if call.startswith("aws eks "))
         apply = next(i for i, call in enumerate(calls) if " apply " in f" {call} ")
         self.assertEqual(support + 1, apply)
+
+    def test_support_rejects_nonstandard_or_unproved_versions_before_plan_and_apply(self):
+        versions = (
+            {"clusterVersion": "1.35", "versionStatus": "EXTENDED_SUPPORT"},
+            {"clusterVersion": "1.35", "versionStatus": "UNSUPPORTED"},
+            {"clusterVersion": "1.35"},
+            {"clusterVersion": "1.34", "versionStatus": "STANDARD_SUPPORT"},
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": "EXTENDED_SUPPORT",
+                "status": "standard-support",
+            },
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": "",
+                "status": "standard-support",
+            },
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": None,
+                "status": "standard-support",
+            },
+        )
+        responses = [json.dumps({"clusterVersions": [version]}) for version in versions]
+        responses.extend(['{"clusterVersions": []}', '{}', 'not-json'])
+        for action in ("plan", "apply"):
+            if action == "apply":
+                planned = self._run("plan")
+                self.assertEqual(planned.returncode, 0, planned.stderr)
+                self._write_go_packet()
+            for response in responses:
+                with self.subTest(action=action, response=response):
+                    self.log.write_text("", encoding="utf-8")
+                    environment = self.environment.copy()
+                    environment["MLP_FAKE_EKS_RESPONSE"] = response
+                    if action == "apply":
+                        # Each case models a live controller, whose heartbeat
+                        # must stay fresh while the EKS responses are exercised.
+                        state_path = self.evidence / "controller-state.json"
+                        state = json.loads(state_path.read_text(encoding="utf-8"))
+                        state["updated_at"] = datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        )
+                        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+                    result = self._run(action, environment)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    calls = self.log.read_text(encoding="utf-8").splitlines()
+                    self.assertTrue(
+                        any(call.startswith("aws eks ") for call in calls), result.stderr
+                    )
+                    self.assertFalse(any(f" {action} " in f" {call} " for call in calls))
+
+    def test_support_accepts_authoritative_status_and_legacy_only_response(self):
+        for version in (
+            {"clusterVersion": "1.35", "status": "standard-support"},
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": "STANDARD_SUPPORT",
+                "status": "extended-support",
+            },
+        ):
+            with self.subTest(version=version):
+                environment = self.environment.copy()
+                environment["MLP_FAKE_EKS_RESPONSE"] = json.dumps(
+                    {"clusterVersions": [version]}
+                )
+
+                result = self._run("plan", environment)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_support_api_error_blocks_plan_and_apply(self):
+        for action in ("plan", "apply"):
+            with self.subTest(action=action):
+                if action == "apply":
+                    planned = self._run("plan")
+                    self.assertEqual(planned.returncode, 0, planned.stderr)
+                    self._write_go_packet()
+                self.log.write_text("", encoding="utf-8")
+                environment = self.environment.copy()
+                environment["MLP_FAKE_EKS_ERROR"] = "1"
+
+                result = self._run(action, environment)
+
+                self.assertNotEqual(result.returncode, 0)
+                calls = self.log.read_text(encoding="utf-8").splitlines()
+                self.assertFalse(any(f" {action} " in f" {call} " for call in calls))
 
     def test_plan_summary_is_bound_to_run_and_commit(self):
         result = self._run("plan")

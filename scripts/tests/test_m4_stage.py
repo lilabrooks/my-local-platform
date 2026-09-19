@@ -200,7 +200,10 @@ class ImageStageTest(unittest.TestCase):
                     "has_notification_subscriber": True,
                 },
                 "quotas": {"gate": {"passed": True, "failures": []}},
-                "availability": {"gate": {"passed": True, "failures": []}},
+                "availability": {
+                    "rds_postgres": {"engine_version": "17.11", "passed": True},
+                    "gate": {"passed": True, "failures": []},
+                },
                 "gate": {"passed": True, "failures": []},
             },
             "02-prices.json": price,
@@ -224,6 +227,7 @@ class ImageStageTest(unittest.TestCase):
                         "node_desired": 2,
                         "node_maximum": 3,
                     },
+                    "rds": {"engine_version": "17.11"},
                     "kafka": {
                         "delivery_topic": "mlp.relay.deliveries",
                         "delivery_partitions": 12,
@@ -485,6 +489,37 @@ class ImageStageTest(unittest.TestCase):
 
         self.assertEqual(set(value["rates"]), set(REVIEWED_RATES))
         self.assertTrue(all(rate == "" for rate in value["rates"].values()))
+
+    def test_go_packet_rejects_rds_version_drift_or_missing_availability(self):
+        cases = (
+            ({"engine_version": "17.4"}, {"engine_version": "17.11", "passed": True}),
+            ({"engine_version": "17.11"}, {"engine_version": "17.4", "passed": True}),
+            (None, {"engine_version": "17.11", "passed": True}),
+            ({"engine_version": "17.11"}, None),
+            ({"engine_version": "17.11"}, {"passed": True}),
+            ({"engine_version": ""}, {"engine_version": "", "passed": True}),
+            ({"engine_version": "17.11"}, {"engine_version": "17.11", "passed": False}),
+        )
+        for shape, availability in cases:
+            with self.subTest(shape=shape, availability=availability):
+                run_id = "20260908T040000Z"
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    run = self.write_release_inputs(root, run_id)
+                    plan_path = run / "03-plan-summary.json"
+                    plan = json.loads(plan_path.read_text())
+                    plan["shape"]["rds"] = shape
+                    plan_path.write_text(json.dumps(plan))
+                    identity_path = run / "01-identity.txt"
+                    identity = json.loads(identity_path.read_text())
+                    identity["availability"]["rds_postgres"] = availability
+                    identity_path.write_text(json.dumps(identity))
+
+                    with mock.patch.object(STAGE, "ROOT", root):
+                        with self.assertRaisesRegex(STAGE.StageError, "RDS engine version"):
+                            STAGE.build_go_no_go(
+                                run_id, COMMIT, "us-east-1", "operator-one", FakeRunner()
+                            )
 
     def test_go_packet_binds_every_gate_to_one_run_and_commit(self):
         run_id = "20260908T040000Z"

@@ -484,7 +484,7 @@ that shift, narrow enough to name precisely.
    $0.60/cluster-hour instead of $0.10, applied automatically:
 
    ```bash
-   aws eks describe-cluster-versions --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
+   aws eks describe-cluster-versions --query 'clusterVersions[?versionStatus==`STANDARD_SUPPORT`].clusterVersion'
    ```
 
 3. Create the decided ECR layout: separate immutable `mlp-dev/relay` and

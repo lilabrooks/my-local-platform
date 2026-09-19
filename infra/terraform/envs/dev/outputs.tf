@@ -76,6 +76,9 @@ output "runtime_shape" {
       node_desired       = local.eks_node_desired
       node_maximum       = local.eks_node_maximum
     }
+    rds = {
+      engine_version = var.enable_rds ? aws_db_instance.main[0].engine_version : local.rds_engine_version
+    }
     kafka = {
       delivery_topic         = local.delivery_topic
       delivery_partitions    = local.delivery_partitions

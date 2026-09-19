@@ -108,13 +108,17 @@ check_budget() {
 }
 
 check_eks_support() {
-	local region=$1 version=$2 count
-	count=$(aws eks describe-cluster-versions \
+	local region=$1 version=$2 versions count
+	versions=$(aws eks describe-cluster-versions \
 		--region "$region" \
 		--cluster-versions "$version" \
-		--version-status STANDARD_SUPPORT \
-		--query 'length(clusterVersions)' \
-		--output text)
+		--output json)
+	count=$(jq -er --arg version "$version" '
+		[.clusterVersions[] | select(.clusterVersion == $version) |
+		 select((if has("versionStatus") then .versionStatus else .status end) as $status |
+		        $status == "STANDARD_SUPPORT" or $status == "standard-support")]
+		| length
+	' <<<"$versions")
 	if [ "$count" != "1" ]; then
 		echo "EKS Kubernetes $version is not in STANDARD_SUPPORT in $region" >&2
 		exit 1

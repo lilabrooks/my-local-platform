@@ -772,6 +772,65 @@ and the focused capture/staging/publication suites passed 50. Offline
 confirmed no scrape-interval override for kube-state-metrics; the chart values
 document a 30-second default. Monitoring configuration stayed unchanged.
 
+### Staging diagnostics, 2026-09-19
+
+The owner authorized #96 cheap staging. Read-only checks against the intended
+SSO profile found 2 preparation defects before any AWS mutation:
+
+- `aws eks describe-cluster-versions --cluster-versions 1.35 --version-status
+  STANDARD_SUPPORT` returned `InvalidParameterException`: the version and
+  status filters cannot be combined. Querying `--cluster-versions 1.35` alone
+  returned `STANDARD_SUPPORT`. The account check now requests the pinned
+  version alone and checks its returned support status locally.
+- `aws rds describe-orderable-db-instance-options --engine postgres
+  --engine-version 17.4 --db-instance-class db.t4g.micro --vpc` returned
+  `InvalidParameterCombination`: PostgreSQL 17.4 was unavailable.
+  `aws rds describe-db-engine-versions --engine postgres` listed 17.11 as
+  available. Repeating the orderable-options query with 17.11 confirmed
+  encrypted gp3 on `db.t4g.micro` in `us-east-1a` and `us-east-1b`.
+  Terraform and the account check now pin 17.11.
+
+These commands used `--profile aws-public-change-feed --region us-east-1`.
+Calling `quotas(Runner())` from `scripts/m4-aws-account.py` passed all 5 checks:
+100 EKS clusters, 10 MSK Serverless clusters (the documented fallback), 40 RDS
+instances, 32 Standard Spot vCPUs, and 5 Elastic IPs remained available.
+Calling the corrected `availability(Runner(), "us-east-1")` passed EKS standard
+support, MSK regional presence, RDS offerings, and node offerings. The MSK
+region check uses the existing documented region list plus AWS service-region
+parameters; it does not prove that a Serverless cluster can be created.
+
+The account-scoped backend was absent from `s3api list-buckets`, after
+`head-bucket` returned 404. `budgets describe-budget` reported that
+`mlp-live-aws-monthly` did not exist. The chosen alert destination is stored
+only in ignored private configuration. No backend, budget, dev resource, or
+image was created in AWS.
+
+`make terraform-check` validated all 3 stacks and passed 8 mocked contracts.
+The focused account suite passed 14 tests, including the incompatible-filter
+regression and rejection of extended-support, unsupported, missing-status,
+and wrong-version EKS responses. `make aws-preflight-check` passed. `make lint`
+passed all 12 checks with no skips; M4 Python discovery passed all 117 tests.
+These are diagnostics and local checks, not a staging pass: the corrected source still
+needs review and merge, then fresh clean-candidate rehearsals and the full
+preflight before staging.
+
+The second review found the same incompatible EKS filters in the shell plan
+and apply guard. The correction requests JSON and checks support locally;
+both shell and Python prefer `versionStatus` whenever it is present. The
+operational examples now use that field as well.
+
+The review also exposed a missing RDS handoff check. The Terraform plan output
+now carries the database resource's requested engine version, and GO generation
+requires it to match the passed account availability observation. The focused
+account, guarded-plan, and staging suites passed 66 tests; `make terraform-check`
+validated all 3 stacks and passed 8 mocked contracts after these corrections.
+The full Python suite passed 182 tests, `make lint` passed all 12 checks with
+no skips, and `make aws-preflight-check` passed. No new AWS account call or
+cluster rehearsal ran. The
+[review resolution](../reviews/m4-96-staging-review-resolution.md) records the
+producer-to-consumer path and remaining gates. The expensive plan without apply
+and GO remain #96 work; #97 approval is required for the paid apply.
+
 ## Sources
 
 - [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
