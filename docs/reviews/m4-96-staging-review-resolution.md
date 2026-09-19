@@ -78,7 +78,10 @@ git diff --check
 Terraform validated all 3 stacks and passed 8 mocked contracts. The first test
 attempt exposed a disposable-fixture reuse error in the new apply subtests;
 the corrected test prepares one valid plan/GO fixture and reuses it for the
-rejected apply attempts. No production check was bypassed.
+rejected apply attempts. Post-rebase testing also exposed an expired synthetic
+controller heartbeat between apply cases. Each case now refreshes that fixture
+so it reaches the EKS check; the production five-second freshness limit is
+unchanged. No production check was bypassed.
 
 The broader checks then passed: `make lint` reported 12 passes with no skips;
 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests`

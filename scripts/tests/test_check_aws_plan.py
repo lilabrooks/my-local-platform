@@ -539,12 +539,23 @@ esac
                     self.log.write_text("", encoding="utf-8")
                     environment = self.environment.copy()
                     environment["MLP_FAKE_EKS_RESPONSE"] = response
+                    if action == "apply":
+                        # Each case models a live controller, whose heartbeat
+                        # must stay fresh while the EKS responses are exercised.
+                        state_path = self.evidence / "controller-state.json"
+                        state = json.loads(state_path.read_text(encoding="utf-8"))
+                        state["updated_at"] = datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        )
+                        state_path.write_text(json.dumps(state), encoding="utf-8")
 
                     result = self._run(action, environment)
 
                     self.assertNotEqual(result.returncode, 0)
                     calls = self.log.read_text(encoding="utf-8").splitlines()
-                    self.assertTrue(any(call.startswith("aws eks ") for call in calls))
+                    self.assertTrue(
+                        any(call.startswith("aws eks ") for call in calls), result.stderr
+                    )
                     self.assertFalse(any(f" {action} " in f" {call} " for call in calls))
 
     def test_support_accepts_authoritative_status_and_legacy_only_response(self):
