@@ -28,7 +28,7 @@ This bills a personal AWS account. Two rules:
 
    ```bash
    aws eks describe-cluster-versions \
-     --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
+     --query 'clusterVersions[?versionStatus==`STANDARD_SUPPORT`].clusterVersion'
    ```
 
 `make aws-cost` shows month-to-date spend. Everything Terraform creates is

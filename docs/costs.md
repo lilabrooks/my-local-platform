@@ -122,7 +122,7 @@ Check before changing the version:
 
 ```bash
 aws eks describe-cluster-versions \
-  --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion' \
+  --query 'clusterVersions[?versionStatus==`STANDARD_SUPPORT`].clusterVersion' \
   --profile aws-public-change-feed
 ```
 

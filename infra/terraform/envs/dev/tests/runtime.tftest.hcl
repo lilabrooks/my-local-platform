@@ -227,6 +227,14 @@ run "live_runtime_matches_the_accepted_shape" {
 
   assert {
     condition = (
+      output.runtime_shape.rds.engine_version == "17.11" &&
+      output.runtime_shape.rds.engine_version == aws_db_instance.main[0].engine_version
+    )
+    error_message = "The RDS runtime shape must carry the pinned database engine version for the staging availability check."
+  }
+
+  assert {
+    condition = (
       output.runtime_shape.kafka.delivery_partitions == 12 &&
       output.runtime_shape.kafka.dead_letter_partitions == 1 &&
       output.runtime_shape.kafka.total_partitions == 13

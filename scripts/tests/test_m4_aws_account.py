@@ -213,6 +213,11 @@ class FakeRunner:
         if arguments[:3] == ["aws", "ec2", "describe-addresses"]:
             return {"Addresses": []}
         if arguments[:3] == ["aws", "eks", "describe-cluster-versions"]:
+            # EKS rejects a version filter combined with a status filter.
+            if "--cluster-versions" in arguments and any(
+                flag in arguments for flag in ("--status", "--version-status")
+            ):
+                raise ACCOUNT_CHECK.AccountError("conflicting EKS version filters")
             return {"clusterVersions": [self.eks_version]}
         if arguments[:3] == ["aws", "ssm", "get-parameters-by-path"]:
             return {
@@ -232,7 +237,7 @@ class FakeRunner:
                 "OrderableDBInstanceOptions": [
                     {
                         "Engine": "postgres",
-                        "EngineVersion": "17.4",
+                        "EngineVersion": "17.11",
                         "DBInstanceClass": "db.t4g.micro",
                         "StorageType": "gp3",
                         "Vpc": True,
@@ -389,6 +394,38 @@ class AccountEvidenceTest(unittest.TestCase):
         self.assertEqual(msk["limit"], "12")
         self.assertEqual(msk["limit_source"], "service-quotas")
 
+    def test_eks_support_rejects_versions_outside_standard_support(self):
+        for version in (
+            {"clusterVersion": "1.35", "versionStatus": "EXTENDED_SUPPORT"},
+            {"clusterVersion": "1.35", "versionStatus": "UNSUPPORTED"},
+            {"clusterVersion": "1.35"},
+            {"clusterVersion": "1.34", "versionStatus": "STANDARD_SUPPORT"},
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": "EXTENDED_SUPPORT",
+                "status": "standard-support",
+            },
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": "",
+                "status": "standard-support",
+            },
+            {
+                "clusterVersion": "1.35",
+                "versionStatus": None,
+                "status": "standard-support",
+            },
+        ):
+            with self.subTest(version=version):
+                runner = FakeRunner()
+                runner.eks_version = version
+
+                availability, eks = ACCOUNT_CHECK.availability(runner, "us-east-1")
+
+                self.assertFalse(eks["standard_support"])
+                self.assertFalse(availability["gate"]["passed"])
+                self.assertIn("eks_standard_support", availability["gate"]["failures"])
+
     def test_eks_support_accepts_the_deprecated_lowercase_status(self):
         runner = FakeRunner()
         runner.eks_version = {
@@ -405,6 +442,19 @@ class AccountEvidenceTest(unittest.TestCase):
         )
 
         self.assertTrue(receipt["eks"]["standard_support"])
+
+    def test_eks_support_prefers_current_status_over_deprecated_status(self):
+        runner = FakeRunner()
+        runner.eks_version = {
+            "clusterVersion": "1.35",
+            "versionStatus": "STANDARD_SUPPORT",
+            "status": "extended-support",
+        }
+
+        availability, eks = ACCOUNT_CHECK.availability(runner, "us-east-1")
+
+        self.assertTrue(eks["standard_support"])
+        self.assertTrue(availability["gate"]["passed"])
 
     def test_budget_notification_drift_is_rejected(self):
         runner = FakeRunner()

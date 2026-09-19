@@ -70,7 +70,7 @@ resource "aws_db_instance" "main" {
 
   identifier     = local.name
   engine         = "postgres"
-  engine_version = "17.4"
+  engine_version = local.rds_engine_version
   instance_class = "db.t4g.micro"
 
   allocated_storage = 20
@@ -169,7 +169,7 @@ module "eks" {
   # bills at $0.60/cluster/hour instead of $0.10 -- $438/month rather than $73,
   # applied automatically with no approval step. Check before changing:
   #   aws eks describe-cluster-versions \
-  #     --query 'clusterVersions[?status==`STANDARD_SUPPORT`].clusterVersion'
+  #     --query 'clusterVersions[?versionStatus==`STANDARD_SUPPORT`].clusterVersion'
   # 1.35 is in standard support until 2027-03-27.
   kubernetes_version = var.eks_kubernetes_version
 

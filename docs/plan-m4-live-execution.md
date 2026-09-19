@@ -1,13 +1,17 @@
 # M4 staging and live validation plan
 
-Status: Review fixes implemented on 2026-09-11. Final review, merge, and fresh
-clean-candidate rehearsals still precede staging. The earlier dirty-tree local
-run remains development evidence. This document does not authorize AWS mutations.
+Status: Preparation merged in PR #139 on 2026-09-11. The owner authorized #96
+cheap staging on 2026-09-19. Read-only account checks found an invalid EKS API
+filter combination and an unavailable RDS PostgreSQL 17.4 pin. The second-review
+corrections are implemented locally; final review, merge, and fresh
+clean-candidate rehearsals precede staging.
+No AWS resource was created by these checks. #97 still needs separate approval.
 
-Reviewed source: `88e9a103d123feddef19720af1730253c8630327`, containing
+Original source this plan was written against:
+`88e9a103d123feddef19720af1730253c8630327`, containing
 [PR #137](https://github.com/lilabrooks/my-local-platform/pull/137).
-The next executable steps belong to preparation; this SHA is not yet the
-candidate to stage.
+The staging candidate will be the merge commit containing the reviewed
+2026-09-19 corrections. That commit does not exist yet.
 
 The governing contract is [ADR 0010](adr/0010-live-aws-relay-contract.md).
 The [AWS runbook](runbook-aws-relay.md) and [cost guide](costs.md) carry the

@@ -24,6 +24,7 @@ OUTPUT_NAME = "01-identity.txt"
 EXPECTED_REPOSITORY = "lilabrooks/my-local-platform"
 EXPECTED_REGION = "us-east-1"
 EKS_VERSION = "1.35"
+RDS_ENGINE_VERSION = "17.11"
 BUDGET_NAME = "mlp-live-aws-monthly"
 FIXED_AZS = ("us-east-1a", "us-east-1b")
 MSK_SERVERLESS_REGIONS = frozenset(
@@ -748,8 +749,6 @@ def availability(runner: Runner, region: str) -> tuple[dict[str, Any], dict[str,
                 "describe-cluster-versions",
                 "--cluster-versions",
                 EKS_VERSION,
-                "--version-status",
-                "STANDARD_SUPPORT",
                 "--output",
                 "json",
             ]
@@ -762,10 +761,8 @@ def availability(runner: Runner, region: str) -> tuple[dict[str, Any], dict[str,
         for version in versions
         if isinstance(version, dict)
         and version.get("clusterVersion") == EKS_VERSION
-        and (
-            version.get("versionStatus") == "STANDARD_SUPPORT"
-            or version.get("status") in {"STANDARD_SUPPORT", "standard-support"}
-        )
+        and version.get("versionStatus", version.get("status"))
+        in ("STANDARD_SUPPORT", "standard-support")
     ]
     eks_passed = len(supported) == 1
 
@@ -801,7 +798,7 @@ def availability(runner: Runner, region: str) -> tuple[dict[str, Any], dict[str,
                 "--engine",
                 "postgres",
                 "--engine-version",
-                "17.4",
+                RDS_ENGINE_VERSION,
                 "--db-instance-class",
                 "db.t4g.micro",
                 "--vpc",
@@ -817,7 +814,7 @@ def availability(runner: Runner, region: str) -> tuple[dict[str, Any], dict[str,
         for option in options
         if isinstance(option, dict)
         and option.get("Engine") == "postgres"
-        and option.get("EngineVersion") == "17.4"
+        and option.get("EngineVersion") == RDS_ENGINE_VERSION
         and option.get("DBInstanceClass") == "db.t4g.micro"
         and option.get("StorageType") == "gp3"
         and option.get("Vpc") is True
@@ -866,7 +863,7 @@ def availability(runner: Runner, region: str) -> tuple[dict[str, Any], dict[str,
             "passed": msk_passed,
         },
         "rds_postgres": {
-            "engine_version": "17.4",
+            "engine_version": RDS_ENGINE_VERSION,
             "instance_class": "db.t4g.micro",
             "storage_type": "gp3",
             "availability_zones": sorted(rds_azs),

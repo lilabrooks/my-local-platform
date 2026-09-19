@@ -992,6 +992,16 @@ def build_go_no_go(
         "node_maximum": 3,
     }:
         raise StageError("plan summary has the wrong EKS shape")
+    rds = availability.get("rds_postgres")
+    if (
+        not isinstance(rds, dict)
+        or rds.get("passed") is not True
+        or not isinstance(rds.get("engine_version"), str)
+        or not rds["engine_version"].strip()
+    ):
+        raise StageError("RDS engine version availability evidence is missing or failed")
+    if shape.get("rds") != {"engine_version": rds["engine_version"]}:
+        raise StageError("planned RDS engine version does not match availability evidence")
     if shape.get("kafka") != {
         "delivery_topic": "mlp.relay.deliveries",
         "delivery_partitions": 12,
