@@ -265,8 +265,8 @@ failure.
 <summary>Terraform scope and safety boundary</summary>
 
 - The cheap tier contains S3, SNS, SQS, 2 ECR repositories, and optional SES.
-- A separate persistent stack owns the account-wide $5 monthly AWS Budget, so
-  dev cleanup cannot delete the alert.
+- A separate persistent stack owns the $5 monthly AWS Budget filtered to
+  `Project=my-local-platform`, excluding tax. Dev cleanup cannot delete the alert.
 - The live relay proof adds EKS, RDS, and MSK Serverless only when their flags
   are enabled.
 - `make aws-plan` saves an exact plan and a redaction-safe summary.
@@ -284,6 +284,7 @@ failure.
 
 | Need | Document |
 |---|---|
+| Validate an application or a shared-stack change | [Application validation](docs/application-validation.md) |
 | Run or troubleshoot Compose | [Local runbook](docs/runbook-local.md) |
 | Run minikube and ArgoCD | [Kubernetes runbook](docs/runbook-k8s.md) |
 | Prepare the M4 AWS session | [AWS relay runbook](docs/runbook-aws-relay.md) |
@@ -354,6 +355,13 @@ full job inventory is in [Repository file checks](docs/repository-file-checks.md
    `Application` in `k8s/apps/`.
 5. Add a smoke check that writes data, reads it back, and asserts the result.
 6. Add Terraform only for behavior that needs a live AWS check.
+
+Each new application needs a bounded local rehearsal of its own behavior.
+Use the [application validation guide](docs/application-validation.md) to
+choose the checks, reuse existing platform evidence, and decide whether an
+AWS cheap-tier check or a staged hourly session is needed. An existing automated
+end-to-end check can satisfy the local rehearsal when it covers the agreed path
+and its dated result is recorded.
 
 </details>
 <!-- markdownlint-enable MD033 -->
