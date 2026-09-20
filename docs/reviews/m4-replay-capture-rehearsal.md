@@ -1,6 +1,6 @@
 # M4 replay capture rehearsal
 
-Status: Two local failures preserved; load-observation correction awaiting review and merge.
+Status: Two local failures preserved; PR #146 diagnostics revised; second-review F1 remains disputed.
 No AWS resources were created. Issue #96 remains open.
 
 ## Observed on 2026-09-20 UTC
@@ -121,9 +121,9 @@ futures can finish during sampling, and a recent pre-submission zero-lag sample
 can then release the sink delay and finish the loop before scale-out is observed.
 The repair takes a Prometheus boundary before submission and another after all
 600 producers complete, and uses the existing broker/scrape ordering checks.
-It retains the terminal metrics before validating peak observations. The fixed
-load, polling cadence, and 480-second window stay unchanged; a genuinely quiet
-cohort still fails without extra load or observation time.
+The initial repair retained terminal metrics before validating peak observations.
+The fixed load, three-second sleep, and 480-second window stay unchanged; a
+genuinely quiet cohort still fails without extra load or observation time.
 
 No full rehearsal was repeated after this failure. ArgoCD's visual view was
 captured, while the remaining visual rehearsal is incomplete. No live preflight
@@ -142,3 +142,69 @@ with the repair. `make aws-preflight-check` and `git diff --check` passed.
 
 After explicit bindings corrected the new test fixture's Ruff findings, all
 34 capture tests passed again. `make lint` passed all 12 checks with no skips.
+
+### PR #146 second-review response
+
+The review of `93c697c732dcc24a098fa38af3abd0c8f88977a9` confirmed the two
+ordering regressions and requested revisions. It did not approve merge.
+
+**F1 remains disputed.** No wait for positive peaks was added. A fresh,
+post-boundary quiet cohort remains negative evidence and fails immediately;
+extending its observation solely until a positive peak appears conflicts with
+the repository instruction to preserve quiet samples. The proposed 60-second
+grace derives from a staleness allowance, not an established settling period;
+the configured KSM scrape interval is 30 seconds. The saved range query records
+evaluation timestamps and only three metric values, not the actual source
+scrape timestamps, broker refresh timestamp, or submission boundary. It cannot
+establish that a sample in the review's ten-second window would have passed
+all five metrics' ordering checks. Matching the failure message alone does not
+establish that the ordering defect survives. This does not prove the historical
+failure is fixed, nor rule out a missed scale-out. Review reconciliation remains
+required before treating this candidate as ready to merge.
+
+**F2's diagnostic gap is addressed; its causal inference remains unproven.**
+Load evidence now records every started sampling iteration, pending reason,
+accepted sample, and available per-instance poller diagnostics. Finalization
+exports partial evidence after stop/cleanup, including on handled timeout,
+producer failure, and interruption. Storage failure keeps the receipt failed.
+The diagnostics are separate from proof gates so missing diagnostic series do
+not suppress otherwise valid proof observations. Iterations interrupted during
+a query remain marked interrupted; acknowledgements are those observed by the
+loop, not a claim that every submitted producer completed on failure.
+
+Five observed desired replicas cannot be inverted into a contemporaneous
+41–50 lag: the HPA updates asynchronously and has a 30-second scale-down
+stabilization window. The saved history begins at `01:35:40Z`, after capture
+started at `01:35:12Z`; it is not the entire capture window. A lag peak of one
+in that export does not establish the cause or size of an under-report. The
+poller's rebalance path returns before either diagnostic counter/gauge update;
+zero errors and missing partitions therefore do not exclude a frozen snapshot.
+Per-instance broker refresh values are retained alongside them. No claim is
+made that these optional observations recover unsampled proof values.
+
+**F3 and F4 are documented.** A full boundary-checked sample uses 17 queries;
+the new optional diagnostic read adds one. The sleep remains three seconds,
+but total iteration time includes requests. Both boundaries can leave up to
+one normal 30-second KSM interval without an accepted proof sample. Longer
+observation gaps and missed short peaks remain possible.
+
+**F5's scope is retained.** Only the two ordering scenarios are claimed to
+reproduce the original defect against the base. The other modes cover the
+revised implementation's failures and deadlines; they are not all regressions
+against that base.
+
+No load, cluster probe, or AWS mutation was performed for this revision. The
+owner pasted the saved demo transcript, which is textual evidence, not a
+terminal screenshot. The visual gate remains incomplete. Both historical
+failed receipts are unchanged, and neither replay nor log-export completion
+has been established by a full capture on this repair.
+
+Verification for this response: the full Python suite passed 197 tests, and all
+38 capture tests passed after the final failure-handling changes. Those checks
+cover partial export after stop/cleanup, write failure preserving the original
+error, per-instance poller values, pending reasons, and diagnostic errors that
+cannot hide deadline expiry. `make aws-preflight-check` passed. The only initial
+lint failure was an extra blank line in this record, which was removed.
+The other 11 `make lint` checks passed with no skips; the corrected Markdown
+passed a separate run of the pinned `davidanson/markdownlint-cli2:v0.23.2`
+container. `git diff --check` passed.

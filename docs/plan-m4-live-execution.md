@@ -10,8 +10,9 @@ PR #145 merged the replay-readiness corrections as
 `1e7c30ee562e813e1e28bdd9a1a7c4184c958e6e`. That candidate passed shutdown,
 demo, controller, and abort rehearsals, then failed capture's load-observation
 check before reaching replay or log export. The load observation correction
-needs review and merge, followed by fresh clean-candidate rehearsals before
-staging. See the [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
+has revised failure diagnostics; second-review F1 remains disputed. It needs
+review reconciliation and merge, followed by fresh clean-candidate rehearsals
+before staging. See the [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
 No AWS resource was created by these checks. #97 still needs separate approval.
 
 Original source this plan was written against:

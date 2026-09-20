@@ -56,6 +56,11 @@ QUERIES = {
     "idle": 'max(relay_group_unassigned_members{group="relay-deliver"})',
     "replicas": 'kube_deployment_spec_replicas{namespace="mlp",deployment="relay-deliver"}',
 }
+POLLER_QUERY = (
+    '(relay_lag_partitions_missing{group="relay-deliver"} or '
+    'relay_lag_refresh_errors_total or relay_lag_refreshed_timestamp_seconds) '
+    'and on(instance) relay_build_info{role="ingest"}'
+)
 # Relay ServiceMonitor: 15s. Chart-managed kube-state-metrics: 30s.
 # Allow two scrape intervals without changing the monitored configuration.
 SAMPLE_MAX_AGE = {
@@ -230,6 +235,7 @@ class Capture:
         self.changed_sink = False
         self.changed_pause = False
         self.provenance = {}
+        self.load_evidence = None
 
     def guard(self):
         if self.cancelled.is_set():
@@ -589,6 +595,42 @@ class Capture:
             # Only missing observations and transport interruptions are pending.
             # HTTP errors, invalid values, cancellation and deadlines stay fatal.
             return None
+
+    def poller_diagnostics(self):
+        # One non-gating read per load iteration. Preserve each ingest instance:
+        # sums or maxima can conceal one frozen poller behind another healthy one.
+        self.guard()
+        try:
+            response = self.http(
+                "prometheus", "/api/v1/query?" + urllib.parse.urlencode(
+                    {"query": POLLER_QUERY}
+                )
+            )
+            data = response.get("data", {})
+            results = data.get("result", [])
+            if (response.get("status") != "success"
+                    or data.get("resultType") != "vector" or len(results) > 64):
+                raise ValueError("invalid diagnostic response")
+            series = []
+            for item in results:
+                evaluated_at, value = map(float, item["value"])
+                if not all(math.isfinite(v) and v >= 0 for v in (evaluated_at, value)):
+                    raise ValueError("invalid diagnostic value")
+                series.append({
+                    "labels": {key: value for key, value in item["metric"].items()
+                               if key in {"__name__", "instance", "pod", "group", "topic"}},
+                    # An instant-query response timestamps its evaluation, not the
+                    # underlying scrape. Never present this as a scrape timestamp.
+                    "evaluated_at_prometheus_seconds": evaluated_at,
+                    "value": value,
+                })
+            return {"result": "observed" if series else "missing", "series": series}
+        except (CaptureError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            # Diagnostics cannot substitute for proof or mask its failure. Do not
+            # persist raw error bodies; recheck cancellation/deadlines below.
+            return {"result": "unavailable", "error_type": type(error).__name__}
+        finally:
+            self.guard()
 
     def sample(self, *, not_before=None):
         broker_timestamp = (
@@ -996,10 +1038,23 @@ class Capture:
         self.write("13-trace.json", trace)
         print("capture: fixed 600-event scale cohort", flush=True)
         # Only demo tenants affect the scale cohort; acme failures are separate.
+        samples = [baseline]
+        self.load_evidence = {
+            "queries": QUERIES,
+            "poller_diagnostic_query": POLLER_QUERY,
+            "sample_max_age_seconds": SAMPLE_MAX_AGE,
+            "samples": samples,
+            "observations": [],
+            "load_event_ids": [],
+            "cohort": marker,
+            "load_started_at_prometheus_seconds": None,
+            "submitted_at_prometheus_seconds": None,
+        }
         self.changed_sink = True
         self.http("sink", "/control", {"latency_ms": 1000, "fail_rate": 0})
         load_ids = []
         load_started_at = self.wait(lambda: self.pending_metric("vector(time())"), 30)
+        self.load_evidence["load_started_at_prometheus_seconds"] = load_started_at
 
         def post(i):
             body = {
@@ -1015,7 +1070,6 @@ class Capture:
                 self.stop()
                 raise
 
-        samples = [baseline]
         with self.load_pool() as pool:
             futures = [pool.submit(post, i) for i in range(600)]
             released = False
@@ -1033,17 +1087,28 @@ class Capture:
                         raise CaptureError(
                             "load producer failed"
                         ) from future.exception()
+                observation = {"started_at": utc(), "result": "interrupted"}
+                self.load_evidence["observations"].append(observation)
+                self.load_evidence["load_event_ids"] = [
+                    f.result() for f in futures if f.done()
+                ]
                 # Snapshot completion BEFORE sampling. Futures can finish while
                 # Prometheus requests run; that must not make an older zero-lag
                 # sample eligible to release the sink or complete this cohort.
                 submitted = all(f.done() for f in futures)
                 if submitted and submitted_at is None:
                     submitted_at = self.pending_metric("vector(time())")
-                sample = self.pending_sample(
-                    not_before=(
-                        submitted_at if submitted_at is not None else load_started_at
-                    )
-                )
+                self.load_evidence["submitted_at_prometheus_seconds"] = submitted_at
+                boundary = submitted_at if submitted_at is not None else load_started_at
+                observation["not_before"] = boundary
+                observation["poller"] = self.poller_diagnostics()
+                try:
+                    sample = self.sample(not_before=boundary)
+                except ObservationPending as error:
+                    sample = None
+                    observation["pending_reason"] = str(error)
+                observation["sample"] = sample
+                observation["result"] = "pending" if sample is None else "observed"
                 self.guard()
                 if time.monotonic() >= end:
                     raise CaptureError(
@@ -1068,20 +1133,9 @@ class Capture:
                     and sample["members"] == 1
                 ):
                     load_ids = [f.result() for f in futures]
+                    self.load_evidence["load_event_ids"] = load_ids
                     break
                 time.sleep(3)
-        self.write(
-            "12-metrics.txt",
-            {
-                "queries": QUERIES,
-                "sample_max_age_seconds": SAMPLE_MAX_AGE,
-                "samples": samples,
-                "load_event_ids": load_ids,
-                "cohort": marker,
-                "load_started_at_prometheus_seconds": load_started_at,
-                "submitted_at_prometheus_seconds": submitted_at,
-            },
-        )
         if (
             len(set(load_ids)) != 600
             or max(s["lag"] for s in samples) <= 0
@@ -1360,6 +1414,15 @@ class Capture:
                     self.close_forwards()
             else:
                 self.close_forwards()
+            evidence_error = None
+            if self.load_evidence is not None:
+                try:
+                    self.write("12-metrics.txt", self.load_evidence)
+                except (RuntimeError, OSError, ValueError) as error:
+                    evidence_error = error
+                    result = "failed"
+                    self.cancelled.set()
+                    self.stop()
             self.write(
                 "capture-result.json",
                 {
@@ -1382,6 +1445,8 @@ class Capture:
                     "finished_at": utc(),
                 },
             )
+            if evidence_error is not None and sys.exc_info()[0] is None:
+                raise CaptureError("load observations could not be saved") from evidence_error
         if result != "passed":
             raise CaptureError("capture cleanup did not pass")
 

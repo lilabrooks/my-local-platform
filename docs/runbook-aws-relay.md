@@ -248,9 +248,34 @@ cannot make an earlier zero-lag sample eligible. The original 480-second window
 and fixed 600-event, 16-tenant cohort remain unchanged.
 
 A fresh final drain without the required scale-out observations fails that
-cohort; it does not extend the sample or submit extra load. Its metrics export
-is retained before the scale-out assertions so the failed terminal observation
-can be inspected. A failed capture receipt remains failed even with that file.
+cohort; it does not extend the sample or submit extra load. Once the load phase
+starts, capture accumulates accepted samples, per-iteration observations and
+pending reasons, both boundaries, and observed producer acknowledgements. It
+writes `12-metrics.txt` during finalization, after requesting stop on failure
+and performing local cleanup. Handled deadline, producer, sampling, and
+interruption failures therefore retain partial evidence too. A process kill or
+storage failure cannot guarantee an export; a failed write cannot produce a
+passing receipt. A failed capture receipt remains failed even with that file.
+
+Each iteration also reads per-ingest-instance `relay_lag_partitions_missing`,
+`relay_lag_refresh_errors_total`, and `relay_lag_refreshed_timestamp_seconds`
+in one optional diagnostic query, even when a proof sample is pending. Missing
+or unavailable diagnostics are recorded; they do not satisfy or block proof.
+The response timestamps are query evaluation times, not underlying scrape
+timestamps. The broker refresh timestamp is a metric value. During group
+rebalance the poller returns before updating the missing-partitions gauge or
+incrementing the error counter, so zero values do not rule out a frozen poller.
+
+A full boundary-checked sample uses 17 sequential Prometheus queries; the
+optional diagnostic query makes 18 per load iteration, plus a completion-clock
+query until that boundary is available. Pending samples may return earlier.
+The three-second sleep follows these requests; it is not a fixed sampling rate,
+and request time consumes the existing deadlines. No cohort proof sample is
+accepted until every source scrape postdates its boundary, including the
+30-second kube-state-metrics scrape. Each boundary can therefore leave up to
+one normal KSM interval without an accepted sample, or longer if observations
+are unavailable. A short peak can be missed; the diagnostic record preserves
+pending iterations but does not reconstruct missing proof values.
 
 A missing or stale sample is retried within the original baseline, 480-second
 load, or 120-second replay-drain window. It cannot prove scale, release the

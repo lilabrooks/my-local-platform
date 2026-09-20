@@ -143,6 +143,121 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(receipt["result"], "passed")
             self.assertFalse(receipt["cleanup_verified"])
 
+    def test_failed_load_evidence_is_saved_after_stop_and_cleanup(self):
+        for failure in (CAPTURE.CaptureError("deadline"),
+                        CAPTURE.CaptureError("producer failed"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                capture = CAPTURE.Capture(self.args())
+                capture.raw = Path(tmp)
+                capture.setup = mock.Mock()
+                capture.set_phase_deadline = mock.Mock()
+                calls = []
+                packet = {"observations": [{"result": "pending", "pending_reason": "stale"}],
+                          "submitted_at_prometheus_seconds": None}
+
+                def proof(capture=capture, packet=packet, failure=failure):
+                    capture.load_evidence = packet
+                    raise failure
+
+                capture.proof = proof
+                capture.stop = mock.Mock(side_effect=lambda calls=calls: calls.append("stop"))
+                capture.cleanup_local = mock.Mock(side_effect=lambda calls=calls: calls.append("cleanup") or True)
+                original_write = capture.write
+
+                def write(name, value, calls=calls, original_write=original_write):
+                    calls.append(name)
+                    original_write(name, value)
+
+                capture.write = write
+                with self.assertRaises(type(failure)):
+                    capture.run()
+                self.assertEqual(calls, ["capture-start.json", "stop", "cleanup",
+                                         "12-metrics.txt", "capture-result.json"])
+                self.assertEqual(json.loads((capture.raw / "12-metrics.txt").read_text()), packet)
+                receipt = json.loads((capture.raw / "capture-result.json").read_text())
+                self.assertEqual(receipt["result"], "failed")
+                self.assertEqual(set(receipt["files"]), {"12-metrics.txt"})
+                self.assertTrue(receipt["cleanup_verified"])
+
+    def test_diagnostic_write_failure_cannot_pass_or_mask_original_failure(self):
+        for proof_fails in (False, True):
+            with self.subTest(proof_fails=proof_fails), tempfile.TemporaryDirectory() as tmp:
+                capture = CAPTURE.Capture(self.args())
+                capture.raw = Path(tmp)
+                capture.setup = mock.Mock()
+                capture.set_phase_deadline = mock.Mock()
+                capture.stop = mock.Mock()
+                capture.cleanup_local = mock.Mock(return_value=True)
+                capture.load_evidence = {"observations": []}
+                capture.proof = mock.Mock(side_effect=
+                    CAPTURE.CaptureError("original proof failure") if proof_fails else None)
+                original_write = capture.write
+
+                def write(name, value, original_write=original_write):
+                    if name == "12-metrics.txt":
+                        raise OSError("disk full")
+                    original_write(name, value)
+
+                capture.write = write
+                message = "original proof failure" if proof_fails else "observations could not be saved"
+                with self.assertRaisesRegex(CAPTURE.CaptureError, message):
+                    capture.run()
+                receipt = json.loads((capture.raw / "capture-result.json").read_text())
+                self.assertEqual(receipt["result"], "failed")
+                self.assertNotIn("12-metrics.txt", receipt["files"])
+                self.assertTrue(capture.cancelled.is_set())
+                capture.stop.assert_called()
+
+    def test_poller_diagnostics_preserve_instances_and_evaluation_times(self):
+        capture = CAPTURE.Capture(self.args())
+        series = [
+            {"metric": {"__name__": name, "instance": instance}, "value": [200, value]}
+            for instance, name, value in (
+                ("a", "relay_lag_refreshed_timestamp_seconds", "100"),
+                ("b", "relay_lag_refreshed_timestamp_seconds", "195"),
+                ("a", "relay_lag_partitions_missing", "2"),
+                ("b", "relay_lag_partitions_missing", "0"),
+                ("a", "relay_lag_refresh_errors_total", "3"),
+                ("b", "relay_lag_refresh_errors_total", "0"),
+            )
+        ]
+        capture.http = mock.Mock(return_value={"status": "success", "data": {
+            "resultType": "vector", "result": series,
+        }})
+        result = capture.poller_diagnostics()
+        self.assertEqual(result["result"], "observed")
+        self.assertEqual(len(result["series"]), 6)
+        self.assertEqual(result["series"][0]["value"], 100)
+        self.assertEqual(result["series"][1]["value"], 195)
+        self.assertEqual(result["series"][0]["evaluated_at_prometheus_seconds"], 200)
+        capture.http.assert_called_once()
+        query = CAPTURE.urllib.parse.parse_qs(
+            CAPTURE.urllib.parse.urlsplit(capture.http.call_args.args[1]).query)["query"][0]
+        self.assertIn("relay_lag_partitions_missing", query)
+        self.assertIn("relay_lag_refresh_errors_total", query)
+        self.assertIn("relay_lag_refreshed_timestamp_seconds", query)
+
+    def test_optional_poller_failure_never_becomes_proof_or_hides_deadline(self):
+        capture = CAPTURE.Capture(self.args())
+        capture.http = mock.Mock(return_value={"status": "success", "data": {
+            "resultType": "vector", "result": [],
+        }})
+        self.assertEqual(capture.poller_diagnostics()["result"], "missing")
+        for error in (CAPTURE.CaptureError("HTTP 503 private body"),
+                      CAPTURE.urllib.error.URLError("unavailable")):
+            capture.http.side_effect = error
+            self.assertEqual(capture.poller_diagnostics(), {
+                "result": "unavailable", "error_type": type(error).__name__,
+            })
+        capture.http.side_effect = None
+        capture.http.return_value = {"status": "success", "data": {
+            "resultType": "vector", "result": [{"metric": {}, "value": [200, "NaN"]}],
+        }}
+        self.assertEqual(capture.poller_diagnostics()["result"], "unavailable")
+        capture.guard = mock.Mock(side_effect=[None, CAPTURE.CaptureError("deadline")])
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "deadline"):
+            capture.poller_diagnostics()
+
     def test_missing_workload_and_initial_scrape_are_waited_for(self):
         capture = CAPTURE.Capture(self.args())
         capture.guard = mock.Mock()
@@ -534,6 +649,10 @@ class CaptureTests(unittest.TestCase):
                         query = CAPTURE.urllib.parse.parse_qs(
                             CAPTURE.urllib.parse.urlsplit(path).query
                         )["query"][0]
+                        if query == CAPTURE.POLLER_QUERY:
+                            return {"status": "success", "data": {
+                                "resultType": "vector", "result": [],
+                            }}
                         if query == "vector(time())":
                             observed["clock_queries"] += 1
                             if observed["clock_queries"] == 1:
@@ -660,21 +779,33 @@ class CaptureTests(unittest.TestCase):
                 outputs = {
                     call.args[0]: call.args[1] for call in capture.write.call_args_list
                 }
+                self.assertNotIn("12-metrics.txt", outputs)  # run() finalizes it
+                if mode in ("transient", "persistent"):
+                    pending = [item for item in capture.load_evidence["observations"]
+                               if item["result"] == "pending"]
+                    self.assertTrue(pending)
+                    self.assertTrue(all(item["pending_reason"] == "stale replicas"
+                                        for item in pending))
+                    self.assertTrue(all(item["poller"]["result"] == "missing"
+                                        for item in pending))
+                if mode == "hard":
+                    self.assertEqual(capture.load_evidence["observations"][-1]["result"],
+                                     "interrupted")
                 if passes:
                     self.assertEqual(observed["samples"], 3)
                     self.assertEqual(
                         observed["controls"][-1], ({"latency_ms": 0, "fail_rate": 0}, 3)
                     )
                     self.assertEqual(
-                        len(outputs["12-metrics.txt"]["samples"]),
+                        len(capture.load_evidence["samples"]),
                         4 if mode in ("completes_during_sample", "clock_pending") else 3,
                     )  # baseline plus accepted cohort observations
-                    self.assertEqual(outputs["12-metrics.txt"][
+                    self.assertEqual(capture.load_evidence[
                         "load_started_at_prometheus_seconds"], 100)
-                    self.assertEqual(outputs["12-metrics.txt"][
+                    self.assertEqual(capture.load_evidence[
                         "submitted_at_prometheus_seconds"], 200)
                     self.assertEqual(
-                        len(set(outputs["12-metrics.txt"]["load_event_ids"])), 600
+                        len(set(capture.load_evidence["load_event_ids"])), 600
                     )
                     self.assertFalse(capture.cancelled.is_set())
                     capture.stop.assert_not_called()
@@ -682,13 +813,14 @@ class CaptureTests(unittest.TestCase):
                     # A quiet cohort fails once; do not extend it to seek scale-out.
                     self.assertEqual(observed["samples"], 1)
                     self.assertEqual(clock[0], 0)
-                    self.assertEqual(len(outputs["12-metrics.txt"]["samples"]), 2)
-                    self.assertEqual(len(outputs["12-metrics.txt"]["load_event_ids"]), 600)
+                    self.assertEqual(len(capture.load_evidence["samples"]), 2)
+                    self.assertEqual(len(capture.load_evidence["load_event_ids"]), 600)
                     self.assertNotIn("14-keda.txt", outputs)
                 else:
                     self.assertTrue(capture.cancelled.is_set())
                     capture.stop.assert_called_once()
-                    self.assertNotIn("12-metrics.txt", outputs)
+                    self.assertIsNotNone(capture.load_evidence)
+                    self.assertTrue(capture.load_evidence["observations"])
                     self.assertEqual(len(observed["controls"]), 1)  # delay held
                     if mode in ("persistent", "clock_missing"):
                         self.assertEqual(clock[0], 480)
