@@ -51,6 +51,22 @@ harness tracks.
 
 ## Verifying a change
 
+For a new application or a change to shared infrastructure, follow
+[Application validation](docs/application-validation.md). Rehearse each new
+app locally, recheck the boundaries it changes, and require live AWS evidence
+before claiming tested AWS support. An existing automated end-to-end check
+can satisfy the local rehearsal. Scope live validation to questions local
+testing cannot answer and choose the appropriate cheap or hourly tier;
+staging and hourly execution retain separate owner approvals. Check the shared
+monthly budget and M4's state and inventory scope before adding another AWS app.
+Existing application contracts, including relay's M4 gates, still apply.
+
+For new-app and shared-stack issues, include the guide in Governing anchors
+and write acceptance criteria naming the selected environment, checks, and
+observable results. In the PR's application-validation section, link the dated
+evidence and state which AWS surfaces remain untested. Resolve missing required
+evidence or record an explicit deferral before claiming validation complete.
+
 Run what the change touches. None of these creates cloud resources or incurs
 AWS charges:
 
