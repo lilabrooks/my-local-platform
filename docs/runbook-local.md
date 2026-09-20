@@ -75,7 +75,19 @@ the JVM services grow substantially:
 | `messaging` | ~660 MB | kafka, rabbitmq |
 | `tools` | ~285 MB | kafka-ui (needs `messaging`) |
 | `obs` | ~490 MB | collector, prometheus, tempo, grafana |
-| **all** | **~1.6 GB** | everything above |
+| `apps` | ~40 MB (estimate) | relay-ingest, relay-deliver, sink (built from source) |
+| **all** | **no recorded measurement** | every profile above, `apps` included |
+
+Two limits on those numbers. The `~1.6 GB` figure was recorded in `5e652c8`,
+two days before `f93da81` added the `apps` profile, so it measures the four
+infrastructure profiles and not the complete stack. The `apps` estimate is the
+one in the header comment of `local/docker-compose.yml`, which labels
+`~1,570 MB` as the infrastructure subtotal. **No measurement of the complete
+stack is recorded**, so do not use `all` for capacity planning without taking one.
+
+`apps` is listed anyway because the table omitted it, which made `all` read as
+the union of the four rows above — and that omission is what hides the fact
+that `make up` starts the Compose relay and sink containers.
 
 A local minikube adds the most of anything here, and how much depends on what
 is in it. `MINIKUBE_MEMORY` is **6g** since 2026-08-27; measured on the `mlp`
@@ -111,7 +123,17 @@ Memory cannot be changed on a running cluster with the docker driver:
 | `make up-messaging` | Kafka, RabbitMQ |
 | `make up-tools` | adds Kafka UI |
 | `make up-obs` | OTel Collector, Prometheus, Tempo, Grafana |
-| `make up` | everything |
+| `make up-apps` | relay and sink from source; brings `core` and `messaging` |
+| `make up` | everything, the relay and sink containers included |
+
+`make up` and `make up-apps` start the Compose `relay-ingest`, `relay-deliver`
+and `sink` containers. Of those, `relay-deliver` joins the **same Kafka consumer
+group** as the cluster's delivery consumers and splits the partitions with them,
+so do not run both application sets at once — see
+[do not run the compose apps and the cluster apps together](runbook-k8s.md#do-not-run-the-compose-apps-and-the-cluster-apps-together).
+This is also why `make up` is the wrong way to resume a paused stack that was
+running the cluster workloads; use the profile subset under
+[Pausing](#pausing) instead.
 
 `make urls` prints every endpoint.
 
@@ -421,7 +443,7 @@ current source and inspect broker latency if it regresses.
 
 2. **The collector's connection to Tempo goes stale if Tempo restarts.** The
    collector logs `no children to pick from` and retries forever.
-   `docker compose --env-file .env -f local/docker-compose.yml --profile obs restart otel-collector`.
+   `docker compose --env-file "$([ -f .env ] && echo .env || echo .env.example)" -f local/docker-compose.yml --profile obs restart otel-collector`.
 
 3. Tempo takes ~5-20 seconds after start to report ready. Check
    `curl http://localhost:3200/ready`.
@@ -452,7 +474,8 @@ makes it idempotent against either kind of volume. If a stale volume still gets
 in the way:
 
 ```bash
-docker compose --env-file .env -f local/docker-compose.yml rm -sf grafana
+docker compose --env-file "$([ -f .env ] && echo .env || echo .env.example)" \
+  -f local/docker-compose.yml rm -sf grafana
 docker volume rm mlp_grafana-data
 ```
 
@@ -483,9 +506,71 @@ volume is orphaned and safe to delete once you are happy:
 docker volume rm mlp_pg-data
 ```
 
-## Resetting
+## Pausing
+
+To put the stack down for the day, pause it rather than tearing it down. `stop`
+keeps the containers themselves, so resuming needs no rebuild and no re-seed.
+
+For shutdown, include every profile whose services you want stopped. This
+example stops `core`, `messaging` and `obs`; include `tools` or `apps` if those
+should stop too:
 
 ```bash
-make down     # stop, keep data
-make clean    # stop and delete all volumes -- re-seed afterwards
+env_file=$([ -f .env ] && echo .env || echo .env.example)
+docker compose --env-file "$env_file" -f local/docker-compose.yml \
+  --profile core --profile messaging --profile obs stop
+```
+
+**Choose resume profiles independently of the shutdown selection.** `start`
+starts every existing container the selection covers, including any you
+previously stopped on purpose. The documented Kubernetes
+workflow is `make up` followed by stopping the Compose apps, so resuming that
+stack with `--profile all` would put `relay-deliver` back into the cluster's
+consumer group. This is also why there is deliberately no `make stop`: a target
+that guessed the selection would make exactly that mistake for you.
+
+Resume with `start` and the selection you want. The assignment is repeated here
+because this is usually a new shell:
+
+```bash
+env_file=$([ -f .env ] && echo .env || echo .env.example)
+docker compose --env-file "$env_file" -f local/docker-compose.yml \
+  --profile core --profile messaging --profile obs start
+```
+
+What survives is the containers and their volumes: Kafka logs and offsets,
+Postgres rows, Prometheus storage and Grafana storage all have persistent
+mounts, so none of this touches them. **Process memory does not survive.** The
+sink keeps its retained deliveries, counters and its latency and fail-rate
+controls in memory only, and builds a fresh instance at startup, so a pause
+discards them. Port-forwards are not durable either: `make grafana-ui` and
+`make argocd-ui` are foreground sessions and have to be started again.
+
+**A local cluster pauses separately, and the order matters.** The cluster's
+relay workloads and the KEDA scaler both reach Kafka over
+`host.minikube.internal` (`KAFKA_BOOTSTRAP` in
+`k8s/manifests/relay/configmap.yaml`, `bootstrapServers` in
+`k8s/manifests/relay/scaledobject.yaml`), so delivery and lag collection stop
+working with no broker there. Stop the cluster before the broker and start the
+broker before the cluster:
+
+```bash
+make k8s-down   # minikube stop -p mlp; keeps cluster state
+make k8s-up     # back, with the pinned CPU, memory and version
+```
+
+Full order to pause: `make k8s-down`, then `docker compose ... stop`. To
+resume: `docker compose ... start`, then `make k8s-up`. After `make k8s-up`,
+ArgoCD reconciles against `main`, so the revision it reports can advance past
+the one it showed when you paused; that is a comparison revision, not evidence
+about which images the pods are running.
+
+## Resetting
+
+Heavier than pausing. `down` removes the containers, so `make up` rebuilds and
+re-seeds — and starts every profile, `apps` included.
+
+```bash
+make down     # remove Compose containers, keep data volumes
+make clean    # remove Compose containers and data volumes -- re-seed afterwards
 ```

@@ -41,7 +41,7 @@ AWS_REAL_ENV = env -i \
 # ---------------------------------------------------------------------------
 
 .PHONY: up
-up: ## Start everything (~1.6GB sustained; see docs/runbook-local.md)
+up: ## Start every Compose profile, including apps (memory: see docs/runbook-local.md)
 	# --build because relay and the sink are built from source and `all`
 	# includes them. Without it, compose starts the image it built last, so
 	# editing relay and running the documented `make up && make smoke` reports
@@ -101,11 +101,11 @@ seed: ## Create local AWS resources and Kafka topics (idempotent)
 		-- ./local/bootstrap/relay-db.sh
 
 .PHONY: down
-down: ## Stop the stack, keep volumes
+down: ## Remove Compose containers, keep data volumes
 	$(COMPOSE) --profile all down
 
 .PHONY: clean
-clean: ## Stop the stack and DELETE all local data volumes
+clean: ## Remove Compose containers and DELETE their data volumes
 	$(COMPOSE) --profile all down -v
 
 .PHONY: ps
@@ -458,14 +458,14 @@ k8s-apply-local: ## Apply manifests directly, bypassing git and ArgoCD
 	fi
 	@echo
 	@echo "  relay and the sink read the compose Kafka and Postgres over"
-	@echo "  host.minikube.internal, so 'make up' and 'make seed' first."
+	@echo "  host.minikube.internal, so start Compose with 'make up' first."
 	@echo
-	@echo "  BUT NOT 'make up-apps'. The compose and cluster delivery consumers"
-	@echo "  join the SAME Kafka group and split the partitions between them, so"
-	@echo "  half the events get delivered to whichever sink you are not looking"
-	@echo "  at. Run one or the other:  docker compose --env-file $(ENV_FILE) \\"
+	@echo "  Both 'make up' and 'make up-apps' start the Compose apps. Their"
+	@echo "  delivery consumer shares the cluster's Kafka group and partitions."
+	@echo "  Stop the Compose apps before running the cluster workloads:"
+	@echo "                           docker compose --env-file $(ENV_FILE) \\"
 	@echo "                               -f local/docker-compose.yml \\"
-	@echo "                               stop relay-ingest relay-deliver sink" 
+	@echo "                               stop relay-ingest relay-deliver sink"
 
 .PHONY: k8s-validate
 k8s-validate: ## Assert manifest invariants (selector immutability, probes, endpoints)

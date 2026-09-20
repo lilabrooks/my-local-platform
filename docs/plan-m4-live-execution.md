@@ -1,8 +1,9 @@
 # M4 staging and live validation plan
 
 Status: #96 staging completed on 2026-09-20 UTC for frozen source
-`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; issue closure awaits the evidence
-PR merge. Local run `20260920T153931Z` passed all four machine rehearsals and
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; the issue closed when
+[PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged.
+Local run `20260920T153931Z` passed all four machine rehearsals and
 all four visual views. Preflight `20260920T155738Z` passed all 16 checks.
 The cheap dev tier was applied, both immutable images were staged, and the
 hourly plan was reviewed without applying it. GO passed at 16:13:51Z; the
