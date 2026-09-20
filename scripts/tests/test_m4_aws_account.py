@@ -30,6 +30,11 @@ class FakeRunner:
         self.rds_azs = ["us-east-1a", "us-east-1b"]
         self.public_access_blocked = True
         self.budget_limit = "5.0"
+        self.cost_filters = {"TagKeyValue": ["user:Project$my-local-platform"]}
+        self.cost_types = ACCOUNT_CHECK.BUDGET_COST_TYPES.copy()
+        self.allocation_tags = [
+            {"TagKey": "Project", "Type": "UserDefined", "Status": "Active"}
+        ]
         self.subscribers = [
             {"SubscriptionType": "EMAIL", "Address": "owner@example.com"}
         ]
@@ -129,8 +134,12 @@ class FakeRunner:
                     "BudgetType": "COST",
                     "TimeUnit": "MONTHLY",
                     "BudgetLimit": {"Amount": self.budget_limit, "Unit": "USD"},
+                    "CostFilters": self.cost_filters,
+                    "CostTypes": self.cost_types,
                 }
             }
+        if arguments[:3] == ["aws", "ce", "list-cost-allocation-tags"]:
+            return {"CostAllocationTags": self.allocation_tags}
         if arguments[:3] == [
             "aws",
             "budgets",
@@ -468,6 +477,49 @@ class AccountEvidenceTest(unittest.TestCase):
                 "us-east-1",
                 runner,
             )
+
+    def test_budget_rejects_account_wide_wrong_or_extra_filters(self):
+        for filters in (
+            {},
+            {"TagKeyValue": ["user:Project$another-project"]},
+            {"TagKeyValue": ["user:Project$my-local-platform"], "Region": ["us-east-1"]},
+        ):
+            with self.subTest(filters=filters):
+                runner = FakeRunner()
+                runner.cost_filters = filters
+                with self.assertRaisesRegex(ACCOUNT_CHECK.AccountError, "filter only"):
+                    ACCOUNT_CHECK.budget(ACCOUNT_ID, runner)
+
+    def test_budget_requires_tax_exclusion_and_unchanged_other_cost_types(self):
+        for key, value in (("IncludeTax", True), ("IncludeRecurring", False)):
+            with self.subTest(key=key):
+                runner = FakeRunner()
+                runner.cost_types[key] = value
+                with self.assertRaises(ACCOUNT_CHECK.AccountError):
+                    ACCOUNT_CHECK.budget(ACCOUNT_ID, runner)
+
+    def test_budget_requires_active_cost_allocation_tag(self):
+        for tags in ([], [{"TagKey": "Project", "Type": "UserDefined", "Status": "Inactive"}]):
+            with self.subTest(tags=tags):
+                runner = FakeRunner()
+                runner.allocation_tags = tags
+                with self.assertRaisesRegex(ACCOUNT_CHECK.AccountError, "must be Active"):
+                    ACCOUNT_CHECK.budget(ACCOUNT_ID, runner)
+
+    def test_budget_accepts_omitted_default_threshold_type_and_checks_subscribers(self):
+        runner = FakeRunner()
+        for notification in runner.notifications:
+            del notification["ThresholdType"]
+        receipt = ACCOUNT_CHECK.budget(ACCOUNT_ID, runner)
+        self.assertEqual(receipt["scope"]["tag_value"], "my-local-platform")
+        requests = [call for call in runner.calls if call[2] == "describe-subscribers-for-notification"]
+        self.assertEqual(len(requests), 3)
+        for call in requests:
+            identity = json.loads(call[call.index("--notification") + 1])
+            self.assertEqual(identity["ThresholdType"], "PERCENTAGE")
+        runner.notifications[0]["ThresholdType"] = "ABSOLUTE_VALUE"
+        with self.assertRaisesRegex(ACCOUNT_CHECK.AccountError, "do not match"):
+            ACCOUNT_CHECK.budget(ACCOUNT_ID, runner)
 
     def test_budget_limit_drift_is_rejected(self):
         runner = FakeRunner()

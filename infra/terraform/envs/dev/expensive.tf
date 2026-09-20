@@ -165,6 +165,10 @@ module "eks" {
   version = "~> 21.25"
 
   name = local.name
+  # Provider defaults tag Terraform resources, but not the instances, volumes,
+  # and network interfaces that EKS launches. The module passes these tags to
+  # all three launch-template tag specifications.
+  tags = local.resource_tags
   # MUST stay on a version in STANDARD support. A version in extended support
   # bills at $0.60/cluster/hour instead of $0.10 -- $438/month rather than $73,
   # applied automatically with no approval step. Check before changing:

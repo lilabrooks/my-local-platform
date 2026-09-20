@@ -32,14 +32,7 @@ provider "aws" {
   region = var.region
 
   default_tags {
-    tags = {
-      Project     = "my-local-platform"
-      Environment = "dev"
-      ManagedBy   = "terraform"
-      # Makes it trivial to spot anything this repo left running:
-      #   aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=my-local-platform
-      Ephemeral = "true"
-    }
+    tags = local.resource_tags
   }
 }
 
@@ -48,6 +41,12 @@ data "aws_caller_identity" "current" {}
 locals {
   name   = "mlp-${var.environment}"
   suffix = data.aws_caller_identity.current.account_id
+  resource_tags = {
+    Project     = "my-local-platform"
+    Environment = "dev"
+    ManagedBy   = "terraform"
+    Ephemeral   = "true"
+  }
 }
 
 # =============================================================================

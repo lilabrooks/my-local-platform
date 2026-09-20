@@ -22,6 +22,16 @@ run "persistent_budget_matches_the_live_aws_contract" {
   }
 
   assert {
+    condition = (
+      length(aws_budgets_budget.live_aws.cost_filter) == 1 &&
+      one(aws_budgets_budget.live_aws.cost_filter).name == "TagKeyValue" &&
+      toset(one(aws_budgets_budget.live_aws.cost_filter).values) == toset(["user:Project$my-local-platform"]) &&
+      one(aws_budgets_budget.live_aws.cost_types).include_tax == false
+    )
+    error_message = "The budget must cover only Project=my-local-platform spending before tax."
+  }
+
+  assert {
     condition = toset([
       for item in aws_budgets_budget.live_aws.notification :
       "${item.notification_type}:${item.comparison_operator}:${item.threshold}:${item.threshold_type}"

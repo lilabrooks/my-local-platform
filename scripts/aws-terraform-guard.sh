@@ -34,77 +34,12 @@ require_command() {
 }
 
 check_budget() {
-	local account_id budget_name=$1 limit notifications_json notification_count
-	local notification subscriber_count
+	local account_id budget_name=$1
 	account_id=$(aws sts get-caller-identity --query Account --output text)
-	if ! limit=$(aws budgets describe-budget \
-		--account-id "$account_id" \
-		--budget-name "$budget_name" \
-		--query 'Budget.BudgetLimit.Amount' \
-		--output text 2>/dev/null); then
-		echo "hourly resources require the pre-existing $budget_name budget" >&2
-		echo "apply the persistent guardrail stack, then plan again" >&2
-		exit 1
-	fi
-	if ! awk -v value="$limit" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/) }'; then
-		echo "$budget_name returned an invalid budget limit" >&2
-		exit 1
-	fi
-	awk -v limit="$limit" 'BEGIN { exit !(limit == 5) }' || {
-		echo "$budget_name must have the approved \$5 limit" >&2
-		exit 1
-	}
-	notifications_json=$(aws budgets describe-notifications-for-budget \
-		--account-id "$account_id" \
-		--budget-name "$budget_name" \
-		--query 'Notifications' \
-		--output json)
-	if ! notification_count=$(jq -er \
-		'if type == "array" then length else error("notifications must be an array") end' \
-		<<<"$notifications_json"); then
-		echo "$budget_name returned an invalid notification list" >&2
-		exit 1
-	fi
-	if [ "$notification_count" -lt 1 ]; then
-		echo "$budget_name has no notification; hourly resources remain blocked" >&2
-		exit 1
-	fi
-	if ! jq -e '
-		(map([.NotificationType, .ComparisonOperator, .Threshold, .ThresholdType]) | sort)
-		==
-		([ ["ACTUAL", "GREATER_THAN", 80, "PERCENTAGE"],
-		   ["ACTUAL", "GREATER_THAN", 100, "PERCENTAGE"],
-		   ["FORECASTED", "GREATER_THAN", 100, "PERCENTAGE"] ] | sort)
-	' <<<"$notifications_json" >/dev/null; then
-		echo "$budget_name notification settings do not match the guardrail stack" >&2
-		exit 1
-	fi
-	if ! jq -e 'all(.[]; .NotificationState == "OK")' \
-		<<<"$notifications_json" >/dev/null; then
-		echo "$budget_name notifications are not all OK; hourly resources remain blocked" >&2
-		exit 1
-	fi
-
-	while IFS= read -r notification; do
-		subscriber_count=$(aws budgets describe-subscribers-for-notification \
-			--account-id "$account_id" \
-			--budget-name "$budget_name" \
-			--notification "$notification" \
-			--query 'length(Subscribers)' \
-			--output text)
-		case "$subscriber_count" in
-			'' | *[!0-9]*)
-				echo "$budget_name returned an invalid subscriber count" >&2
-				exit 1
-				;;
-		esac
-		if [ "$subscriber_count" -lt 1 ]; then
-			echo "$budget_name has a notification without a subscriber; hourly resources remain blocked" >&2
-			exit 1
-		fi
-	done < <(jq -c \
-		'.[] | {NotificationType, ComparisonOperator, Threshold, ThresholdType}' \
-		<<<"$notifications_json")
+	# Use the same scope, activation, notification, and subscriber checks as
+	# the account receipt collector, immediately before hourly plan/apply.
+	python3 "$ROOT_DIR/scripts/m4-aws-account.py" --budget-only \
+		--account-id "$account_id" --budget-name "$budget_name"
 }
 
 check_eks_support() {

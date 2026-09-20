@@ -198,6 +198,12 @@ class ImageStageTest(unittest.TestCase):
                     "active": True,
                     "limit_usd": "5.00",
                     "has_notification_subscriber": True,
+                    "scope": {
+                        "tag_key": "Project",
+                        "tag_value": "my-local-platform",
+                        "cost_allocation_tag_status": "Active",
+                        "include_tax": False,
+                    },
                 },
                 "quotas": {"gate": {"passed": True, "failures": []}},
                 "availability": {
@@ -208,6 +214,13 @@ class ImageStageTest(unittest.TestCase):
             },
             "02-prices.json": price,
             "03-plan-summary.json": {
+                "project_tag_coverage": {
+                    "tag_key": "Project",
+                    "tag_value": "my-local-platform",
+                    "resources": ["module.eks[0].aws_eks_cluster.this[0]"],
+                    "launch_templates": ["module.eks[0].aws_launch_template.this[0]"],
+                    "gate": {"passed": True, "failures": []},
+                },
                 "schema_version": 1,
                 "run_id": run_id,
                 "source_commit": COMMIT,
@@ -545,6 +558,30 @@ class ImageStageTest(unittest.TestCase):
             receipt["image_references"]["relay"],
             f"{REPOSITORIES['relay']}@{RELAY_DIGEST}",
         )
+
+    def test_go_rejects_missing_or_changed_budget_scope_and_tag_coverage(self):
+        run_id = "20260908T040000Z"
+        for filename, field, replacement in (
+            ("01-identity.txt", "budget", {"active": True, "limit_usd": "5", "has_notification_subscriber": True}),
+            ("03-plan-summary.json", "project_tag_coverage", None),
+            ("03-plan-summary.json", "project_tag_coverage", {
+                "tag_key": "Project", "tag_value": "my-local-platform",
+                "resources": ["aws_eks_cluster.main"],
+                "launch_templates": ["aws_launch_template.nodes"],
+                "gate": {"passed": False, "failures": ["missing node tags"]},
+            }),
+        ):
+            with self.subTest(filename=filename, replacement=replacement):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.write_release_inputs(root, run_id)
+                    path = root / ".evidence" / "m4" / run_id / filename
+                    value = json.loads(path.read_text())
+                    value[field] = replacement
+                    path.write_text(json.dumps(value))
+                    with mock.patch.object(STAGE, "ROOT", root):
+                        with self.assertRaises(STAGE.StageError):
+                            STAGE.build_go_no_go(run_id, COMMIT, "us-east-1", "operator-one", FakeRunner())
 
     def test_go_packet_rejects_mixed_commit_evidence(self):
         run_id = "20260908T040000Z"

@@ -732,7 +732,7 @@ aws-guardrails-up: aws-whoami ## Apply the reviewed persistent AWS budget plan
 	@test -f "$(AWS_GUARDRAILS_PLAN_FILE)" || { \
 	  echo "guardrail plan is missing; run 'make aws-guardrails-plan' first" >&2; exit 1; \
 	}
-	@echo "This creates or updates the persistent account-wide AWS cost alert."
+	@echo "This creates or updates the persistent project AWS cost alert before tax."
 	@read -p "Type 'yes' to continue: " ok && [ "$$ok" = "yes" ]
 	@set -e; \
 	  trap 'rm -f -- "$(AWS_GUARDRAILS_PLAN_FILE)"' EXIT; \

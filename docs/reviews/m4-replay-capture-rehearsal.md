@@ -1,7 +1,185 @@
 # M4 replay capture rehearsal
 
-Status: Two local failures preserved; PR #146 diagnostics revised; second-review F1 remains disputed.
-No AWS resources were created. Issue #96 remains open.
+Status: Run `20260920T042557Z` passed all four local machine rehearsals on
+`d63d028`; all four visual views passed inspection. Both historical failed capture
+receipts remain unchanged, and their cause/F1 disagreement is not resolved by
+this pass. The [bounded completion plan](../plan-m4-96-completion.md) governs
+execution. Preflight `20260920T050446Z` passed all 16 checks. The approved AWS
+backend and budget were created; staging initially stopped on the account-wide
+budget's three `ALARM` states. The owner authorized the project-budget amendment.
+Its AWS update and coverage checks now pass; code review and the explicit
+candidate/qualification handoff precede resumed staging. #96 remains open.
+
+## Bounded qualification on 2026-09-20 UTC
+
+Candidate: `d63d028985f12e234bdaed14a9b5c7f68c46de0c` (PR #146).
+Local run: `20260920T042557Z`. The clean candidate checkout is separate from
+the documentation checkout. Its images were built and loaded into minikube
+profile `mlp`; every ready relay and sink pod's OCI revision matched. Compose
+supplied Kafka, Postgres and telemetry with its app consumers stopped. Remote
+`main` and all five healthy, synced ArgoCD applications matched the candidate
+before shutdown/capture and again before the demo. Remote `main` still matched
+at the final local handoff; Lila's temporary merge hold ended at `05:04:46Z`.
+
+Commands used, in order:
+
+```bash
+make m4-local-abort M4_LOCAL_RUN_ID=20260920T042557Z
+make m4-k8s-sigterm M4_LOCAL_RUN_ID=20260920T042557Z
+# Read-only readiness and image-provenance gate passed before capture.
+make m4-local-capture M4_LOCAL_RUN_ID=20260920T042557Z
+make m4-local-demo M4_LOCAL_RUN_ID=20260920T042557Z
+```
+
+- Abort simulation passed its ordered stop/cleanup checks on the clean SHA.
+- Shutdown ran `04:40:21Z–04:40:49Z`. Ingest drained in 3.418 seconds and
+  delivery in 21.008 seconds; both exited zero after readiness fell. All four
+  cleanup checks passed. The next read-only gate found two ready ingest pods,
+  one ready sink, one ready delivery pod, no terminating workload pods,
+  matching image provenance and no KEDA pause.
+- Capture ran `04:42:28Z–04:46:03Z`, before the demo. All 600 load-event IDs
+  were retained. Its 39 accepted samples observed peak lag 584, peak group
+  members 12 and peak desired replicas 12. Load and replay both ended at zero
+  lag, one member, one replica and no unassigned partitions or idle members.
+  All eight exports, including replay and application logs, were present with
+  matching SHA-256 values; the exact-candidate receipt reports cleanup verified.
+- The first demo ran `04:48:15Z–04:51:14Z` in 178.852 seconds. Its 23 scale
+  samples observed peak lag 598, peak consumers 12 and final zero lag/one
+  consumer. Fresh healthy-delivery and dead-letter counters each increased by
+  one. Replay and all cleanup checks passed. The capture receipt and all eight
+  exports remained byte-identical afterward.
+
+There was one capture attempt, no replacement run ID, one demo invocation and
+no runtime retry. Load, scrape cadence, deadlines, thresholds and candidate
+source were unchanged. This run establishes that the frozen collector can
+complete this local workload; it does not establish either historical failure's
+cause or prove that every future observation will be decisive.
+
+Private files below are relative to `.evidence/m4-local/20260920T042557Z/`.
+This manifest records their identities; it does not publish their raw contents.
+
+| File | SHA-256 |
+|---|---|
+| `abort-rehearsal.json` | `7eebe6265a3cc5c0716895165afc0d6bb5295a3fb311de5c160761b0bbad5c49` |
+| `k8s-sigterm.json` | `7a94ef18fd1b1fa6a24513b882ecf4ef77de155c368d9d1196ce1dc6108ed98c` |
+| `capture-result.json` | `2c0bbdd27802d7f418e08655b07bd2424025098f4eef57e68ff82858e9bcf9e4` |
+| `demo-rehearsal.json` | `663f3de3d6d24bac0239b97149f9ddac076ae74a7d6c032d490bc6a2aaa19394` |
+
+Two setup handoffs needed correction before load. The first image build was
+refused because the sandbox could not write Docker buildx activity metadata;
+the identical build passed outside the sandbox. `images-build.log` preserves
+that refusal with SHA-256
+`a2b14b015130c877541ff8513ba7ce255ff2c8eafcce34a17c2580a842ce9d8d`;
+`images-build-recheck.log` records success with SHA-256
+`012a13e1346eb5000b42206e828715baa22fe53d09435f218332e6237621ed8a`.
+The initial terminal practice destination contained no image; a direct-save
+interactive command resolved the handoff. The saved image was opened and
+inspected: `visuals/terminal-practice.png`, SHA-256
+`e395ebf6c7ce01e3230a03dff3f8f395ad8278ee56b708033d577a890a2e62b8`.
+It is explicitly practice and is not the final terminal evidence.
+
+All four final views were saved and opened for inspection in the required
+order: ArgoCD, iTerm2, Grafana, then Tempo. ArgoCD shows all five applications
+healthy and synced. The owner's two iTerm2 images show the saved demo's scaling
+table, replay offsets and completion. Grafana uses the explicit demo range
+`04:48:15Z–04:51:14Z`; its plotted maximum lag is 595 and maximum consumers 12.
+That range includes demo replay, and its last plotted lag of one is not a
+claim that replay fully drained. The demo receipt's scale samples remain the
+source for the separate load result above.
+
+After `make k8s-down` and a stopped-profile readback, `make up-apps`,
+`make up-obs` and `make smoke-traces` passed. The separate Compose practice
+event is `evt_d4e381e433467cc5f62648283a42c239`; Tempo trace
+`9e9f5e501584777108422277f3946493` joins ingest, Kafka, consume and all four
+persisted delivery attempts. The two Tempo images show its identity and span
+tree through Compose Grafana at `localhost:3000`, backed by Tempo at
+`localhost:3200`. Its displayed `01:01:46.441` America/Toronto timestamp is
+`05:01:46.441Z`. It does not replace capture's `13-trace.json`.
+
+The private `visual-review.json` records the ordered views, environment notes
+and image hashes. The automated demo receipt still correctly says
+`visual_capture_status: pending-human-capture`; it has not been rewritten.
+All four machine receipts and the saved demo transcript remained unchanged.
+Preflight run `20260920T050446Z` passed all 16 checks after the final remote
+revision check and merge-hold release. Its local-rehearsal hash manifest names
+the four unchanged passing receipts. `visual-review.json` has SHA-256
+`69341f209a77c43110b5c693be8ddc0423a59d50aa231238067f86d8668acf3e`.
+
+### Staging stop on 2026-09-20 UTC
+
+The caller matched the selected SSO account. The account-scoped backend was
+absent by both `HeadBucket` (404) and `ListBuckets`. The first bootstrap plan
+failed before mutation because Terraform could not refresh a stale SSO token.
+After the owner refreshed SSO, the identical plan passed its single recheck.
+The reviewed saved plan then created only the state bucket, versioning,
+AES256 encryption and all four public-access blocks. Its local bootstrap state
+was backed up privately in the original workspace and compared byte for byte.
+
+The reviewed guardrails plan created `mlp-live-aws-monthly`: a persistent
+$5 account-wide monthly cost budget with actual 80%, actual 100% and forecast
+100% notifications. All three subscribers match the private destination, and
+the owner confirmed receiving alarm emails. The checked pricing worksheet
+passed the existing gate. No paid apply was attempted.
+
+The first `make aws-account-check` stopped because all three notifications
+were `ALARM`. AWS reported pre-existing account spending above the threshold;
+the private Cost Explorer response identifies its services. This is an active
+alarm, not an uninitialized notification. `scripts/m4-aws-account.py` requires
+every notification to be `OK`. No account receipt was fabricated, no gate was
+weakened, and no account recheck was spent without a correction.
+
+The service-native inventory at `05:20:31Z` passed with `runtime_empty=true`:
+EKS, MSK, RDS, EC2, EBS, EIP, ELB, NAT, runtime log groups and ECR were empty
+for this project. The intended backend and budget remain. Quota/availability
+capture, cheap dev apply, images, hourly-plan review, GO and staging publication
+remain incomplete. #97 still requires separate paid authority.
+
+This execution reached the plan's **diagnosed-blocker** terminal condition.
+The next decision concerns budget scope and policy. Preserve the qualified
+candidate and local receipts. A future source change needs a deliberate
+candidate/qualification decision; a stale AWS observation alone does not
+justify repeating local load. No new runtime code or test revision was made.
+
+Private staging files below are relative to `.evidence/m4/20260920T050446Z/`.
+The complete raw evidence and qualification ledger are backed up in the
+original workspace's ignored `.evidence/` directory.
+
+| File | SHA-256 |
+|---|---|
+| `00-preflight.json` | `3d34ec8a1a0520a7eb298b76fe3ed1b9760e0b3b3e64691cbe00a22a00949c9d` |
+| `bootstrap-plan.log` | `d6523f21f2f8a5b3aab80f10a47ecd194a1d6057c696047dac96342a73df0529` |
+| `bootstrap-plan-recheck.log` | `3284ca8a23168636c92ebaeaf9b4d176d3351b87cc242be96722f148cb0dcbd3` |
+| `account-check-command.log` | `1a0b2d935f96447b95681879301e2945e2b70df3d144e9cb8b0e1376da74df8f` |
+| `budget-notification-diagnosis.json` | `c57103e5148775900916e4f97ba992647282e50d6fad43ca233f174790d8a191` |
+| `04-inventory-before.json` | `54b58c3fcbbe774fe443d45fcab18884a6285536fc086a32df948aeffb93cd4f` |
+
+### Project-budget amendment on 2026-09-20 UTC
+
+The owner authorized tag activation, propagation, coverage verification and a
+joint budget/gate update. Work uses the separate `codex/m4-project-budget`
+checkout; the qualified checkout and raw local receipts are unchanged.
+
+`Project` read back `Active` at `05:42:07Z`. The saved guardrail plan changed
+only the budget's cost filter and tax setting in place. Apply and AWS readback
+confirmed `TagKeyValue=user:Project$my-local-platform`, `IncludeTax=false`, the
+original $5 limit, all three subscribers, and three `OK` states. The shared
+live budget check passed. The state bucket's existing project tag was verified.
+The new zero tagged subtotal is not proof of complete historical attribution.
+
+All 204 Python tests passed, including 80 focused tests. The guardrail Terraform test and seven
+dev mocked tests passed. Mocked provider `tags_all` values could not establish
+coverage; that failed inspection is retained as inconclusive. A real-provider
+inspection-only plan then verified all 14 reviewed resource tags and EKS
+launch-template tags for instances, volumes and network interfaces. It used
+`198.51.100.7/32`, did not create resources and cannot serve as a staging plan.
+
+The scoped budget removes the diagnosed account-wide alarm blocker. It does
+not complete #96: source review, explicit candidate/qualification disposition,
+account/quota capture, cheap apply, images, reviewed staging plan, GO and
+publication remain. No new local load ran, and no hourly apply was attempted.
+The amended contract and tag-attribution limits are in ADR 0010 and the cost
+guide. Private evidence is under
+`.evidence/budget-amendment/20260920T054128Z/`.
 
 ## Observed on 2026-09-20 UTC
 

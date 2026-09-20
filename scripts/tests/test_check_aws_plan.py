@@ -48,6 +48,36 @@ def shape(**overrides):
 
 
 class PlanShapeTest(unittest.TestCase):
+    def test_project_tag_coverage_checks_nodes_and_volumes_beyond_provider_tags(self):
+        def plan():
+            return {"planned_values": {"root_module": {"resources": [
+                {"address": "aws_eks_cluster.main", "type": "aws_eks_cluster",
+                 "values": {"tags_all": {"Project": "my-local-platform"}}},
+                {"address": "aws_launch_template.nodes", "type": "aws_launch_template",
+                 "values": {
+                     "tags_all": {"Project": "my-local-platform"},
+                     "tag_specifications": [
+                         {"resource_type": kind, "tags": {"Project": "my-local-platform"}}
+                         for kind in ("instance", "volume", "network-interface")
+                     ],
+                 }},
+            ]}}}
+
+        self.assertTrue(CHECK.project_tag_coverage(plan(), True)["gate"]["passed"])
+        for index in range(3):
+            with self.subTest(launch_resource=index):
+                changed = plan()
+                changed["planned_values"]["root_module"]["resources"][1]["values"]["tag_specifications"][index]["tags"] = {}
+                result = CHECK.project_tag_coverage(changed, True)
+                self.assertFalse(result["gate"]["passed"])
+                self.assertIn("propagated Project tags", result["gate"]["failures"][0])
+        changed = plan()
+        changed["planned_values"]["root_module"]["resources"][0]["values"]["tags_all"] = {}
+        self.assertFalse(CHECK.project_tag_coverage(changed, True)["gate"]["passed"])
+        changed["planned_values"]["root_module"]["resources"].pop()
+        self.assertIn("EKS requires exactly one reviewed tagged launch template",
+                      CHECK.project_tag_coverage(changed, True)["gate"]["failures"])
+
     def test_summary_destination_is_confined_and_rejects_symlinks(self):
         run_id = "20260908T050000Z"
         with tempfile.TemporaryDirectory() as temporary:
@@ -214,6 +244,7 @@ class GuardScriptTest(unittest.TestCase):
             "check-aws-plan.py",
             "m4-evidence.py",
             "m4-stage.py",
+            "m4-aws-account.py",
         ):
             shutil.copy2(ROOT / "scripts" / script_name, scripts / script_name)
         self.guard = scripts / "aws-terraform-guard.sh"
@@ -281,6 +312,18 @@ class GuardScriptTest(unittest.TestCase):
             },
             "resource_changes": [],
         }
+        for module in CHECK.modules(plan_json["planned_values"]["root_module"]):
+            for resource in module["resources"]:
+                resource["address"] = resource["type"] + ".example"
+                resource["values"] = {"tags_all": {"Project": "my-local-platform"}}
+        plan_json["planned_values"]["root_module"]["resources"].append({
+            "type": "aws_launch_template",
+            "address": "aws_launch_template.nodes",
+            "values": {"tag_specifications": [
+                {"resource_type": kind, "tags": {"Project": "my-local-platform"}}
+                for kind in ("instance", "volume", "network-interface")
+            ]},
+        })
         incomplete_plan_json = {**plan_json, "complete": False}
         cheap_plan_json = {
             **plan_json,
@@ -325,20 +368,26 @@ case " $* " in
   *) exit 2 ;;
 esac
 """
-        aws = """#!/bin/sh
+        aws = '''#!/bin/sh
 printf 'aws %s\\n' "$*" >> "$MLP_FAKE_LOG"
 case "$1 $2" in
   'sts get-caller-identity') printf '@ACCOUNT@\\n' ;;
   'budgets describe-budget')
     [ "${MLP_FAKE_BUDGET_MISSING:-}" != 1 ] || exit 42
-    printf '%s\\n' "${MLP_FAKE_BUDGET_LIMIT:-5.0}"
+    python3 -c 'import json,os; b=json.loads("""{"BudgetName": "mlp-live-aws-monthly", "BudgetType": "COST", "TimeUnit": "MONTHLY", "BudgetLimit": {"Amount": "5", "Unit": "USD"}, "CostFilters": {"TagKeyValue": ["user:Project$my-local-platform"]}, "CostTypes": {"IncludeTax": false, "IncludeSubscription": true, "UseBlended": false, "IncludeRefund": true, "IncludeCredit": true, "IncludeUpfront": true, "IncludeRecurring": true, "IncludeOtherSubscription": true, "IncludeSupport": true, "IncludeDiscount": true, "UseAmortized": false}}"""); b["BudgetLimit"]["Amount"]=os.environ.get("MLP_FAKE_BUDGET_LIMIT","5.0"); b["CostFilters"]=json.loads(os.environ.get("MLP_FAKE_BUDGET_FILTERS",json.dumps(b["CostFilters"]))); b["CostTypes"]["IncludeTax"]=os.environ.get("MLP_FAKE_INCLUDE_TAX") == "1"; print(json.dumps({"Budget":b}))'
+    ;;
+  'ce list-cost-allocation-tags')
+    printf '{"CostAllocationTags":[{"TagKey":"Project","Type":"UserDefined","Status":"%s"}]}\\n' "${MLP_FAKE_TAG_STATUS:-Active}"
     ;;
   'budgets describe-notifications-for-budget')
-    if [ "${MLP_FAKE_BUDGET_ALARM:-}" = 1 ]; then alarm=',"NotificationState":"ALARM"'; else alarm=',"NotificationState":"OK"'; fi
-    printf '%s\\n' "[{\\"NotificationType\\":\\"ACTUAL\\",\\"ComparisonOperator\\":\\"GREATER_THAN\\",\\"Threshold\\":80.0,\\"ThresholdType\\":\\"PERCENTAGE\\"$alarm},{\\"NotificationType\\":\\"ACTUAL\\",\\"ComparisonOperator\\":\\"GREATER_THAN\\",\\"Threshold\\":100.0,\\"ThresholdType\\":\\"PERCENTAGE\\",\\"NotificationState\\":\\"OK\\"},{\\"NotificationType\\":\\"FORECASTED\\",\\"ComparisonOperator\\":\\"GREATER_THAN\\",\\"Threshold\\":100.0,\\"ThresholdType\\":\\"PERCENTAGE\\",\\"NotificationState\\":\\"OK\\"}]"
+    python3 -c 'import json,os; print(json.dumps({"Notifications":[{"NotificationType":kind,"ComparisonOperator":"GREATER_THAN","Threshold":value,"NotificationState":"ALARM" if os.environ.get("MLP_FAKE_BUDGET_ALARM") == "1" else "OK"} for kind,value in [("ACTUAL",80),("ACTUAL",100),("FORECASTED",100)]]}))'
     ;;
   'budgets describe-subscribers-for-notification')
-    printf '%s\\n' "${MLP_FAKE_SUBSCRIBER_COUNT:-1}"
+    if [ "${MLP_FAKE_SUBSCRIBER_COUNT:-1}" = 0 ]; then
+      printf '%s\\n' '{"Subscribers":[]}'
+    else
+      printf '%s\\n' '{"Subscribers":[{"SubscriptionType":"EMAIL","Address":"owner@example.invalid"}]}'
+    fi
     ;;
   'eks describe-cluster-versions')
     case " $* " in
@@ -360,7 +409,7 @@ case "$1 $2" in
     ;;
   *) exit 2 ;;
 esac
-""".replace("@ACCOUNT@", account_id)
+'''.replace("@ACCOUNT@", account_id)
         git = f"""#!/bin/sh
 printf 'git %s\\n' "$*" >> "$MLP_FAKE_LOG"
 case " $* " in
@@ -638,7 +687,8 @@ esac
         result = self._run("plan", environment)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pre-existing mlp-live-aws-monthly budget", result.stderr)
+        self.assertIn("describe-budget", result.stderr)
+        self.assertIn("failed", result.stderr)
         self.assertFalse(self.plan.exists())
 
     def test_plan_with_no_variable_arguments_runs_under_system_bash(self):
@@ -673,7 +723,7 @@ esac
         result = self._run("plan", environment)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("invalid budget limit", result.stderr)
+        self.assertIn("budget limit is not numeric", result.stderr)
         self.assertFalse(self.plan.exists())
 
     def test_changed_budget_limit_blocks_plan(self):
@@ -705,6 +755,19 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not all OK", result.stderr)
         self.assertFalse(self.plan.exists())
+
+    def test_budget_scope_tax_and_activation_drift_block_before_plan(self):
+        for key, value in (
+            ("MLP_FAKE_BUDGET_FILTERS", "{}"),
+            ("MLP_FAKE_BUDGET_FILTERS", '{"TagKeyValue":["user:Project$other"]}'),
+            ("MLP_FAKE_INCLUDE_TAX", "1"),
+            ("MLP_FAKE_TAG_STATUS", "Inactive"),
+        ):
+            with self.subTest(key=key, value=value):
+                environment = {**self.environment, key: value}
+                result = self._run("plan", environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.plan.exists())
 
     def test_failed_replan_removes_the_previous_reviewed_pair(self):
         first = self._run("plan")

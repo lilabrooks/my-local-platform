@@ -959,11 +959,30 @@ def build_go_no_go(
         raise StageError("budget evidence did not pass")
     if budget.get("has_notification_subscriber") is not True:
         raise StageError("budget evidence has no notification subscriber")
+    if budget.get("scope") != {
+        "tag_key": "Project",
+        "tag_value": "my-local-platform",
+        "cost_allocation_tag_status": "Active",
+        "include_tax": False,
+    }:
+        raise StageError("budget evidence does not have the approved project scope")
     budget_limit = decimal_value(budget.get("limit_usd"), "budget limit")
     if budget_limit <= 0:
         raise StageError("budget limit must be positive")
     if budget_limit > MAXIMUM_TOTAL_USD:
         raise StageError("budget limit exceeds the approved maximum")
+    coverage = plan.get("project_tag_coverage")
+    if (
+        not isinstance(coverage, dict)
+        or coverage.get("tag_key") != "Project"
+        or coverage.get("tag_value") != "my-local-platform"
+        or not isinstance(coverage.get("resources"), list)
+        or not coverage["resources"]
+        or not isinstance(coverage.get("launch_templates"), list)
+        or len(coverage["launch_templates"]) != 1
+    ):
+        raise StageError("plan lacks project tag coverage")
+    require_passed_gate(coverage, "project tag coverage")
     if not isinstance(quotas, dict):
         raise StageError("quota evidence is missing")
     require_passed_gate(quotas, "quota evidence")

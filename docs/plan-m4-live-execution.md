@@ -1,25 +1,40 @@
 # M4 staging and live validation plan
 
-Status: Preparation merged in PR #139 on 2026-09-11. The owner authorized #96
-cheap staging on 2026-09-19. Read-only account checks found an invalid EKS API
-filter combination and an unavailable RDS PostgreSQL 17.4 pin. Those corrections
-merged in PR #144 as `274e6010c88426216e697700abd7274c22941e54`.
-Its clean-candidate shutdown, integrated demo, and abort rehearsals passed;
-machine capture failed at the final application-log export on 2026-09-20 UTC.
-PR #145 merged the replay-readiness corrections as
-`1e7c30ee562e813e1e28bdd9a1a7c4184c958e6e`. That candidate passed shutdown,
-demo, controller, and abort rehearsals, then failed capture's load-observation
-check before reaching replay or log export. The load observation correction
-has revised failure diagnostics; second-review F1 remains disputed. It needs
-review reconciliation and merge, followed by fresh clean-candidate rehearsals
-before staging. See the [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
-No AWS resource was created by these checks. #97 still needs separate approval.
+Status: #96 cheap staging remains authorized. Candidate `d63d028` passed all
+four local machine rehearsals and all four visual views on 2026-09-20 UTC;
+preflight `20260920T050446Z` passed all 16 checks. The backend and persistent
+budget were created. The account-wide budget initially blocked staging on
+unrelated spending. The owner then authorized the project-budget amendment:
+`Project` is Active for billing, the $5 monthly budget filters that project
+before tax, and all three notifications read back `OK`. The shared live budget
+gate passes. A real-provider inspection plan verified 14 resource tags and EKS
+instance/volume/network-interface propagation; it was not applied or accepted
+as a staging plan. The amendment is prepared on `codex/m4-project-budget` for
+review. Local receipts remain unchanged at their original SHA. No cheap dev
+apply, image staging, staging hourly plan, GO or publication has completed.
+Issue #97 still requires separate paid-run approval.
+
+The [bounded #96 completion plan](plan-m4-96-completion.md) records the completed
+local sequence and the remaining staging handoff. Keep the passing local
+evidence while reviewing the budget amendment; publish staging evidence
+independently of #97 once its own gates pass. Its ordering refines section 2 below; the evidence and
+acceptance requirements remain unchanged. The historical failure's cause and
+F1 review disagreement remain unresolved by the merge. See the
+[rehearsal record](reviews/m4-replay-capture-rehearsal.md).
+No new AWS observation was made while planning. #97 still needs separate
+paid-run approval.
 
 Original source this plan was written against:
 `88e9a103d123feddef19720af1730253c8630327`, containing
 [PR #137](https://github.com/lilabrooks/my-local-platform/pull/137).
-The next staging candidate will be the merge commit containing the reviewed
-load-observation correction. Both failed candidates' receipts remain failed.
+The locally qualified candidate is `d63d028985f12e234bdaed14a9b5c7f68c46de0c`.
+The budget amendment needs an explicit candidate/qualification disposition
+before a new staging preflight; it has not silently replaced that SHA.
+Keep planning and publication changes in another checkout so they do not
+change that candidate. This does not isolate ArgoCD from GitHub's `main`:
+the bounded completion plan also requires Lila's temporary remote merge hold
+during local qualification, released at its recorded preflight handoff before
+staging publication. Both failed candidates' receipts remain failed.
 
 The governing contract is [ADR 0010](adr/0010-live-aws-relay-contract.md).
 The [AWS runbook](runbook-aws-relay.md) and [cost guide](costs.md) carry the

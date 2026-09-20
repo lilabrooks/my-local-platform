@@ -30,6 +30,11 @@ REVIEWED_RESOURCE_TYPES = HOURLY_RESOURCE_TYPES | {
     "aws_kms_alias",
     "aws_kms_key",
 }
+COST_TAG_RESOURCE_TYPES = HOURLY_RESOURCE_TYPES | {
+    "aws_s3_bucket", "aws_sns_topic", "aws_sqs_queue", "aws_ecr_repository",
+    "aws_eip", "aws_cloudwatch_log_group", "aws_secretsmanager_secret",
+    "aws_instance", "aws_ebs_volume", "aws_ebs_snapshot", "aws_kms_key",
+}
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ROOT = Path(__file__).resolve().parent.parent
@@ -143,6 +148,53 @@ def hourly_changes(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return selected_changes(plan, HOURLY_RESOURCE_TYPES)
 
 
+def project_tag_coverage(plan: dict[str, Any], eks_enabled: bool) -> dict[str, Any]:
+    """Check planned tags, including resources launched outside Terraform.
+
+    This proves configuration coverage, not attribution of every billing line.
+    Service-created resources and unallocatable fees remain inventory/cost-review
+    responsibilities; see docs/costs.md.
+    """
+    failures = []
+    checked = []
+    launch_templates = []
+    launch_types = {"instance", "volume", "network-interface"}
+    root = plan.get("planned_values", {}).get("root_module", {})
+    for module in modules(root):
+        for resource in module.get("resources", []):
+            if resource.get("mode", "managed") != "managed":
+                continue
+            kind = resource.get("type")
+            address = resource.get("address", kind)
+            values = resource.get("values") or {}
+            if kind in COST_TAG_RESOURCE_TYPES:
+                tags = values.get("tags_all") or {}
+                if tags.get("Project") != "my-local-platform":
+                    failures.append(f"{address} lacks Project=my-local-platform")
+                checked.append(address)
+            if kind == "aws_launch_template":
+                launch_templates.append(address)
+                specifications = values.get("tag_specifications") or []
+                by_type = {
+                    item.get("resource_type"): item.get("tags") or {}
+                    for item in specifications
+                }
+                if not launch_types.issubset(by_type) or any(
+                    by_type.get(kind, {}).get("Project") != "my-local-platform"
+                    for kind in launch_types
+                ):
+                    failures.append(f"{address} lacks propagated Project tags")
+    if eks_enabled and len(launch_templates) != 1:
+        failures.append("EKS requires exactly one reviewed tagged launch template")
+    return {
+        "tag_key": "Project",
+        "tag_value": "my-local-platform",
+        "resources": sorted(checked),
+        "launch_templates": sorted(launch_templates),
+        "gate": {"passed": not failures, "failures": failures},
+    }
+
+
 def required_output(plan: dict[str, Any], name: str) -> Any:
     output = plan.get("planned_values", {}).get("outputs", {}).get(name)
     if not output or "value" not in output:
@@ -245,6 +297,8 @@ def main() -> int:
     creates = hourly_counts(all_creates)
     changed_hourly_resources = hourly_changes(plan)
     failures = gate_failures(shape, planned, creates, changed_hourly_resources)
+    coverage = project_tag_coverage(plan, shape["enable_eks"])
+    failures.extend(coverage["gate"]["failures"])
 
     summary = {
         "schema_version": 1,
@@ -265,6 +319,7 @@ def main() -> int:
         "created_hourly_resource_counts": creates,
         "hourly_resource_changes": changed_hourly_resources,
         "reviewed_resource_changes": selected_changes(plan, REVIEWED_RESOURCE_TYPES),
+        "project_tag_coverage": coverage,
         "gate": {"passed": not failures, "failures": failures},
     }
     write_summary(summary_path, summary)
