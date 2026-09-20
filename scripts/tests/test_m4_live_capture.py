@@ -330,6 +330,90 @@ class CaptureTests(unittest.TestCase):
                 with self.assertRaisesRegex(CAPTURE.CaptureError, "real failure"):
                     capture.drained_sample()
 
+    def test_replay_rejects_recent_observations_from_before_resume(self):
+        sources = ["broker", *CAPTURE.QUERIES]
+        for stale in [*sources, None]:
+            with self.subTest(stale=stale):
+                capture = CAPTURE.Capture(self.args())
+
+                def metric(query, stale=stale):
+                    if query.startswith("time() - "):
+                        return 1  # Every sample passes the ordinary age check.
+                    if query.startswith("min(relay_lag_refreshed"):
+                        return 100 if stale == "broker" else 101
+                    if query.startswith("min(timestamp("):
+                        source = CAPTURE.QUERIES.get(stale, "")
+                        source = source[4:-1] if source.startswith("max(") else source
+                        return 100 if query == f"min(timestamp({source}))" else 101
+                    return 0 if query == CAPTURE.QUERIES["lag"] else 1
+
+                capture.metric = mock.Mock(side_effect=metric)
+                if stale is None:
+                    self.assertEqual(capture.sample(not_before=100)["lag"], 0)
+                else:
+                    with self.assertRaisesRegex(
+                        CAPTURE.ObservationPending, "predates replay resume"
+                    ):
+                        capture.sample(not_before=100)
+
+    def test_replay_waits_for_ready_replacement_and_new_observations(self):
+        ready = {
+            "metadata": {},
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+        pending_pods = [
+            [],
+            [{"metadata": {}, "status": {"phase": "Pending"}}],
+            [{"metadata": {}, "status": {"phase": "Running"}}],
+            [{**ready, "metadata": {"deletionTimestamp": "2026-09-20T00:00:00Z"}}],
+            [ready, ready],
+        ]
+        for pods in pending_pods:
+            with self.subTest(pods=pods):
+                capture = CAPTURE.Capture(self.args())
+                capture.kubectl = mock.Mock(return_value=json.dumps({"items": pods}))
+                capture.sample = mock.Mock()
+                self.assertIsNone(capture.replay_drained_sample(100))
+                capture.sample.assert_not_called()
+
+        capture = CAPTURE.Capture(self.args())
+        capture.kubectl = mock.Mock(return_value=json.dumps({"items": [ready]}))
+        fresh = {"lag": 0, "replicas": 1, "members": 1}
+        capture.sample = mock.Mock(side_effect=[
+            CAPTURE.ObservationPending("predates replay resume"), fresh,
+        ])
+        with mock.patch.object(CAPTURE.time, "sleep"):
+            self.assertEqual(
+                capture.wait(lambda: capture.replay_drained_sample(100), 120), fresh
+            )
+        self.assertEqual(capture.sample.call_args_list, [
+            mock.call(not_before=100), mock.call(not_before=100),
+        ])
+        capture.sample.side_effect = CAPTURE.CaptureError("invalid observation")
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "invalid observation"):
+            capture.replay_drained_sample(100)
+
+    def test_replay_readiness_wait_does_not_extend_the_proof_deadline(self):
+        capture = CAPTURE.Capture(self.args())
+        clock = [0]
+        capture.deadline = 5
+        capture.kubectl = mock.Mock(return_value=b'{"items": []}')
+        capture.sample = mock.Mock()
+        with (
+            mock.patch.object(CAPTURE.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(
+                CAPTURE.time, "sleep",
+                side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            ),
+        ):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "deadline"):
+                capture.wait(lambda: capture.replay_drained_sample(100), 120)
+        self.assertEqual(clock[0], 5)
+        capture.sample.assert_not_called()
+
     def test_drain_cannot_accept_a_probe_that_finishes_at_or_after_deadline(self):
         for finished_at in (120, 121):
             with self.subTest(finished_at=finished_at):

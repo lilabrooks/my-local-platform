@@ -568,25 +568,36 @@ class Capture:
             raise CaptureError("invalid Prometheus value")
         return number
 
-    def sample(self):
-        freshness = self.metric(
-            'time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role="ingest"})'
+    def sample(self, *, not_before=None):
+        broker_timestamp = (
+            'min(relay_lag_refreshed_timestamp_seconds and on(instance) '
+            'relay_build_info{role="ingest"})'
         )
+        freshness = self.metric(f"time() - {broker_timestamp}")
         if freshness > 30:
             raise ObservationPending("broker lag snapshot is stale")
+        if not_before is not None and self.metric(broker_timestamp) <= not_before:
+            raise ObservationPending("broker lag snapshot predates replay resume")
         for name, query in QUERIES.items():
             # timestamp(max(...)) reports evaluation time, not scrape age.
             source = query[4:-1] if query.startswith("max(") else query
             if self.metric(f"time() - min(timestamp({source}))") > SAMPLE_MAX_AGE[name]:
                 raise ObservationPending("proof metric sample is stale")
+            if (
+                not_before is not None
+                and self.metric(f"min(timestamp({source}))") <= not_before
+            ):
+                raise ObservationPending("proof metric sample predates replay resume")
         return {
             "captured_at": utc(),
             **{key: self.metric(query) for key, query in QUERIES.items()},
         }
 
-    def pending_sample(self):
+    def pending_sample(self, *, not_before=None):
         try:
-            return self.sample()
+            if not_before is None:
+                return self.sample()
+            return self.sample(not_before=not_before)
         except ObservationPending:
             # No stale value can satisfy a terminal condition. Callers retain
             # their original deadline and retry cadence, including on None.
@@ -737,8 +748,8 @@ class Capture:
                 self.wait_for_resource(namespace, resource)
             self.forward(service, namespace, resource, port)
 
-    def drained_sample(self):
-        sample = self.pending_sample()
+    def drained_sample(self, *, not_before=None):
+        sample = self.pending_sample(not_before=not_before)
         return (
             sample
             if (
@@ -752,6 +763,30 @@ class Capture:
 
     def baseline(self):
         return self.wait(self.drained_sample, 180)
+
+    def replay_drained_sample(self, resumed_at):
+        # A pre-pause scrape can still say one member and zero lag while KEDA
+        # is replacing the consumer. Verify the current pod before exporting
+        # its logs, then require observations from after replay resumed.
+        pods = json.loads(
+            self.kubectl(
+                "-n", "mlp", "get", "pods", "-l",
+                "app.kubernetes.io/name=relay-deliver", "-o", "json",
+            )
+        )["items"]
+        if len(pods) != 1:
+            return None
+        pod = pods[0]
+        if (
+            pod["metadata"].get("deletionTimestamp")
+            or pod.get("status", {}).get("phase") != "Running"
+            or not any(
+                condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in pod.get("status", {}).get("conditions", [])
+            )
+        ):
+            return None
+        return self.drained_sample(not_before=resumed_at)
 
     @contextmanager
     def load_pool(self):
@@ -1093,6 +1128,8 @@ class Capture:
         self.kubectl(
             "-n", "mlp", "annotate", "scaledobject", "relay-deliver", PAUSE + "-"
         )
+        # Use the observation server's clock for the scrape boundary.
+        replay_resumed_at = self.metric("vector(time())")
 
         def replayed():
             records = [
@@ -1106,13 +1143,16 @@ class Capture:
 
         replay_deliveries = self.wait(replayed, 120)
 
-        final_state = self.wait(self.drained_sample, 120)
+        final_state = self.wait(
+            lambda: self.replay_drained_sample(replay_resumed_at), 120
+        )
         self.write(
             "16-replay.json",
             {
                 "event_id": event_id,
                 "since": self.started,
                 "offset_reset": replay,
+                "resumed_at_prometheus_seconds": replay_resumed_at,
                 "before": before,
                 "deliveries": replay_deliveries,
                 "final_state": final_state,

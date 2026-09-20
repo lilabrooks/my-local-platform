@@ -1,7 +1,9 @@
 # Live AWS relay validation runbook
 
-Status: Review fixes implemented on 2026-09-11; clean-candidate rehearsal and
-separate staging approval still required.
+Status: Cheap staging was authorized on 2026-09-19. Candidate `274e601` failed
+its final application-log export during local capture on 2026-09-20 UTC.
+Replay-readiness corrections and fresh clean-candidate rehearsal are pending;
+see the [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
 Contract accepted on 2026-09-05. The deployment render, local
 rehearsal, staging gates, live-run controller, persistent cost alert, capture
 order, and evidence sanitizer are implemented. The real-account receipts and
@@ -214,6 +216,12 @@ interval, and 60 seconds for the chart-managed replica series. The cached
 kube-state-metrics on that default. This changes the observation tolerance,
 not the monitoring configuration. Recheck it when changing the chart or scrape
 intervals.
+
+After replay resumes, the final drain check also requires exactly one running,
+ready delivery pod with no deletion timestamp. The broker observation and every
+proof metric scrape must postdate resume, using a boundary from Prometheus's
+clock. The existing 120-second replay-drain window and session deadline still
+apply. A pre-pause zero-lag sample cannot complete this check.
 
 A missing or stale sample is retried within the original baseline, 480-second
 load, or 120-second replay-drain window. It cannot prove scale, release the
