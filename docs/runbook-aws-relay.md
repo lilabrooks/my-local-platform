@@ -217,11 +217,26 @@ kube-state-metrics on that default. This changes the observation tolerance,
 not the monitoring configuration. Recheck it when changing the chart or scrape
 intervals.
 
-After replay resumes, the final drain check also requires exactly one running,
-ready delivery pod with no deletion timestamp. The broker observation and every
-proof metric scrape must postdate resume, using a boundary from Prometheus's
-clock. The existing 120-second replay-drain window and session deadline still
-apply. A pre-pause zero-lag sample cannot complete this check.
+After replay resumes, the final drain check requires exactly one running,
+ready delivery pod among pods without a deletion timestamp. Terminating pods
+can finish leaving without blocking this count. Every proof metric scrape must
+postdate a resume boundary obtained from Prometheus's clock; missing clock
+samples or transport interruptions retry for at most 30 seconds.
+
+The broker check compares relay-ingest's whole-second refresh stamp with that
+Prometheus boundary. Its ordering guarantee depends on clock agreement: rounding
+down delays acceptance, but forward skew can admit an earlier observation.
+Negative broker age is pending, not a valid sample. Both ingest replicas must
+refresh after the boundary. The replay receipt retains the boundary, minimum
+broker refresh stamp, and minimum scrape timestamp for each proof metric.
+The existing 120-second replay-drain window and session deadline still apply.
+
+Immediately before exporting application logs, the runner checks readiness of
+all current ingest, delivery, and sink pods and their containers. Recognized
+container-startup or pod-disappearance errors recheck readiness and retry the
+read-only export for at most 60 seconds, within the proof/session deadline.
+Other command failures, oversized output, and secret-scan failures stop capture.
+A successful log export remains required; this does not repeat replay or load.
 
 A missing or stale sample is retried within the original baseline, 480-second
 load, or 120-second replay-drain window. It cannot prove scale, release the
