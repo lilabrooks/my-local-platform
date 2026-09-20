@@ -6,16 +6,20 @@ filter combination and an unavailable RDS PostgreSQL 17.4 pin. Those corrections
 merged in PR #144 as `274e6010c88426216e697700abd7274c22941e54`.
 Its clean-candidate shutdown, integrated demo, and abort rehearsals passed;
 machine capture failed at the final application-log export on 2026-09-20 UTC.
-Replay-readiness corrections need review and merge, followed by fresh
-clean-candidate rehearsals before staging. See the
-[rehearsal record](reviews/m4-replay-capture-rehearsal.md).
+PR #145 merged the replay-readiness corrections as
+`1e7c30ee562e813e1e28bdd9a1a7c4184c958e6e`. That candidate passed shutdown,
+demo, controller, and abort rehearsals, then failed capture's load-observation
+check before reaching replay or log export. The load observation correction
+has revised failure diagnostics; second-review F1 remains disputed. It needs
+review reconciliation and merge, followed by fresh clean-candidate rehearsals
+before staging. See the [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
 No AWS resource was created by these checks. #97 still needs separate approval.
 
 Original source this plan was written against:
 `88e9a103d123feddef19720af1730253c8630327`, containing
 [PR #137](https://github.com/lilabrooks/my-local-platform/pull/137).
 The next staging candidate will be the merge commit containing the reviewed
-replay-readiness corrections. The failed candidate's receipt remains failed.
+load-observation correction. Both failed candidates' receipts remain failed.
 
 The governing contract is [ADR 0010](adr/0010-live-aws-relay-contract.md).
 The [AWS runbook](runbook-aws-relay.md) and [cost guide](costs.md) carry the

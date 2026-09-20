@@ -143,6 +143,121 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(receipt["result"], "passed")
             self.assertFalse(receipt["cleanup_verified"])
 
+    def test_failed_load_evidence_is_saved_after_stop_and_cleanup(self):
+        for failure in (CAPTURE.CaptureError("deadline"),
+                        CAPTURE.CaptureError("producer failed"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                capture = CAPTURE.Capture(self.args())
+                capture.raw = Path(tmp)
+                capture.setup = mock.Mock()
+                capture.set_phase_deadline = mock.Mock()
+                calls = []
+                packet = {"observations": [{"result": "pending", "pending_reason": "stale"}],
+                          "submitted_at_prometheus_seconds": None}
+
+                def proof(capture=capture, packet=packet, failure=failure):
+                    capture.load_evidence = packet
+                    raise failure
+
+                capture.proof = proof
+                capture.stop = mock.Mock(side_effect=lambda calls=calls: calls.append("stop"))
+                capture.cleanup_local = mock.Mock(side_effect=lambda calls=calls: calls.append("cleanup") or True)
+                original_write = capture.write
+
+                def write(name, value, calls=calls, original_write=original_write):
+                    calls.append(name)
+                    original_write(name, value)
+
+                capture.write = write
+                with self.assertRaises(type(failure)):
+                    capture.run()
+                self.assertEqual(calls, ["capture-start.json", "stop", "cleanup",
+                                         "12-metrics.txt", "capture-result.json"])
+                self.assertEqual(json.loads((capture.raw / "12-metrics.txt").read_text()), packet)
+                receipt = json.loads((capture.raw / "capture-result.json").read_text())
+                self.assertEqual(receipt["result"], "failed")
+                self.assertEqual(set(receipt["files"]), {"12-metrics.txt"})
+                self.assertTrue(receipt["cleanup_verified"])
+
+    def test_diagnostic_write_failure_cannot_pass_or_mask_original_failure(self):
+        for proof_fails in (False, True):
+            with self.subTest(proof_fails=proof_fails), tempfile.TemporaryDirectory() as tmp:
+                capture = CAPTURE.Capture(self.args())
+                capture.raw = Path(tmp)
+                capture.setup = mock.Mock()
+                capture.set_phase_deadline = mock.Mock()
+                capture.stop = mock.Mock()
+                capture.cleanup_local = mock.Mock(return_value=True)
+                capture.load_evidence = {"observations": []}
+                capture.proof = mock.Mock(side_effect=
+                    CAPTURE.CaptureError("original proof failure") if proof_fails else None)
+                original_write = capture.write
+
+                def write(name, value, original_write=original_write):
+                    if name == "12-metrics.txt":
+                        raise OSError("disk full")
+                    original_write(name, value)
+
+                capture.write = write
+                message = "original proof failure" if proof_fails else "observations could not be saved"
+                with self.assertRaisesRegex(CAPTURE.CaptureError, message):
+                    capture.run()
+                receipt = json.loads((capture.raw / "capture-result.json").read_text())
+                self.assertEqual(receipt["result"], "failed")
+                self.assertNotIn("12-metrics.txt", receipt["files"])
+                self.assertTrue(capture.cancelled.is_set())
+                capture.stop.assert_called()
+
+    def test_poller_diagnostics_preserve_instances_and_evaluation_times(self):
+        capture = CAPTURE.Capture(self.args())
+        series = [
+            {"metric": {"__name__": name, "instance": instance}, "value": [200, value]}
+            for instance, name, value in (
+                ("a", "relay_lag_refreshed_timestamp_seconds", "100"),
+                ("b", "relay_lag_refreshed_timestamp_seconds", "195"),
+                ("a", "relay_lag_partitions_missing", "2"),
+                ("b", "relay_lag_partitions_missing", "0"),
+                ("a", "relay_lag_refresh_errors_total", "3"),
+                ("b", "relay_lag_refresh_errors_total", "0"),
+            )
+        ]
+        capture.http = mock.Mock(return_value={"status": "success", "data": {
+            "resultType": "vector", "result": series,
+        }})
+        result = capture.poller_diagnostics()
+        self.assertEqual(result["result"], "observed")
+        self.assertEqual(len(result["series"]), 6)
+        self.assertEqual(result["series"][0]["value"], 100)
+        self.assertEqual(result["series"][1]["value"], 195)
+        self.assertEqual(result["series"][0]["evaluated_at_prometheus_seconds"], 200)
+        capture.http.assert_called_once()
+        query = CAPTURE.urllib.parse.parse_qs(
+            CAPTURE.urllib.parse.urlsplit(capture.http.call_args.args[1]).query)["query"][0]
+        self.assertIn("relay_lag_partitions_missing", query)
+        self.assertIn("relay_lag_refresh_errors_total", query)
+        self.assertIn("relay_lag_refreshed_timestamp_seconds", query)
+
+    def test_optional_poller_failure_never_becomes_proof_or_hides_deadline(self):
+        capture = CAPTURE.Capture(self.args())
+        capture.http = mock.Mock(return_value={"status": "success", "data": {
+            "resultType": "vector", "result": [],
+        }})
+        self.assertEqual(capture.poller_diagnostics()["result"], "missing")
+        for error in (CAPTURE.CaptureError("HTTP 503 private body"),
+                      CAPTURE.urllib.error.URLError("unavailable")):
+            capture.http.side_effect = error
+            self.assertEqual(capture.poller_diagnostics(), {
+                "result": "unavailable", "error_type": type(error).__name__,
+            })
+        capture.http.side_effect = None
+        capture.http.return_value = {"status": "success", "data": {
+            "resultType": "vector", "result": [{"metric": {}, "value": [200, "NaN"]}],
+        }}
+        self.assertEqual(capture.poller_diagnostics()["result"], "unavailable")
+        capture.guard = mock.Mock(side_effect=[None, CAPTURE.CaptureError("deadline")])
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "deadline"):
+            capture.poller_diagnostics()
+
     def test_missing_workload_and_initial_scrape_are_waited_for(self):
         capture = CAPTURE.Capture(self.args())
         capture.guard = mock.Mock()
@@ -488,19 +603,31 @@ class CaptureTests(unittest.TestCase):
 
             def submit(self, fn, *args):
                 future = Future()
-                future.set_result(fn(*args))
+                result = fn(*args)
+                if mode == "completes_during_sample" and len(observed["posted"]) == 600:
+                    observed["last_future"] = future
+                    observed["last_result"] = result
+                else:
+                    future.set_result(result)
                 return future
 
             def shutdown(self, **kwargs):
                 pass
 
-        for mode in ("transient", "persistent", "hard"):
+        for mode in (
+            "transient", "persistent", "hard", "pre_submission",
+            "completes_during_sample", "no_scale", "clock_pending", "clock_missing",
+            "clock_hard",
+        ):
             with self.subTest(mode=mode):
                 capture = CAPTURE.Capture(self.args())
                 capture.deadline = 1200
                 clock = [0]
                 event_id = "evt_" + "a" * 32
-                observed = {"posted": [], "controls": [], "request": None, "samples": 0}
+                observed = {
+                    "posted": [], "controls": [], "request": None, "samples": 0,
+                    "clock_queries": 0,
+                }
                 fresh = {"lag": 0, "replicas": 1, "members": 1}
                 capture.baseline = mock.Mock(return_value=fresh)
                 capture.get = mock.Mock(return_value={"metadata": {}})
@@ -514,8 +641,49 @@ class CaptureTests(unittest.TestCase):
                     *,
                     observed=observed,
                     event_id=event_id,
+                    mode=mode,
+                    fresh=fresh,
                     **kwargs,
                 ):
+                    if service == "prometheus":
+                        query = CAPTURE.urllib.parse.parse_qs(
+                            CAPTURE.urllib.parse.urlsplit(path).query
+                        )["query"][0]
+                        if query == CAPTURE.POLLER_QUERY:
+                            return {"status": "success", "data": {
+                                "resultType": "vector", "result": [],
+                            }}
+                        if query == "vector(time())":
+                            observed["clock_queries"] += 1
+                            if observed["clock_queries"] == 1:
+                                self.assertEqual(len(observed["posted"]), 0)
+                                return self.prometheus_vector(100)
+                            self.assertEqual(len(observed["posted"]), 600)
+                            if mode == "clock_hard":
+                                raise CAPTURE.CaptureError("HTTP 503")
+                            if mode == "clock_missing" or (
+                                mode == "clock_pending" and observed["clock_queries"] == 2
+                            ):
+                                return {"status": "success", "data": {"result": []}}
+                            return self.prometheus_vector(200)
+                        if query.startswith("time() - min(relay_lag_refreshed"):
+                            observed["samples"] += 1
+                            if mode == "completes_during_sample" and observed["samples"] == 1:
+                                observed["last_future"].set_result(observed["last_result"])
+                        if query.startswith("time() - "):
+                            return self.prometheus_vector(1)
+                        if query.startswith("min("):
+                            # This is still fresh by age but predates submission.
+                            stamp = 150 if observed["samples"] == 1 else 201
+                            if mode == "no_scale":
+                                stamp = 201
+                            return self.prometheus_vector(stamp)
+                        values = fresh if observed["samples"] != 2 or mode in (
+                            "no_scale", "clock_missing"
+                        ) else {"lag": 500, "replicas": 12, "members": 12}
+                        name = next(name for name, value in CAPTURE.QUERIES.items()
+                                    if value == query)
+                        return self.prometheus_vector(values.get(name, 0))
                     if path == "/control":
                         if body is not None:
                             observed["controls"].append(
@@ -566,7 +734,8 @@ class CaptureTests(unittest.TestCase):
                         }
                     return {}
 
-                def sample(observed=observed, mode=mode, fresh=fresh):
+                def sample(*, not_before, observed=observed, mode=mode, fresh=fresh):
+                    self.assertEqual(not_before, 200)
                     observed["samples"] += 1
                     if observed["samples"] == 1:
                         return {"lag": 500, "replicas": 12, "members": 12}
@@ -578,7 +747,11 @@ class CaptureTests(unittest.TestCase):
 
                 capture.http = mock.Mock(side_effect=http)
                 capture.job = mock.Mock(side_effect=job)
-                capture.sample = mock.Mock(side_effect=sample)
+                if mode in ("transient", "persistent", "hard"):
+                    capture.sample = mock.Mock(side_effect=sample)
+                passes = mode in (
+                    "transient", "pre_submission", "completes_during_sample", "clock_pending"
+                )
                 with (
                     mock.patch.object(CAPTURE, "ThreadPoolExecutor", ImmediatePool),
                     mock.patch.object(CAPTURE, "assert_attempts", return_value=[]),
@@ -598,7 +771,7 @@ class CaptureTests(unittest.TestCase):
                     mock.patch("builtins.print"),
                 ):
                     with self.assertRaises(
-                        ReachedDLQ if mode == "transient" else CAPTURE.CaptureError
+                        ReachedDLQ if passes else CAPTURE.CaptureError
                     ):
                         capture.proof()
                 self.assertEqual(len(observed["posted"]), 600)
@@ -606,25 +779,50 @@ class CaptureTests(unittest.TestCase):
                 outputs = {
                     call.args[0]: call.args[1] for call in capture.write.call_args_list
                 }
-                if mode == "transient":
+                self.assertNotIn("12-metrics.txt", outputs)  # run() finalizes it
+                if mode in ("transient", "persistent"):
+                    pending = [item for item in capture.load_evidence["observations"]
+                               if item["result"] == "pending"]
+                    self.assertTrue(pending)
+                    self.assertTrue(all(item["pending_reason"] == "stale replicas"
+                                        for item in pending))
+                    self.assertTrue(all(item["poller"]["result"] == "missing"
+                                        for item in pending))
+                if mode == "hard":
+                    self.assertEqual(capture.load_evidence["observations"][-1]["result"],
+                                     "interrupted")
+                if passes:
                     self.assertEqual(observed["samples"], 3)
                     self.assertEqual(
                         observed["controls"][-1], ({"latency_ms": 0, "fail_rate": 0}, 3)
                     )
                     self.assertEqual(
-                        len(outputs["12-metrics.txt"]["samples"]), 3
-                    )  # baseline plus two fresh
+                        len(capture.load_evidence["samples"]),
+                        4 if mode in ("completes_during_sample", "clock_pending") else 3,
+                    )  # baseline plus accepted cohort observations
+                    self.assertEqual(capture.load_evidence[
+                        "load_started_at_prometheus_seconds"], 100)
+                    self.assertEqual(capture.load_evidence[
+                        "submitted_at_prometheus_seconds"], 200)
                     self.assertEqual(
-                        len(set(outputs["12-metrics.txt"]["load_event_ids"])), 600
+                        len(set(capture.load_evidence["load_event_ids"])), 600
                     )
                     self.assertFalse(capture.cancelled.is_set())
                     capture.stop.assert_not_called()
+                elif mode == "no_scale":
+                    # A quiet cohort fails once; do not extend it to seek scale-out.
+                    self.assertEqual(observed["samples"], 1)
+                    self.assertEqual(clock[0], 0)
+                    self.assertEqual(len(capture.load_evidence["samples"]), 2)
+                    self.assertEqual(len(capture.load_evidence["load_event_ids"]), 600)
+                    self.assertNotIn("14-keda.txt", outputs)
                 else:
                     self.assertTrue(capture.cancelled.is_set())
                     capture.stop.assert_called_once()
-                    self.assertNotIn("12-metrics.txt", outputs)
+                    self.assertIsNotNone(capture.load_evidence)
+                    self.assertTrue(capture.load_evidence["observations"])
                     self.assertEqual(len(observed["controls"]), 1)  # delay held
-                    if mode == "persistent":
+                    if mode in ("persistent", "clock_missing"):
                         self.assertEqual(clock[0], 480)
 
     def test_fake_aws_deploy_waits_for_generated_objects_then_initial_scrape(self):
