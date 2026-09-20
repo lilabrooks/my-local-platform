@@ -259,7 +259,7 @@ class Capture:
             ):
                 raise CaptureError("destroy deadline reached")
 
-    def command(self, arguments, *, data=None, timeout=60):
+    def command(self, arguments, *, data=None, timeout=60, pending_log_errors=False):
         self.guard()
         process = subprocess.Popen(
             arguments,
@@ -278,7 +278,7 @@ class Capture:
                 if time.monotonic() >= end:
                     raise CaptureError(f"{arguments[0]} timed out")
                 try:
-                    stdout, _ = process.communicate(
+                    stdout, stderr = process.communicate(
                         input=data if first else None,
                         timeout=min(1, end - time.monotonic()),
                     )
@@ -286,7 +286,16 @@ class Capture:
                 except subprocess.TimeoutExpired:
                     first = False
             if process.returncode:
-                # Diagnostics may contain Kubernetes Secret data. Keep them off disk.
+                # Inspect only known log races in memory; never persist stderr,
+                # which may contain Kubernetes Secret data. Auth and other errors
+                # remain fatal, even at this read-only export step.
+                if pending_log_errors and re.search(
+                    rb'Error from server \(BadRequest\): container "[^"\n]+" in pod '
+                    rb'"[^"\n]+" is waiting to start:|'
+                    rb'Error from server \(NotFound\): pods "[^"\n]+" not found',
+                    stderr,
+                ):
+                    raise ObservationPending("application log source is changing")
                 raise CaptureError(
                     f"{arguments[0]} failed with status {process.returncode}"
                 )
@@ -556,7 +565,7 @@ class Capture:
         output = self.kubectl("-n", "mlp", "logs", name).decode()
         return output if replay else json.loads(output)
 
-    def metric(self, query):
+    def metric(self, query, *, signed=False):
         value = self.http(
             "prometheus", "/api/v1/query?" + urllib.parse.urlencode({"query": query})
         )
@@ -564,29 +573,65 @@ class Capture:
         if value.get("status") != "success" or len(results) != 1:
             raise ObservationPending("Prometheus did not return a unique sample")
         number = float(results[0]["value"][1])
-        if not math.isfinite(number) or number < 0:
+        if not math.isfinite(number) or (number < 0 and not signed):
             raise CaptureError("invalid Prometheus value")
         return number
 
-    def sample(self):
-        freshness = self.metric(
-            'time() - min(relay_lag_refreshed_timestamp_seconds and on(instance) relay_build_info{role="ingest"})'
+    def pending_metric(self, query):
+        try:
+            return self.metric(query)
+        except (
+            ObservationPending,
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+        ):
+            # Only missing observations and transport interruptions are pending.
+            # HTTP errors, invalid values, cancellation and deadlines stay fatal.
+            return None
+
+    def sample(self, *, not_before=None):
+        broker_timestamp = (
+            "min(relay_lag_refreshed_timestamp_seconds and on(instance) "
+            'relay_build_info{role="ingest"})'
         )
-        if freshness > 30:
-            raise ObservationPending("broker lag snapshot is stale")
+        freshness = self.metric(f"time() - {broker_timestamp}", signed=True)
+        if freshness < 0 or freshness > 30:
+            raise ObservationPending(
+                "broker lag snapshot is stale or ahead of Prometheus"
+            )
+        ordering = {}
+        if not_before is not None:
+            broker_refreshed_at = self.metric(broker_timestamp)
+            if broker_refreshed_at <= not_before:
+                raise ObservationPending("broker lag snapshot predates replay resume")
+            ordering = {
+                "broker_refreshed_at_seconds": broker_refreshed_at,
+                "scraped_at_prometheus_seconds": {},
+            }
         for name, query in QUERIES.items():
             # timestamp(max(...)) reports evaluation time, not scrape age.
             source = query[4:-1] if query.startswith("max(") else query
             if self.metric(f"time() - min(timestamp({source}))") > SAMPLE_MAX_AGE[name]:
                 raise ObservationPending("proof metric sample is stale")
+            if not_before is not None:
+                scraped_at = self.metric(f"min(timestamp({source}))")
+                if scraped_at <= not_before:
+                    raise ObservationPending(
+                        "proof metric sample predates replay resume"
+                    )
+                ordering["scraped_at_prometheus_seconds"][name] = scraped_at
         return {
             "captured_at": utc(),
+            **ordering,
             **{key: self.metric(query) for key, query in QUERIES.items()},
         }
 
-    def pending_sample(self):
+    def pending_sample(self, *, not_before=None):
         try:
-            return self.sample()
+            if not_before is None:
+                return self.sample()
+            return self.sample(not_before=not_before)
         except ObservationPending:
             # No stale value can satisfy a terminal condition. Callers retain
             # their original deadline and retry cadence, including on None.
@@ -737,8 +782,8 @@ class Capture:
                 self.wait_for_resource(namespace, resource)
             self.forward(service, namespace, resource, port)
 
-    def drained_sample(self):
-        sample = self.pending_sample()
+    def drained_sample(self, *, not_before=None):
+        sample = self.pending_sample(not_before=not_before)
         return (
             sample
             if (
@@ -752,6 +797,33 @@ class Capture:
 
     def baseline(self):
         return self.wait(self.drained_sample, 180)
+
+    def replay_drained_sample(self, resumed_at):
+        # A pre-pause scrape can still say one member and zero lag while KEDA
+        # is replacing the consumer. Ignore pods already leaving during scale-in;
+        # log sources get a separate readiness check immediately before export.
+        pods = json.loads(
+            self.kubectl(
+                "-n",
+                "mlp",
+                "get",
+                "pods",
+                "-l",
+                "app.kubernetes.io/name=relay-deliver",
+                "-o",
+                "json",
+            )
+        )["items"]
+        pods = [pod for pod in pods if not pod["metadata"].get("deletionTimestamp")]
+        if len(pods) != 1:
+            return None
+        pod = pods[0]
+        if pod.get("status", {}).get("phase") != "Running" or not any(
+            condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in pod.get("status", {}).get("conditions", [])
+        ):
+            return None
+        return self.drained_sample(not_before=resumed_at)
 
     @contextmanager
     def load_pool(self):
@@ -1058,6 +1130,10 @@ class Capture:
             }
 
         self.write("15-dlq.json", self.wait(dead_letters, 120))
+        self.capture_replay(event_id)
+        self.export_application_logs()
+
+    def capture_replay(self, event_id):
         before = sum(
             d["webhook_id"] == event_id and d["path"] == "/hooks/ok"
             for d in self.http("sink", "/received")["deliveries"]
@@ -1093,6 +1169,8 @@ class Capture:
         self.kubectl(
             "-n", "mlp", "annotate", "scaledobject", "relay-deliver", PAUSE + "-"
         )
+        # Use the observation server's clock for the scrape boundary.
+        replay_resumed_at = self.wait(lambda: self.pending_metric("vector(time())"), 30)
 
         def replayed():
             records = [
@@ -1106,32 +1184,85 @@ class Capture:
 
         replay_deliveries = self.wait(replayed, 120)
 
-        final_state = self.wait(self.drained_sample, 120)
+        final_state = self.wait(
+            lambda: self.replay_drained_sample(replay_resumed_at), 120
+        )
         self.write(
             "16-replay.json",
             {
                 "event_id": event_id,
                 "since": self.started,
                 "offset_reset": replay,
+                "resumed_at_prometheus_seconds": replay_resumed_at,
                 "before": before,
                 "deliveries": replay_deliveries,
                 "final_state": final_state,
             },
         )
-        logs = self.kubectl(
-            "-n",
-            "mlp",
-            "logs",
-            "-l",
-            "app.kubernetes.io/name in (relay-ingest,relay-deliver,sink)",
-            "--all-containers",
-            "--prefix",
-            "--tail=-1",
-            f"--since-time={self.started}",
-        )
+
+    def pending_application_logs(self):
+        selector = "app.kubernetes.io/name in (relay-ingest,relay-deliver,sink)"
+        pods = json.loads(
+            self.kubectl(
+                "-n",
+                "mlp",
+                "get",
+                "pods",
+                "-l",
+                selector,
+                "-o",
+                "json",
+            )
+        )["items"]
+        live = [pod for pod in pods if not pod["metadata"].get("deletionTimestamp")]
+        roles = {pod["metadata"]["labels"]["app.kubernetes.io/name"] for pod in live}
+        if roles != {"relay-ingest", "relay-deliver", "sink"}:
+            return None
+        for pod in live:
+            status = pod.get("status", {})
+            containers = status.get("containerStatuses", [])
+            if (
+                status.get("phase") != "Running"
+                or not any(
+                    c.get("type") == "Ready" and c.get("status") == "True"
+                    for c in status.get("conditions", [])
+                )
+                or {c["name"] for c in containers}
+                != {c["name"] for c in pod["spec"]["containers"]}
+                or not containers
+                or not all(
+                    c.get("ready") and "running" in c.get("state", {})
+                    for c in containers
+                )
+            ):
+                return None
+        try:
+            logs = self.kubectl(
+                "-n",
+                "mlp",
+                "logs",
+                "-l",
+                "app.kubernetes.io/name in (relay-ingest,relay-deliver,sink)",
+                "--all-containers",
+                "--prefix",
+                "--tail=-1",
+                f"--since-time={self.started}",
+                pending_log_errors=True,
+            )
+        except ObservationPending:
+            return None
+        return {"logs": logs.decode()}
+
+    def export_application_logs(self):
+        # Recheck every role immediately before each idempotent log read. A pod
+        # can still start/disappear between the check and logs; retry only those
+        # recognized races, bounded by this window and the proof/session deadline.
+        exported = self.wait(self.pending_application_logs, 60)
         if self.scanner:
-            self.evidence.scan_secret_bytes(logs, self.scanner, "application-logs.txt")
-        self.write("application-logs.txt", {"logs": logs.decode()})
+            self.evidence.scan_secret_bytes(
+                exported["logs"].encode(), self.scanner, "application-logs.txt"
+            )
+        self.write("application-logs.txt", exported)
 
     def stop(self):
         with self.stop_lock:

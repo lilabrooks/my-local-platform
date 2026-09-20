@@ -271,7 +271,9 @@ class CaptureTests(unittest.TestCase):
     def test_stale_member_sample_cannot_prove_scaleout(self):
         capture = CAPTURE.Capture(self.args())
         capture.metric = mock.Mock(
-            side_effect=lambda q: 31 if "timestamp(relay_group_members" in q else 0
+            side_effect=lambda q, **kwargs: (
+                31 if "timestamp(relay_group_members" in q else 0
+            )
         )
         with self.assertRaisesRegex(CAPTURE.ObservationPending, "metric sample"):
             capture.sample()
@@ -281,7 +283,7 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(age=age):
                 capture = CAPTURE.Capture(self.args())
                 capture.metric = mock.Mock(
-                    side_effect=lambda q, age=age: (
+                    side_effect=lambda q, age=age, **kwargs: (
                         age if "timestamp(kube_deployment_spec_replicas" in q else 0
                     )
                 )
@@ -329,6 +331,115 @@ class CaptureTests(unittest.TestCase):
                 capture.sample.side_effect = CAPTURE.CaptureError("real failure")
                 with self.assertRaisesRegex(CAPTURE.CaptureError, "real failure"):
                     capture.drained_sample()
+
+    def test_replay_rejects_recent_observations_from_before_resume(self):
+        sources = ["broker", *CAPTURE.QUERIES]
+        for stale in [*sources, None]:
+            with self.subTest(stale=stale):
+                capture = CAPTURE.Capture(self.args())
+
+                def metric(query, stale=stale, **kwargs):
+                    if query.startswith("time() - "):
+                        return 1  # Every sample passes the ordinary age check.
+                    if query.startswith("min(relay_lag_refreshed"):
+                        return 100 if stale == "broker" else 101
+                    if query.startswith("min(timestamp("):
+                        source = CAPTURE.QUERIES.get(stale, "")
+                        source = source[4:-1] if source.startswith("max(") else source
+                        return 100 if query == f"min(timestamp({source}))" else 101
+                    return 0 if query == CAPTURE.QUERIES["lag"] else 1
+
+                capture.metric = mock.Mock(side_effect=metric)
+                if stale is None:
+                    sample = capture.sample(not_before=100)
+                    self.assertEqual(sample["lag"], 0)
+                    self.assertEqual(sample["broker_refreshed_at_seconds"], 101)
+                    self.assertEqual(
+                        sample["scraped_at_prometheus_seconds"],
+                        dict.fromkeys(CAPTURE.QUERIES, 101),
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        CAPTURE.ObservationPending, "predates replay resume"
+                    ):
+                        capture.sample(not_before=100)
+
+    def test_replay_waits_for_ready_replacement_and_new_observations(self):
+        ready = {
+            "metadata": {},
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+        pending_pods = [
+            [],
+            [{"metadata": {}, "status": {"phase": "Pending"}}],
+            [{"metadata": {}, "status": {"phase": "Running"}}],
+            [{**ready, "metadata": {"deletionTimestamp": "2026-09-20T00:00:00Z"}}],
+            [ready, ready],
+        ]
+        for pods in pending_pods:
+            with self.subTest(pods=pods):
+                capture = CAPTURE.Capture(self.args())
+                capture.kubectl = mock.Mock(return_value=json.dumps({"items": pods}))
+                capture.sample = mock.Mock()
+                self.assertIsNone(capture.replay_drained_sample(100))
+                capture.sample.assert_not_called()
+
+        capture = CAPTURE.Capture(self.args())
+        capture.kubectl = mock.Mock(
+            return_value=json.dumps(
+                {
+                    "items": [
+                        ready,
+                        {
+                            **ready,
+                            "metadata": {"deletionTimestamp": "2026-09-20T00:00:00Z"},
+                        },
+                    ]
+                }
+            )
+        )
+        fresh = {"lag": 0, "replicas": 1, "members": 1}
+        capture.sample = mock.Mock(
+            side_effect=[
+                CAPTURE.ObservationPending("predates replay resume"),
+                fresh,
+            ]
+        )
+        with mock.patch.object(CAPTURE.time, "sleep"):
+            self.assertEqual(
+                capture.wait(lambda: capture.replay_drained_sample(100), 120), fresh
+            )
+        self.assertEqual(
+            capture.sample.call_args_list,
+            [
+                mock.call(not_before=100),
+                mock.call(not_before=100),
+            ],
+        )
+        capture.sample.side_effect = CAPTURE.CaptureError("invalid observation")
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "invalid observation"):
+            capture.replay_drained_sample(100)
+
+    def test_replay_readiness_wait_does_not_extend_the_proof_deadline(self):
+        capture = CAPTURE.Capture(self.args())
+        clock = [0]
+        capture.deadline = 5
+        capture.kubectl = mock.Mock(return_value=b'{"items": []}')
+        capture.sample = mock.Mock()
+        with (
+            mock.patch.object(CAPTURE.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(
+                CAPTURE.time, "sleep",
+                side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            ),
+        ):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "deadline"):
+                capture.wait(lambda: capture.replay_drained_sample(100), 120)
+        self.assertEqual(clock[0], 5)
+        capture.sample.assert_not_called()
 
     def test_drain_cannot_accept_a_probe_that_finishes_at_or_after_deadline(self):
         for finished_at in (120, 121):
@@ -645,6 +756,276 @@ class CaptureTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CAPTURE.CaptureError, "unique sample"):
             capture.metric("query")
+
+    @staticmethod
+    def prometheus_vector(value):
+        return {"status": "success", "data": {
+            "resultType": "vector", "result": [{"metric": {}, "value": [123, str(value)]}],
+        }}
+
+    def test_prometheus_clock_requires_vector_wire_shape(self):
+        capture = CAPTURE.Capture(self.args())
+        capture.http = mock.Mock(
+            return_value={
+                "status": "success",
+                "data": {
+                    "resultType": "scalar",
+                    "result": [123, "123.5"],
+                },
+            }
+        )
+        with self.assertRaises(CAPTURE.ObservationPending):
+            capture.metric("time()")
+        capture.http.return_value = self.prometheus_vector(123.5)
+        self.assertEqual(capture.metric("vector(time())"), 123.5)
+        query = CAPTURE.urllib.parse.parse_qs(
+            CAPTURE.urllib.parse.urlsplit(capture.http.call_args.args[1]).query
+        )
+        self.assertEqual(query, {"query": ["vector(time())"]})
+
+    def test_negative_broker_age_is_pending_but_negative_metric_is_fatal(self):
+        capture = CAPTURE.Capture(self.args())
+        capture.http = mock.Mock(return_value=self.prometheus_vector(-1))
+        self.assertIsNone(capture.pending_sample(not_before=100))
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "invalid Prometheus"):
+            capture.metric(CAPTURE.QUERIES["lag"])
+        for value in ("NaN", "Inf"):
+            with self.subTest(value=value):
+                capture.http.return_value = self.prometheus_vector(value)
+                with self.assertRaisesRegex(CAPTURE.CaptureError, "invalid Prometheus"):
+                    capture.pending_sample()
+
+    def test_replay_boundary_follows_unpause_and_reaches_drain_and_receipt(self):
+        capture = CAPTURE.Capture(self.args())
+        operations = []
+        delivery = {"webhook_id": "event", "path": "/hooks/ok", "status": 200}
+        clock_queries = [0]
+
+        def kubectl(*args, **kwargs):
+            operations.append(args)
+            return b'{"items": []}' if "get" in args else b""
+
+        def http(service, path, *args, **kwargs):
+            if service == "prometheus":
+                self.assertEqual(operations[-1][-1], CAPTURE.PAUSE + "-")
+                self.assertEqual(operations[-2], ("replay",))
+                query = CAPTURE.urllib.parse.parse_qs(
+                    CAPTURE.urllib.parse.urlsplit(path).query
+                )
+                self.assertEqual(query, {"query": ["vector(time())"]})
+                clock_queries[0] += 1
+                if clock_queries[0] == 1:
+                    raise CAPTURE.urllib.error.URLError("connection reset")
+                if clock_queries[0] == 2:
+                    return {"status": "success", "data": {"result": []}}
+                return self.prometheus_vector(100.5)
+            return {"deliveries": [delivery] if clock_queries[0] else []}
+
+        capture.kubectl = mock.Mock(side_effect=kubectl)
+        capture.http = mock.Mock(side_effect=http)
+
+        def job(operation, **kwargs):
+            operations.append((operation,))
+            return "reset"
+
+        capture.job = mock.Mock(side_effect=job)
+        capture.replay_drained_sample = mock.Mock(return_value={"lag": 0})
+        capture.write = mock.Mock()
+        with mock.patch.object(CAPTURE.time, "sleep"):
+            capture.capture_replay("event")
+        self.assertEqual(clock_queries[0], 3)
+        capture.replay_drained_sample.assert_called_once_with(100.5)
+        capture.job.assert_called_once_with("replay", replay=True)
+        self.assertEqual(capture.write.call_args.args[0], "16-replay.json")
+        self.assertEqual(
+            capture.write.call_args.args[1]["resumed_at_prometheus_seconds"], 100.5
+        )
+        self.assertEqual(capture.write.call_args.args[1]["final_state"], {"lag": 0})
+
+    def test_boundary_retry_is_bounded_and_hard_failures_propagate(self):
+        capture = CAPTURE.Capture(self.args())
+        capture.http = mock.Mock(side_effect=CAPTURE.urllib.error.URLError("offline"))
+        clock = [0]
+        capture.deadline = 5
+        with (
+            mock.patch.object(CAPTURE.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(
+                CAPTURE.time,
+                "sleep",
+                side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            ),
+        ):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "deadline"):
+                capture.wait(lambda: capture.pending_metric("vector(time())"), 30)
+        self.assertEqual(clock[0], 5)
+        for error in (
+            CAPTURE.CaptureError("HTTP 403"),
+            CAPTURE.CaptureError("invalid Prometheus value"),
+            CAPTURE.CaptureError("capture has stopped"),
+        ):
+            with self.subTest(error=error):
+                capture.http.side_effect = error
+                with self.assertRaises(CAPTURE.CaptureError):
+                    capture.pending_metric("vector(time())")
+
+    @staticmethod
+    def application_pod(role):
+        return {
+            "metadata": {"labels": {"app.kubernetes.io/name": role}},
+            "spec": {"containers": [{"name": role}]},
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [
+                    {"name": role, "ready": True, "state": {"running": {}}}
+                ],
+            },
+        }
+
+    def test_export_checks_every_live_role_and_container_before_logs(self):
+        roles = ("relay-ingest", "relay-ingest", "relay-deliver", "sink")
+        cases = [
+            (i, state)
+            for i in range(4)
+            for state in ("missing", "pending", "not-ready", "restarting", "sidecar")
+        ]
+        for index, state in cases:
+            with self.subTest(index=index, state=state):
+                pods = [self.application_pod(role) for role in roles]
+                if state == "missing":
+                    # Remove both ingest replicas when testing missing role.
+                    pods = [
+                        pod
+                        for pod in pods
+                        if pod["metadata"]["labels"]["app.kubernetes.io/name"]
+                        != roles[index]
+                    ]
+                elif state == "pending":
+                    pods[index]["status"]["phase"] = "Pending"
+                elif state == "not-ready":
+                    pods[index]["status"]["conditions"] = []
+                elif state == "restarting":
+                    pods[index]["status"]["containerStatuses"][0]["state"] = {
+                        "waiting": {}
+                    }
+                else:
+                    pods[index]["spec"]["containers"].append({"name": "sidecar"})
+                capture = CAPTURE.Capture(self.args())
+                capture.kubectl = mock.Mock(return_value=json.dumps({"items": pods}))
+                self.assertIsNone(capture.pending_application_logs())
+                self.assertEqual(capture.kubectl.call_count, 1)
+                self.assertIn("get", capture.kubectl.call_args.args)
+
+    def test_export_rechecks_readiness_after_log_race_and_scans_once(self):
+        capture = CAPTURE.Capture(self.args())
+        pods = [
+            self.application_pod(role)
+            for role in ("relay-ingest", "relay-ingest", "relay-deliver", "sink")
+        ]
+        terminating = self.application_pod("relay-deliver")
+        terminating["metadata"]["deletionTimestamp"] = "2026-09-20T00:00:00Z"
+        terminating["status"] = {}
+        pods.append(terminating)
+        get_result = json.dumps({"items": pods}).encode()
+        capture.kubectl = mock.Mock(
+            side_effect=[
+                get_result,
+                CAPTURE.ObservationPending("pod disappeared"),
+                get_result,
+                b"logs",
+            ]
+        )
+        capture.write = mock.Mock()
+        capture.scanner = object()
+        capture.evidence.scan_secret_bytes = mock.Mock()
+        with mock.patch.object(CAPTURE.time, "sleep"):
+            capture.export_application_logs()
+        self.assertEqual(
+            [call.args[2] for call in capture.kubectl.call_args_list],
+            ["get", "logs", "get", "logs"],
+        )
+        capture.evidence.scan_secret_bytes.assert_called_once_with(
+            b"logs", capture.scanner, "application-logs.txt"
+        )
+        capture.write.assert_called_once_with("application-logs.txt", {"logs": "logs"})
+        capture.evidence.scan_secret_bytes.side_effect = CAPTURE.CaptureError("secret")
+        capture.kubectl.side_effect = [get_result, b"logs"]
+        capture.write.reset_mock()
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "secret"):
+            capture.export_application_logs()
+        capture.write.assert_not_called()
+
+    def test_log_races_are_classified_without_retrying_other_command_errors(self):
+        capture = CAPTURE.Capture(self.args())
+        for stderr, pending in (
+            (
+                b'Error from server (BadRequest): container "relay" in pod "p" '
+                b"is waiting to start: ContainerCreating",
+                True,
+            ),
+            (b'Error from server (NotFound): pods "p" not found', True),
+            (b'Error from server (Forbidden): pods "p" is forbidden', False),
+            (b"unknown failure with private data", False),
+        ):
+            for enabled in (False, True):
+                with self.subTest(stderr=stderr, enabled=enabled):
+                    process = mock.Mock(returncode=1)
+                    process.communicate.return_value = (b"partial logs", stderr)
+                    with mock.patch.object(
+                        CAPTURE.subprocess, "Popen", return_value=process
+                    ):
+                        expected = (
+                            CAPTURE.ObservationPending
+                            if pending and enabled
+                            else CAPTURE.CaptureError
+                        )
+                        with self.assertRaises(expected) as raised:
+                            capture.command(
+                                ["kubectl", "logs"], pending_log_errors=enabled
+                            )
+                        self.assertEqual(type(raised.exception), expected)
+                        self.assertNotIn(stderr.decode(), str(raised.exception))
+        process = mock.Mock(returncode=0)
+        process.communicate.return_value = (b"x" * (8 * 1024 * 1024 + 1), b"")
+        with mock.patch.object(CAPTURE.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "evidence limit"):
+                capture.command(["kubectl", "logs"], pending_log_errors=True)
+
+    def test_log_retry_respects_proof_deadline_and_hard_errors(self):
+        capture = CAPTURE.Capture(self.args())
+        pods = [
+            self.application_pod(role)
+            for role in ("relay-ingest", "relay-deliver", "sink")
+        ]
+        get_result = json.dumps({"items": pods}).encode()
+        capture.write = mock.Mock()
+        clock = [0]
+        capture.deadline = 5
+        capture.kubectl = mock.Mock(
+            side_effect=lambda *args, **kwargs: (
+                get_result if "get" in args else pending()
+            )
+        )
+
+        def pending():
+            raise CAPTURE.ObservationPending("container starting")
+
+        with (
+            mock.patch.object(CAPTURE.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(
+                CAPTURE.time,
+                "sleep",
+                side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            ),
+        ):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "deadline"):
+                capture.export_application_logs()
+        self.assertEqual(clock[0], 5)
+        capture.write.assert_not_called()
+        capture.kubectl.side_effect = [get_result, CAPTURE.CaptureError("forbidden")]
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "forbidden"):
+            capture.pending_application_logs()
+        capture.write.assert_not_called()
 
     def test_history_cannot_pass_on_another_event_or_duplicate_coordinates(self):
         value = {
