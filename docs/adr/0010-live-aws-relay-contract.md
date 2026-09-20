@@ -277,15 +277,51 @@ inventory. Destroy, log cleanup, transcript, and Cost Explorer exits remain
 separate evidence. A Cost Explorer failure can therefore fail the evidence run
 without telling the operator that resources remain.
 
-The account-wide `mlp-live-aws-monthly` budget lives in a persistent Terraform
+The project-scoped `mlp-live-aws-monthly` budget lives in a persistent Terraform
 stack with its own remote state and destroy protection. It sends actual-spend
 email at $4 and $5 and forecast email at $5. Any active budget alarm blocks a
 new hourly plan. Billing data arrives too late for a three-hour experiment, so
 the budget remains a forgotten-resource alert. Its $5 amount is a monthly
-account ceiling, separate from the $5 session maximum. A single run can trip
+project allowance before tax, separate from the $5 session maximum. It filters
+exactly `Project=my-local-platform` using an active user-defined cost allocation
+tag. All other cost-type settings retain their existing defaults. A single run can trip
 the forecast alarm and block another hourly run for the rest of the alarm
 period. The executing repository owner owns the foreground controller and
 cleanup; there is no cleanup handoff.
+
+#### Budget scope amendment, accepted 2026-09-20
+
+The owner authorized activation, propagation, coverage verification, and the
+budget/gate update after unrelated account spending blocked #96. This amends
+the original account-wide scope. The amount, notifications, session limits,
+topology, and cleanup obligation stay as specified above.
+
+The stable project tag includes earlier runs and surviving project resources.
+A tag attached to the budget object does not filter charges: Terraform sets
+the explicit `TagKeyValue` filter, and both the account collector and the
+hourly plan/apply boundary use the same live budget check. GO requires the
+recorded scope and a passing plan tag-coverage report. The EKS module receives
+the shared resource tags so its launch template propagates them to worker
+instances, volumes, and network interfaces.
+
+Coverage is bounded. Planned tags prove configuration; they do not prove every
+charge will carry that tag in billing. Tax is excluded from this monthly alert.
+AWS-managed secrets, service-created resources, unallocated fees, and costs
+before billing-tag activation need separate cost review. An empty tagged
+subtotal does not prove zero project spend. The existing account-wide final
+cost receipt remains labelled as such; it is not renamed to project spend.
+See the [coverage limits](../costs.md#project-budget-coverage).
+
+Keeping the account-wide $5 limit would keep unrelated subscriptions in the
+M4 gate. Adding $5 to a snapshot of the account bill would still mix subsequent
+unrelated charges into it. A run-specific tag could miss leftovers from an
+earlier run. Those alternatives were rejected for this persistent alert.
+
+Rollback restores the previous account-wide filter and tax setting through a
+reviewed guardrail plan, with the collector, hourly guard, GO, and docs changed
+together. Revisit this scope if other work in the same project needs its own
+allowance or a material project charge cannot be attributed by tags. Neither
+rollback nor a delayed billing refresh authorizes another runtime rehearsal.
 
 ### Evidence and redaction
 
@@ -469,6 +505,40 @@ rollback or dev-stack destroy.
 - Kubernetes 1.35 leaves EKS standard support before the paid run.
 
 ## Verification
+
+Budget amendment checked on 2026-09-20 UTC:
+
+- `aws ce update-cost-allocation-tags-status` activated `Project`; readback
+  reported `Active` at `05:42:07Z`.
+- `make aws-guardrails-plan` produced one in-place budget update. Review of
+  the saved plan found only the cost filter and tax inclusion changed.
+  `make aws-guardrails-up` applied that plan; AWS readback confirmed the exact
+  filter, tax exclusion, three subscribers, and all three notifications `OK`.
+- The shared `budget()` check passed against the real AWS responses, including
+  AWS's omission of the default `ThresholdType`. An explicit conflicting type
+  remains invalid.
+- Terraform guardrail tests passed (1 run), and dev mocked tests passed
+  (7 runs). A separate real-provider, inspection-only plan verified the tag
+  on 14 reviewed resources and all three EKS launch resource types. Mocked
+  providers do not calculate provider-default `tags_all`; their empty maps
+  were retained as inconclusive evidence, then checked with the real provider.
+  The inspection plan used documentation CIDR `198.51.100.7/32`, was not applied,
+  and is not a #96 reviewed staging plan or a GO input.
+- All 204 Python tests passed, including the 80 focused account, plan/guard,
+  GO, and staging-publication tests. Regression cases reject absent/wrong/narrowed filters, tax
+  inclusion, inactive tags, absent child-resource tags, and old GO inputs.
+
+The source lint checks passed. The first combined lint run also scanned the
+inspection plan export and reported four plan-snapshot findings. Those raw
+Terraform artifacts were moved byte-for-byte into the evidence directory's
+`.terraform/` subdirectory, covered by the existing generated-artifact exclusion;
+no lint rule or source suppression changed. The source Trivy recheck had zero
+findings. The final Markdown check and `git diff --check` passed.
+
+Private commands, readbacks and plan files are under
+`.evidence/budget-amendment/20260920T054128Z/`. Local qualification remains
+bound to `d63d028`; this amendment does not relabel those receipts or claim a
+new preflight/GO. No hourly resource was applied for these checks.
 
 Checked on 2026-09-05 without AWS credentials or resource creation:
 

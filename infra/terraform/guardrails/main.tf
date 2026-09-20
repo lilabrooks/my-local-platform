@@ -1,4 +1,4 @@
-# Persistent account guardrails. This stack is separate from envs/dev so the
+# Persistent project guardrails. This stack is separate from envs/dev so the
 # live-run cleanup cannot remove its forgotten-resource alert.
 
 terraform {
@@ -31,6 +31,16 @@ resource "aws_budgets_budget" "live_aws" {
   limit_amount = "5"
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
+
+  # Budget-resource tags do not filter spending. This is the billing filter.
+  cost_filter {
+    name   = "TagKeyValue"
+    values = ["user:Project$my-local-platform"]
+  }
+
+  cost_types {
+    include_tax = false
+  }
 
   notification {
     comparison_operator        = "GREATER_THAN"

@@ -1,14 +1,17 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-09
+Date: 2026-08-24 · Last audited: 2026-09-20
 Status: **M0 through M3 are built. M3's whole-application proof passed on
 2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
 is closed. M4's contract, local foundation, AWS deployment render, and local
-rehearsal are complete.** The runtime bootstrap discovered at their handoff is
-packaged in [#136](https://github.com/lilabrooks/my-local-platform/issues/136).
-Cheap-tier staging in [#96](https://github.com/lilabrooks/my-local-platform/issues/96)
-waits for that merge and owner authorization. The later hourly apply requires
-a second owner decision.
+rehearsal are complete.** Cheap-tier staging in
+[#96](https://github.com/lilabrooks/my-local-platform/issues/96) is authorized.
+The project-budget amendment removed the account-wide alarm blocker; staging
+waits for amendment review and an explicit candidate/qualification handoff.
+Cheap dev apply, images, the reviewed staging plan, GO and publication remain.
+The later hourly apply in
+[#97](https://github.com/lilabrooks/my-local-platform/issues/97) requires a
+separate owner decision.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -473,12 +476,13 @@ that shift, narrow enough to name precisely.
 
 ### Before the first apply
 
-1. Create the persistent account-wide AWS Budget from
+1. Create the persistent project AWS Budget before tax from
    `infra/terraform/guardrails/`. Its actual-spend alerts fire above 80% and
    100% of $5, and its forecast alert fires above 100%. The foreground Go
    controller owns the fixed 2-hour-30-minute destroy deadline; billing data
    arrives too late to serve as the session clock. The $5 budget is a monthly
-   account ceiling, so an active forecast or actual alarm can block another
+   allowance filtered by the active `Project=my-local-platform` billing tag,
+   so an active forecast or actual alarm can block another
    hourly run that month.
 2. Confirm the EKS version is in **standard** support. Extended support bills
    $0.60/cluster-hour instead of $0.10, applied automatically:

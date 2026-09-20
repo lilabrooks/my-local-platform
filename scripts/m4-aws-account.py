@@ -26,6 +26,19 @@ EXPECTED_REGION = "us-east-1"
 EKS_VERSION = "1.35"
 RDS_ENGINE_VERSION = "17.11"
 BUDGET_NAME = "mlp-live-aws-monthly"
+BUDGET_COST_TYPES = {
+    "IncludeTax": False,
+    "IncludeSubscription": True,
+    "UseBlended": False,
+    "IncludeRefund": True,
+    "IncludeCredit": True,
+    "IncludeUpfront": True,
+    "IncludeRecurring": True,
+    "IncludeOtherSubscription": True,
+    "IncludeSupport": True,
+    "IncludeDiscount": True,
+    "UseAmortized": False,
+}
 FIXED_AZS = ("us-east-1a", "us-east-1b")
 MSK_SERVERLESS_REGIONS = frozenset(
     {
@@ -104,12 +117,25 @@ class Runner:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--commit", required=True)
-    parser.add_argument("--profile", required=True)
-    parser.add_argument("--region", required=True)
-    parser.add_argument("--output", required=True, type=Path)
-    return parser.parse_args()
+    parser.add_argument("--budget-only", action="store_true")
+    parser.add_argument("--account-id")
+    parser.add_argument("--budget-name", default=BUDGET_NAME)
+    parser.add_argument("--run-id")
+    parser.add_argument("--commit")
+    parser.add_argument("--profile")
+    parser.add_argument("--region")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if args.budget_only:
+        if not ACCOUNT_RE.fullmatch(args.account_id or ""):
+            parser.error("--budget-only requires a valid --account-id")
+        if args.budget_name != BUDGET_NAME:
+            parser.error("--budget-name must name the approved project budget")
+    else:
+        for name in ("run_id", "commit", "profile", "region", "output"):
+            if getattr(args, name) is None:
+                parser.error(f"--{name.replace('_', '-')} is required")
+    return args
 
 
 def validate_run_id(run_id: str) -> None:
@@ -333,6 +359,33 @@ def budget(account: str, runner: Runner) -> dict[str, Any]:
     limit_usd = number(limit.get("Amount"), "budget limit")
     if limit_usd != Decimal("5"):
         raise AccountError("AWS budget must have the approved $5 limit")
+    if budget_value.get("CostFilters") != {
+        "TagKeyValue": ["user:Project$my-local-platform"]
+    }:
+        raise AccountError("AWS budget must filter only Project=my-local-platform")
+    cost_types = budget_value.get("CostTypes")
+    if not isinstance(cost_types, dict) or cost_types.get("IncludeTax") is not False:
+        raise AccountError("AWS project budget must explicitly exclude tax")
+    if cost_types != BUDGET_COST_TYPES:
+        raise AccountError("AWS project budget cost types do not match Terraform")
+    allocation_tags = list_value(
+        runner.json(
+            [
+                "aws", "ce", "list-cost-allocation-tags",
+                "--tag-keys", "Project", "--output", "json",
+            ]
+        ),
+        "CostAllocationTags",
+        "AWS cost allocation tags",
+    )
+    if len(allocation_tags) != 1 or any(
+        not isinstance(tag, dict)
+        or tag.get("TagKey") != "Project"
+        or tag.get("Type") != "UserDefined"
+        or tag.get("Status") != "Active"
+        for tag in allocation_tags
+    ):
+        raise AccountError("Project cost allocation tag must be Active")
     notifications = list_value(
         runner.json(
             [
@@ -373,6 +426,10 @@ def budget(account: str, runner: Runner) -> dict[str, Any]:
                 "ThresholdType",
             )
         }
+        # AWS omits the default PERCENTAGE field in real Describe responses.
+        # Keep explicit unsupported values invalid; only absence gets the default.
+        if "ThresholdType" not in notification:
+            identity["ThresholdType"] = "PERCENTAGE"
         notification_settings.add(
             (
                 identity["NotificationType"],
@@ -428,6 +485,12 @@ def budget(account: str, runner: Runner) -> dict[str, Any]:
         "subscriber_count": len(subscribers),
         "subscribers": subscribers,
         "has_notification_subscriber": True,
+        "scope": {
+            "tag_key": "Project",
+            "tag_value": "my-local-platform",
+            "cost_allocation_tag_status": "Active",
+            "include_tax": False,
+        },
     }
 
 
@@ -945,6 +1008,10 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 def main() -> int:
     args = parse_args()
     try:
+        if args.budget_only:
+            budget(args.account_id, Runner())
+            print("project budget gate passed")
+            return 0
         output = validate_destination(args.run_id, args.output)
         require_preflight(args.run_id, args.commit)
         receipt = collect(

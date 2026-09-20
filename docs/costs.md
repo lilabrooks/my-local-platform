@@ -29,11 +29,24 @@ make aws-guardrails-plan
 make aws-guardrails-up
 ```
 
-These commands create the account-wide `mlp-live-aws-monthly` budget. The
+These commands create the project-scoped `mlp-live-aws-monthly` budget before
+tax, filtered to `Project=my-local-platform`. The
 stack has no destroy target, and the budget has `prevent_destroy = true`.
 Planning removes any older saved guardrail plan first. Applying consumes the
 reviewed plan whether the apply succeeds or fails, so a later attempt must
 create a new plan.
+
+Activate the existing resource tag for billing before relying on this budget:
+
+```bash
+aws ce update-cost-allocation-tags-status \
+  --cost-allocation-tags-status TagKey=Project,Status=Active
+aws ce list-cost-allocation-tags --tag-keys Project
+```
+
+Use the intended real AWS profile. The gate requires `Type=UserDefined` and
+`Status=Active`; an activation request alone is insufficient. AWS can take up
+to 24 hours to activate a tag. The owner must authorize this billing change.
 
 For M4 staging, `make aws-account-check` confirms this bucket exists and still
 has versioning, AES256 encryption, and all four public-access blocks before any
@@ -264,13 +277,56 @@ The persistent budget sends email when actual monthly spend passes $4, when it
 passes $5, or when forecasted monthly spend passes $5. The account gate refuses
 a new hourly plan when any notification is already in `ALARM`.
 
-This is a $5 account-wide monthly ceiling. Each session also records a separate
+This is a $5 project monthly allowance before tax. Each session also records a separate
 $5 maximum. The $1.25/hour gate and 3-hour hard target cap modeled runtime at
 $3.75, leaving $1.25 for small charges outside that model. One run can put
 the forecast notification in `ALARM`, which blocks later hourly plans until
 AWS reports the notification as `OK` again or the monthly budget period
 resets. Treat that block as intentional. Raising the monthly amount requires a
 new owner decision.
+
+### Project budget coverage
+
+The owner accepted this scope on 2026-09-20. The exact budget filter is
+`TagKeyValue=user:Project$my-local-platform`; tax is explicitly excluded, and
+all other cost-type settings retain their existing values. A tag on the budget
+resource itself does not define its spending scope.
+
+Terraform applies the project tag to managed resources and passes the same
+tags into EKS's launch template for instances, volumes, and network interfaces.
+The saved-plan gate checks supported cost-bearing Terraform resources and
+these child-resource tags. The live budget check is shared by the account
+collector and hourly plan/apply guard. GO requires both receipts, so an old
+account-wide receipt cannot satisfy the amended contract.
+
+| Cost | Treatment |
+|---|---|
+| Tagged project resource usage, including prior runs and surviving resources | Included when AWS allocates the usage to the active project tag |
+| Unrelated subscriptions and resources | Excluded by the project filter |
+| Tax | Excluded from the monthly alert; review project-related tax separately within the session's existing reserve |
+| EKS-created instances and volumes | Explicit launch-template propagation, checked in the plan; verify actual tags during the authorized live run |
+| AWS-managed RDS secret and other service-created resources | Inspect actual tags during the live run; account for any unallocated charges separately |
+| Untaggable fees, API charges, and public IPv4 charges | Do not assume tag attribution; retain the price reserve and service-native inventory checks |
+
+AWS documents that tagged Elastic IPs do not appear in its cost allocation
+report. A passing tag check therefore cannot establish complete bill coverage.
+Billing refresh is delayed, and resource tags must have existed at usage time
+for historical allocation. The newly activated tag's zero subtotal is not
+evidence that earlier project spending was zero. Backfill affects every tag
+key's activation history; it is a separate reporting operation, not part of
+these guardrail commands.
+
+The final #97 receipt still reports settled account-wide costs with its
+existing attribution limitation. A project-filtered Cost Explorer view can
+supplement it after billing updates; neither view alone proves exact session
+cost or enforces the session clock. Do not generate extra workload to obtain a
+nonzero billing sample.
+
+Sources checked on 2026-09-20: [budget filters](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-create-filters.html),
+[tag activation](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/activating-tags.html),
+[EKS propagation](https://docs.aws.amazon.com/eks/latest/best-practices/cost-opt-awareness.html),
+[EC2 billing tags](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Tags.html),
+and [historical backfill](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/cost-allocation-backfill.html).
 
 AWS Budgets refreshes after billing data arrives, so it cannot enforce M4's
 three-hour window. The foreground controller owns the 150-minute destroy

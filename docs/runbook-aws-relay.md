@@ -1,14 +1,22 @@
 # Live AWS relay validation runbook
 
-Status: Cheap staging was authorized on 2026-09-19. Candidate `274e601` failed
-its final application-log export during local capture on 2026-09-20 UTC.
-Replay-readiness corrections and fresh clean-candidate rehearsal are pending;
-see the [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
-Contract accepted on 2026-09-05. The deployment render, local
-rehearsal, staging gates, live-run controller, persistent cost alert, capture
-order, and evidence sanitizer are implemented. The real-account receipts and
-live AWS validation remain open. No command on this page authorizes an AWS
-mutation.
+Status: #96 cheap staging remains authorized. Candidate `d63d028` passed all
+four local machine rehearsals and all four visual views on 2026-09-20 UTC;
+preflight `20260920T050446Z` passed all 16 checks. The backend and persistent
+budget were created. The account-wide budget initially blocked staging on
+unrelated spending. The owner then authorized the project-budget amendment:
+`Project` is Active for billing, the $5 monthly budget filters that project
+before tax, and all three notifications read back `OK`. The shared live budget
+gate passes. A real-provider inspection plan verified 14 resource tags and EKS
+instance/volume/network-interface propagation; it was not applied or accepted
+as a staging plan. The amendment is prepared on `codex/m4-project-budget` for
+review. Local receipts remain unchanged at their original SHA. No cheap dev
+apply, image staging, staging hourly plan, GO or publication has completed.
+Issue #97 still requires separate paid-run approval.
+The [bounded completion plan](plan-m4-96-completion.md) governs that handoff.
+The [rehearsal record](reviews/m4-replay-capture-rehearsal.md) preserves the
+original receipts and both historical failed captures.
+No command on this page authorizes an AWS mutation.
 
 This runbook implements the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md). It is the shared handoff for
@@ -60,7 +68,9 @@ Do not apply if any of these is false:
 - the local rehearsal for deploy, demo, abort, evidence, redaction, and cleanup
   passed at the exact commit being staged;
 - the persistent `mlp-live-aws-monthly` budget has its expected notifications,
-  a subscriber on each, and every notification state is `OK`;
+  a subscriber on each, and every notification state is `OK`; its exact filter
+  is the active `Project=my-local-platform` cost allocation tag and it excludes
+  tax; the reviewed plan passes project and EKS child-resource tag coverage;
 - the repository owner has separately authorized this hourly apply.
 
 After apply, any unexpected resource, public workload endpoint, identity
@@ -83,11 +93,18 @@ waits 10 seconds, and sends `SIGKILL`. Cleanup starts after a final 5-second
 wait. Another operator signal advances the sequence immediately. The executing
 repository owner owns the controller and cleanup.
 
-The account-wide $5 monthly AWS Budget is a delayed forgotten-resource alert.
+The project $5 monthly AWS Budget before tax is a delayed forgotten-resource alert.
 The controller enforces the session clock because billing data cannot arrive
 fast enough. These are separate limits. A forecast or actual budget alarm can
 block later hourly runs until AWS returns it to `OK` or the monthly period
 resets.
+
+The account collector and hourly plan/apply guard share the same live budget
+check. GO requires the recorded project scope and planned tag coverage. Read
+the [coverage limits](costs.md#project-budget-coverage): a zero tagged subtotal
+does not establish zero cost, and some fees remain unallocated. During #97,
+inspect the actual node/volume tags and service-created resources. The session
+clock, inventory and destroy checks remain required even when the budget is OK.
 
 ## Configuration and secrets
 
