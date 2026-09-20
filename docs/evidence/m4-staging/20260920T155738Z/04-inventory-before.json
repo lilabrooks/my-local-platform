@@ -1,0 +1,226 @@
+{
+  "captured_at": "2026-09-20T16:13:47Z",
+  "counts": {
+    "ebs": 0,
+    "ec2": 0,
+    "ecr": 2,
+    "eip": 0,
+    "eks": 0,
+    "elb": 0,
+    "logs": 0,
+    "msk": 0,
+    "nat": 0,
+    "rds": 0,
+    "tagged": 8
+  },
+  "project": "my-local-platform",
+  "region": "us-east-1",
+  "resources": {
+    "ebs": [],
+    "ec2": [],
+    "ecr": [
+      {
+        "createdAt": "2026-09-20T12:07:10.665000-04:00",
+        "encryptionConfiguration": {
+          "encryptionType": "AES256"
+        },
+        "imageScanningConfiguration": {
+          "scanOnPush": true
+        },
+        "imageTagMutability": "IMMUTABLE",
+        "registryId": "[REDACTED:ACCOUNT_ID]",
+        "repositoryArn": "arn:aws:ecr:us-east-1:[REDACTED:ACCOUNT_ID]:repository/mlp-dev/sink",
+        "repositoryName": "mlp-dev/sink",
+        "repositoryUri": "[REDACTED:ECR_REGISTRY]/mlp-dev/sink"
+      },
+      {
+        "createdAt": "2026-09-20T12:07:10.669000-04:00",
+        "encryptionConfiguration": {
+          "encryptionType": "AES256"
+        },
+        "imageScanningConfiguration": {
+          "scanOnPush": true
+        },
+        "imageTagMutability": "IMMUTABLE",
+        "registryId": "[REDACTED:ACCOUNT_ID]",
+        "repositoryArn": "arn:aws:ecr:us-east-1:[REDACTED:ACCOUNT_ID]:repository/mlp-dev/relay",
+        "repositoryName": "mlp-dev/relay",
+        "repositoryUri": "[REDACTED:ECR_REGISTRY]/mlp-dev/relay"
+      }
+    ],
+    "eip": [],
+    "eks": [],
+    "elb": [],
+    "logs": [],
+    "msk": [],
+    "nat": [],
+    "rds": [],
+    "tagged": [
+      {
+        "ResourceARN": "arn:aws:budgets::[REDACTED:ACCOUNT_ID]:budget/mlp-live-aws-monthly",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Stack",
+            "Value": "guardrails"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:sns:us-east-1:[REDACTED:ACCOUNT_ID]:mlp-dev-events",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          },
+          {
+            "Key": "Ephemeral",
+            "Value": "true"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:sqs:us-east-1:[REDACTED:ACCOUNT_ID]:mlp-dev-events-dlq",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          },
+          {
+            "Key": "Ephemeral",
+            "Value": "true"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:s3:::mlp-dev-artifacts-[REDACTED:ACCOUNT_ID]",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          },
+          {
+            "Key": "Ephemeral",
+            "Value": "true"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:s3:::mlp-tfstate-[REDACTED:ACCOUNT_ID]",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Stack",
+            "Value": "bootstrap"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:ecr:us-east-1:[REDACTED:ACCOUNT_ID]:repository/mlp-dev/relay",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          },
+          {
+            "Key": "Ephemeral",
+            "Value": "true"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:sqs:us-east-1:[REDACTED:ACCOUNT_ID]:mlp-dev-events",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          },
+          {
+            "Key": "Ephemeral",
+            "Value": "true"
+          }
+        ]
+      },
+      {
+        "ResourceARN": "arn:aws:ecr:us-east-1:[REDACTED:ACCOUNT_ID]:repository/mlp-dev/sink",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "my-local-platform"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "terraform"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          },
+          {
+            "Key": "Ephemeral",
+            "Value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  "run_id": "20260920T155738Z",
+  "runtime_empty": true,
+  "runtime_resources_present": {},
+  "schema_version": 1,
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+}

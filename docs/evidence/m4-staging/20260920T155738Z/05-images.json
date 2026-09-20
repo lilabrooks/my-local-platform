@@ -1,0 +1,47 @@
+{
+  "captured_at": "2026-09-20T16:11:54Z",
+  "gate": {
+    "failures": [],
+    "passed": true
+  },
+  "images": {
+    "relay": {
+      "digest": "sha256:cd1273874c23b1b53e606c99448826916051c37365dbdb66465ce087162abd74",
+      "image_id": "sha256:39508475b8b587cc4ddc9f46d6367134533cd9b6bd18e9d9c0bc7f4cad1cc686",
+      "platform": "linux/amd64",
+      "pushed": true,
+      "reference": "[REDACTED:ECR_REGISTRY]/mlp-dev/relay@sha256:cd1273874c23b1b53e606c99448826916051c37365dbdb66465ce087162abd74",
+      "repository": "mlp-dev/relay",
+      "revision": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+      "tag": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+    },
+    "sink": {
+      "digest": "sha256:cf88be233a6aa9d9386f12b7df3b2b068cb49c9aefb05d1a37d04acfeff218cd",
+      "image_id": "sha256:3035d8c642883432c8410688d754d89c323689ebde2cfa7995e1509fb168475e",
+      "platform": "linux/amd64",
+      "pushed": true,
+      "reference": "[REDACTED:ECR_REGISTRY]/mlp-dev/sink@sha256:cf88be233a6aa9d9386f12b7df3b2b068cb49c9aefb05d1a37d04acfeff218cd",
+      "repository": "mlp-dev/sink",
+      "revision": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+      "tag": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+    }
+  },
+  "region": "us-east-1",
+  "repository_settings": {
+    "relay": {
+      "repository": "mlp-dev/relay",
+      "scan_on_push": true,
+      "tag_mutability": "IMMUTABLE",
+      "uri": "[REDACTED:ECR_REGISTRY]/mlp-dev/relay"
+    },
+    "sink": {
+      "repository": "mlp-dev/sink",
+      "scan_on_push": true,
+      "tag_mutability": "IMMUTABLE",
+      "uri": "[REDACTED:ECR_REGISTRY]/mlp-dev/sink"
+    }
+  },
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+}

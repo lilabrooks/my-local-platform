@@ -1,0 +1,241 @@
+{
+  "budget_name": "mlp-live-aws-monthly",
+  "captured_at": "2026-09-20T16:12:47Z",
+  "created_hourly_resource_counts": {
+    "aws_db_instance": 1,
+    "aws_eks_cluster": 1,
+    "aws_eks_node_group": 1,
+    "aws_msk_serverless_cluster": 1,
+    "aws_nat_gateway": 1
+  },
+  "created_resource_count": 82,
+  "created_resource_type_counts": {
+    "aws_cloudwatch_log_group": 1,
+    "aws_db_instance": 1,
+    "aws_db_subnet_group": 1,
+    "aws_default_network_acl": 1,
+    "aws_default_route_table": 1,
+    "aws_default_security_group": 1,
+    "aws_ec2_tag": 4,
+    "aws_eip": 1,
+    "aws_eks_access_entry": 1,
+    "aws_eks_access_policy_association": 1,
+    "aws_eks_addon": 1,
+    "aws_eks_cluster": 1,
+    "aws_eks_node_group": 1,
+    "aws_eks_pod_identity_association": 5,
+    "aws_iam_openid_connect_provider": 1,
+    "aws_iam_policy": 5,
+    "aws_iam_role": 7,
+    "aws_iam_role_policy_attachment": 9,
+    "aws_internet_gateway": 1,
+    "aws_launch_template": 1,
+    "aws_msk_serverless_cluster": 1,
+    "aws_nat_gateway": 1,
+    "aws_route": 2,
+    "aws_route_table": 2,
+    "aws_route_table_association": 4,
+    "aws_secretsmanager_secret": 1,
+    "aws_security_group": 4,
+    "aws_security_group_rule": 12,
+    "aws_subnet": 4,
+    "aws_vpc": 1,
+    "aws_vpc_security_group_egress_rule": 1,
+    "aws_vpc_security_group_ingress_rule": 1,
+    "null_resource": 1,
+    "terraform_data": 1,
+    "time_sleep": 1
+  },
+  "gate": {
+    "failures": [],
+    "passed": true
+  },
+  "hourly_resource_changes": [
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "aws_db_instance.main[0]",
+      "type": "aws_db_instance"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "aws_msk_serverless_cluster.relay[0]",
+      "type": "aws_msk_serverless_cluster"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "module.eks[0].aws_eks_cluster.this[0]",
+      "type": "aws_eks_cluster"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "module.eks[0].module.eks_managed_node_group[\"default\"].aws_eks_node_group.this[0]",
+      "type": "aws_eks_node_group"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "module.vpc[0].aws_nat_gateway.this[0]",
+      "type": "aws_nat_gateway"
+    }
+  ],
+  "plan_sha256": "eb6053d26cfc1d4151ca29b1c5515022143b6ac8d063c9b298204935777b9f50",
+  "planned_hourly_resource_counts": {
+    "aws_db_instance": 1,
+    "aws_eks_cluster": 1,
+    "aws_eks_node_group": 1,
+    "aws_msk_serverless_cluster": 1,
+    "aws_nat_gateway": 1
+  },
+  "planned_resource_count": 106,
+  "planned_resource_type_counts": {
+    "aws_cloudwatch_log_group": 1,
+    "aws_db_instance": 1,
+    "aws_db_subnet_group": 1,
+    "aws_default_network_acl": 1,
+    "aws_default_route_table": 1,
+    "aws_default_security_group": 1,
+    "aws_ec2_tag": 4,
+    "aws_ecr_lifecycle_policy": 2,
+    "aws_ecr_repository": 2,
+    "aws_eip": 1,
+    "aws_eks_access_entry": 1,
+    "aws_eks_access_policy_association": 1,
+    "aws_eks_addon": 1,
+    "aws_eks_addon_version": 1,
+    "aws_eks_cluster": 1,
+    "aws_eks_node_group": 1,
+    "aws_eks_pod_identity_association": 5,
+    "aws_iam_openid_connect_provider": 1,
+    "aws_iam_policy": 5,
+    "aws_iam_policy_document": 10,
+    "aws_iam_role": 7,
+    "aws_iam_role_policy_attachment": 9,
+    "aws_internet_gateway": 1,
+    "aws_launch_template": 1,
+    "aws_msk_serverless_cluster": 1,
+    "aws_nat_gateway": 1,
+    "aws_route": 2,
+    "aws_route_table": 2,
+    "aws_route_table_association": 4,
+    "aws_s3_bucket": 1,
+    "aws_s3_bucket_lifecycle_configuration": 1,
+    "aws_s3_bucket_public_access_block": 1,
+    "aws_secretsmanager_secret": 1,
+    "aws_security_group": 4,
+    "aws_security_group_rule": 12,
+    "aws_sns_topic": 1,
+    "aws_sns_topic_subscription": 1,
+    "aws_sqs_queue": 2,
+    "aws_sqs_queue_policy": 1,
+    "aws_subnet": 4,
+    "aws_vpc": 1,
+    "aws_vpc_security_group_egress_rule": 1,
+    "aws_vpc_security_group_ingress_rule": 1,
+    "null_resource": 1,
+    "terraform_data": 1,
+    "time_sleep": 1,
+    "tls_certificate": 1
+  },
+  "project_tag_coverage": {
+    "gate": {
+      "failures": [],
+      "passed": true
+    },
+    "launch_templates": [
+      "module.eks[0].module.eks_managed_node_group[\"default\"].aws_launch_template.this[0]"
+    ],
+    "resources": [
+      "aws_db_instance.main[0]",
+      "aws_ecr_repository.image[\"relay\"]",
+      "aws_ecr_repository.image[\"sink\"]",
+      "aws_msk_serverless_cluster.relay[0]",
+      "aws_s3_bucket.artifacts",
+      "aws_secretsmanager_secret.sink_signing_key[0]",
+      "aws_sns_topic.events",
+      "aws_sqs_queue.events",
+      "aws_sqs_queue.events_dlq",
+      "module.eks[0].aws_cloudwatch_log_group.this[0]",
+      "module.eks[0].aws_eks_cluster.this[0]",
+      "module.eks[0].module.eks_managed_node_group[\"default\"].aws_eks_node_group.this[0]",
+      "module.vpc[0].aws_eip.nat[0]",
+      "module.vpc[0].aws_nat_gateway.this[0]"
+    ],
+    "tag_key": "Project",
+    "tag_value": "my-local-platform"
+  },
+  "reviewed_resource_changes": [
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "aws_db_instance.main[0]",
+      "type": "aws_db_instance"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "aws_msk_serverless_cluster.relay[0]",
+      "type": "aws_msk_serverless_cluster"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "module.eks[0].aws_eks_cluster.this[0]",
+      "type": "aws_eks_cluster"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "module.eks[0].module.eks_managed_node_group[\"default\"].aws_eks_node_group.this[0]",
+      "type": "aws_eks_node_group"
+    },
+    {
+      "actions": [
+        "create"
+      ],
+      "address": "module.vpc[0].aws_nat_gateway.this[0]",
+      "type": "aws_nat_gateway"
+    }
+  ],
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "shape": {
+    "eks": {
+      "kubernetes_version": "1.35",
+      "node_capacity_type": "SPOT",
+      "node_desired": 2,
+      "node_maximum": 3
+    },
+    "enable_eks": true,
+    "enable_msk": true,
+    "enable_rds": true,
+    "expected_hourly_usd": 1.0218506849315068,
+    "hourly_enabled": true,
+    "kafka": {
+      "dead_letter_partitions": 1,
+      "dead_letter_topic": "mlp.relay.deliveries.dlq",
+      "delivery_partitions": 12,
+      "delivery_topic": "mlp.relay.deliveries",
+      "total_partitions": 13
+    },
+    "maximum_hourly_usd": 1.25,
+    "rds": {
+      "engine_version": "17.11"
+    },
+    "region": "us-east-1"
+  },
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "terraform_input_sha256": "dd2a34e0d920d0b2574160722536040c96c9f88bbefc4bf07941d597dff5e909"
+}

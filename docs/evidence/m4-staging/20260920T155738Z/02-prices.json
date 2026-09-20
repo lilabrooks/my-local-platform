@@ -1,0 +1,105 @@
+{
+  "checked_at": "2026-09-20T15:45:16Z",
+  "checked_by": "Codex",
+  "currency": "USD",
+  "gate": {
+    "failures": [],
+    "passed": true
+  },
+  "items": [
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.7500000000",
+      "item": "MSK Serverless cluster",
+      "quantity": "1",
+      "rate_name": "msk_serverless_cluster_hour",
+      "rate_unit": "cluster-hour",
+      "rate_usd": "0.7500000000",
+      "source": "https://aws.amazon.com/msk/pricing/"
+    },
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.0195000000",
+      "item": "MSK partitions",
+      "quantity": "13",
+      "rate_name": "msk_partition_hour",
+      "rate_unit": "partition-hour",
+      "rate_usd": "0.0015000000",
+      "source": "https://aws.amazon.com/msk/pricing/"
+    },
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.1000000000",
+      "item": "EKS standard-support control plane",
+      "quantity": "1",
+      "rate_name": "eks_standard_cluster_hour",
+      "rate_unit": "cluster-hour",
+      "rate_usd": "0.1000000000",
+      "source": "https://aws.amazon.com/eks/pricing/"
+    },
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.0832000000",
+      "item": "t3.medium on-demand upper bound",
+      "quantity": "2",
+      "rate_name": "t3_medium_hour",
+      "rate_unit": "instance-hour",
+      "rate_usd": "0.0416000000",
+      "source": "https://aws.amazon.com/ec2/pricing/on-demand/"
+    },
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.0450000000",
+      "item": "NAT gateway",
+      "quantity": "1",
+      "rate_name": "nat_gateway_hour",
+      "rate_unit": "gateway-hour",
+      "rate_usd": "0.0450000000",
+      "source": "https://aws.amazon.com/vpc/pricing/"
+    },
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.0050000000",
+      "item": "NAT public IPv4 address",
+      "quantity": "1",
+      "rate_name": "public_ipv4_hour",
+      "rate_unit": "address-hour",
+      "rate_usd": "0.0050000000",
+      "source": "https://aws.amazon.com/vpc/pricing/"
+    },
+    {
+      "hourly_divisor": "1",
+      "hourly_usd": "0.0160000000",
+      "item": "RDS db.t4g.micro",
+      "quantity": "1",
+      "rate_name": "rds_t4g_micro_hour",
+      "rate_unit": "instance-hour",
+      "rate_usd": "0.0160000000",
+      "source": "https://aws.amazon.com/rds/postgresql/pricing/"
+    },
+    {
+      "hourly_divisor": "730",
+      "hourly_usd": "0.003150684931506849315068493151",
+      "item": "RDS gp3 storage",
+      "quantity": "20",
+      "rate_name": "rds_gp3_gb_month",
+      "rate_unit": "GB-month",
+      "rate_usd": "0.1150000000",
+      "source": "https://aws.amazon.com/rds/postgresql/pricing/"
+    }
+  ],
+  "maximum_hourly_usd": "1.25",
+  "maximum_total_usd": "5.00",
+  "region": "us-east-1",
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "sources": {
+    "ec2": "https://aws.amazon.com/ec2/pricing/on-demand/",
+    "eks": "https://aws.amazon.com/eks/pricing/",
+    "msk": "https://aws.amazon.com/msk/pricing/",
+    "rds": "https://aws.amazon.com/rds/postgresql/pricing/",
+    "vpc": "https://aws.amazon.com/vpc/pricing/"
+  },
+  "total_hourly_usd": "1.021850684931506849315068493"
+}

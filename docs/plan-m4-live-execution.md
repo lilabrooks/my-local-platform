@@ -1,40 +1,32 @@
 # M4 staging and live validation plan
 
-Status: #96 cheap staging remains authorized. Candidate `d63d028` passed all
-four local machine rehearsals and all four visual views on 2026-09-20 UTC;
-preflight `20260920T050446Z` passed all 16 checks. The backend and persistent
-budget were created. The account-wide budget initially blocked staging on
-unrelated spending. The owner then authorized the project-budget amendment:
-`Project` is Active for billing, the $5 monthly budget filters that project
-before tax, and all three notifications read back `OK`. The shared live budget
-gate passes. A real-provider inspection plan verified 14 resource tags and EKS
-instance/volume/network-interface propagation; it was not applied or accepted
-as a staging plan. The amendment is prepared on `codex/m4-project-budget` for
-review. Local receipts remain unchanged at their original SHA. No cheap dev
-apply, image staging, staging hourly plan, GO or publication has completed.
-Issue #97 still requires separate paid-run approval.
+Status: #96 staging completed on 2026-09-20 UTC for frozen source
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; issue closure awaits the evidence
+PR merge. Local run `20260920T153931Z` passed all four machine rehearsals and
+all four visual views. Preflight `20260920T155738Z` passed all 16 checks.
+The cheap dev tier was applied, both immutable images were staged, and the
+hourly plan was reviewed without applying it. GO passed at 16:13:51Z; the
+[sanitized staging packet](evidence/m4-staging/20260920T155738Z/publication.json)
+passed `verify-stage`. Final inventory at 16:13:47Z found two ECR repositories
+and no hourly runtime. #97 still requires separate paid-run approval.
+See the [staging record](reviews/m4-96-staging-20260920.md) for commands,
+results, preserved hashes and the closure boundary.
 
-The [bounded #96 completion plan](plan-m4-96-completion.md) records the completed
-local sequence and the remaining staging handoff. Keep the passing local
-evidence while reviewing the budget amendment; publish staging evidence
-independently of #97 once its own gates pass. Its ordering refines section 2 below; the evidence and
-acceptance requirements remain unchanged. The historical failure's cause and
-F1 review disagreement remain unresolved by the merge. See the
+The [bounded #96 completion plan](plan-m4-96-completion.md) governed the
+completed local and staging sequence. Publication is independent of #97;
+its later paid approval is not a condition for closing #96. Historical failed
+captures remain failed; their cause and the F1 review disagreement are not
+resolved by the later passing qualification. See the
 [rehearsal record](reviews/m4-replay-capture-rehearsal.md).
-No new AWS observation was made while planning. #97 still needs separate
-paid-run approval.
 
 Original source this plan was written against:
 `88e9a103d123feddef19720af1730253c8630327`, containing
 [PR #137](https://github.com/lilabrooks/my-local-platform/pull/137).
-The locally qualified candidate is `d63d028985f12e234bdaed14a9b5c7f68c46de0c`.
-The budget amendment needs an explicit candidate/qualification disposition
-before a new staging preflight; it has not silently replaced that SHA.
-Keep planning and publication changes in another checkout so they do not
-change that candidate. This does not isolate ArgoCD from GitHub's `main`:
-the bounded completion plan also requires Lila's temporary remote merge hold
-during local qualification, released at its recorded preflight handoff before
-staging publication. Both failed candidates' receipts remain failed.
+The latest qualified and staged source is `474dca7`; the owner explicitly
+selected it after the budget amendment merged. Qualification and staging ran
+from its clean checkout; publication used another checkout. The temporary
+remote merge hold ended at the recorded local handoff, before staging.
+The original planned sequence below remains historical intent.
 
 The governing contract is [ADR 0010](adr/0010-live-aws-relay-contract.md).
 The [AWS runbook](runbook-aws-relay.md) and [cost guide](costs.md) carry the

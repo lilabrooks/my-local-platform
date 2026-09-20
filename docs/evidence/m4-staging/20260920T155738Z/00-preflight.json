@@ -1,0 +1,149 @@
+{
+  "checks": [
+    {
+      "command": "PATH lookup",
+      "name": "required local tools",
+      "result": "passed"
+    },
+    {
+      "command": "make aws-preflight-check",
+      "name": "account-independent repository contract",
+      "result": "passed"
+    },
+    {
+      "command": "git status",
+      "name": "clean source commit",
+      "result": "passed"
+    },
+    {
+      "command": "make lint",
+      "name": "repository lint",
+      "result": "passed"
+    },
+    {
+      "command": "make test",
+      "name": "local tests",
+      "result": "passed"
+    },
+    {
+      "command": "make aws-live-rehearse",
+      "name": "live controller rehearsal",
+      "result": "passed"
+    },
+    {
+      "command": "make m4-images M4_SOURCE_COMMIT=474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+      "name": "M4 workload images",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/bootstrap init -backend=false -input=false",
+      "name": "Terraform init (infra/terraform/bootstrap)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/bootstrap validate",
+      "name": "Terraform validate (infra/terraform/bootstrap)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/guardrails init -backend=false -input=false",
+      "name": "Terraform init (infra/terraform/guardrails)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/guardrails validate",
+      "name": "Terraform validate (infra/terraform/guardrails)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/envs/dev init -backend=false -input=false",
+      "name": "Terraform init (infra/terraform/envs/dev)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/envs/dev validate",
+      "name": "Terraform validate (infra/terraform/envs/dev)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/guardrails test",
+      "name": "Terraform contract tests (infra/terraform/guardrails)",
+      "result": "passed"
+    },
+    {
+      "command": "terraform -chdir=infra/terraform/envs/dev test",
+      "name": "Terraform contract tests (infra/terraform/envs/dev)",
+      "result": "passed"
+    },
+    {
+      "command": "make k8s-validate",
+      "name": "rendered Kubernetes validation",
+      "result": "passed"
+    }
+  ],
+  "commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "evidence": {
+    "raw": ".evidence/m4/20260920T155738Z",
+    "sanitized": "docs/evidence/m4/20260920T155738Z"
+  },
+  "finished_at": "2026-09-20T16:00:27Z",
+  "images": {
+    "relay:dev": {
+      "id": "sha256:ebe528728c45316b813ed0d2356ba0513d6a65a4fcc6cac872fa3e279a66ba08",
+      "revision": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+    },
+    "sink:dev": {
+      "id": "sha256:7e25d8020db9ac728cf86317e50701ade7132aef73532cae28639efa4ea3e6a0",
+      "revision": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+    }
+  },
+  "local_rehearsals": {
+    "run_id": "20260920T153931Z",
+    "sha256": {
+      "abort-rehearsal.json": "3aa6f64c762028a4df0da3af4c2d774dd5537a8f4a5521b67552936bbc40614a",
+      "capture-result.json": "b65b9f5c65fbb4b2e07be2abf6da007f93a550bf089aedf0f1ff8213105d2198",
+      "demo-rehearsal.json": "f10ba4edb0b73391cd7e438e6bc774a794a9b855f669015f27443c0b2a01d58f",
+      "k8s-sigterm.json": "ceeccfcfd6540712639d573b52a4120c1f35f9cd324ad57ab3183ddc3a021b25"
+    },
+    "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+  },
+  "repository": {
+    "destroy_command": "make aws-down",
+    "evidence_roots": {
+      "raw": ".evidence/m4",
+      "sanitized": "docs/evidence/m4"
+    },
+    "m3_merge_commit": "5fdb41fc69cc899561701ef58a95d40c90ce8c4e",
+    "rendered_documents": [
+      "application",
+      "replay",
+      "runtime"
+    ],
+    "tracked_aws_manifests": [
+      "k8s/aws/relay/kustomization.yaml",
+      "k8s/aws/relay/scaledobject.yaml",
+      "k8s/aws/relay/serviceaccounts.yaml",
+      "k8s/aws/runtime-configmap.example.yaml",
+      "k8s/aws/runtime-secret.example.yaml",
+      "k8s/aws/sink/kustomization.yaml",
+      "k8s/aws/sink/serviceaccount.yaml",
+      "k8s/aws/telemetry/collector-deployment.yaml",
+      "k8s/aws/telemetry/collector-service.yaml",
+      "k8s/aws/telemetry/config/collector.yaml",
+      "k8s/aws/telemetry/config/tempo.yaml",
+      "k8s/aws/telemetry/kustomization.yaml",
+      "k8s/aws/telemetry/tempo-deployment.yaml",
+      "k8s/aws/telemetry/tempo-service.yaml",
+      "k8s/apps/aws/kustomization.yaml",
+      "k8s/apps/aws/monitoring.yaml",
+      "k8s/apps/aws/relay.yaml",
+      "k8s/apps/aws/sink.yaml",
+      "k8s/apps/aws/telemetry.yaml",
+      "k8s/monitoring-values-aws.yaml"
+    ]
+  },
+  "result": "passed",
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "started_at": "2026-09-20T15:57:38Z"
+}

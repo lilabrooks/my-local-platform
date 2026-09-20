@@ -506,6 +506,25 @@ rollback or dev-stack destroy.
 
 ## Verification
 
+Staging completed on 2026-09-20 UTC for source
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`. Local run `20260920T153931Z`
+passed abort, controlled SIGTERM, machine capture, demo and visual practice;
+`make aws-preflight` passed all 16 checks for AWS run `20260920T155738Z`.
+`make aws-account-check`, `make aws-prices`, the reviewed cheap `make aws-plan`
+and `make aws-up`, `make aws-stage-images`, the hourly `make aws-plan`,
+`make aws-inventory-empty` and `make aws-go-no-go` passed in order.
+The final inventory at 16:13:47Z found two staged ECR repositories and zero
+hourly runtime. The hourly plan was not applied. Its modeled rate was
+$1.0219/hour against the $1.25 limit; GO was generated at 16:13:51Z.
+
+`m4-publication-extra.py stage` and `verify-stage` passed in a separate
+publication checkout. The [staging packet](../evidence/m4-staging/20260920T155738Z/publication.json)
+binds GO and all eight inputs; `execution_authorized` is false. The
+[staging record](../reviews/m4-96-staging-20260920.md) records actual actions,
+private artifact hashes, qualification and scope limits. #96 closure requires
+its evidence PR to merge; #97 remains unapproved. These dated observations do
+not claim that the AWS inputs will remain fresh for a later paid session.
+
 Budget amendment checked on 2026-09-20 UTC:
 
 - `aws ce update-cost-allocation-tags-status` activated `Project`; readback

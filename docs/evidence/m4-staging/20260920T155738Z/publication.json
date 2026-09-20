@@ -1,0 +1,42 @@
+{
+  "execution_authorized": false,
+  "files": {
+    "00-preflight.json": "ee5b0250d98e8cae9ceec009f1904a5dbe0c11a59a932272a85a19553509db03",
+    "01-identity.txt": "9090998b96de5577c9d724852f1a554638a4b76356e6a0bebe0a29a85446712c",
+    "02-prices.json": "805ed835931143f7c641857a51860f25e7c37b613a352e4fb45300ce39fd05e8",
+    "02-prices.md": "ee2caadfecc73832afd5bdce7d92ab8798b07d7a42a6259f67d0bddb0a0f745e",
+    "03-plan-summary.json": "1de1a19e4c772489d267a2b10ce985d845abfea852b2d5b691467e856b5fbf5c",
+    "04-inventory-before.json": "36a443cb56cce091768426ca3bec85fcc1bf127fb28cda049098d0cbf611d905",
+    "05-images.json": "d3a0da9aedf3a076b95f6802aa7a774fff17faea2b7273ee8f1ff64322df41b0",
+    "06-go-no-go.json": "e6c2c17a9700c5fd630c4e201332109fbe25a0be83659058089d001495ea880d",
+    "capture-plan.json": "c83af4a459cad91e3ea34a615f052b1b9af5a56cfeabe3e2014a67ef4cb9b130"
+  },
+  "input_sha256": {
+    "capture_plan": "c83af4a459cad91e3ea34a615f052b1b9af5a56cfeabe3e2014a67ef4cb9b130",
+    "identity": "fcf120fda86e8aad07ea45d32b6e4fb4f680ad5613a9f9582c8654383ce30304",
+    "images": "5f0be0e0713fda24ed128162e8b8cf7d00d50fad88f3f96b184cdaeccd093bab",
+    "inventory": "bf23226385d343042506696a7b83665142551241800aa6981152d0122bcddd28",
+    "plan": "1de1a19e4c772489d267a2b10ce985d845abfea852b2d5b691467e856b5fbf5c",
+    "preflight": "ee5b0250d98e8cae9ceec009f1904a5dbe0c11a59a932272a85a19553509db03",
+    "prices": "805ed835931143f7c641857a51860f25e7c37b613a352e4fb45300ce39fd05e8",
+    "prices_markdown": "ee2caadfecc73832afd5bdce7d92ab8798b07d7a42a6259f67d0bddb0a0f745e"
+  },
+  "phase": "staging",
+  "published_at": "2026-09-20T16:14:10Z",
+  "raw_sha256": {
+    "00-preflight.json": "ee5b0250d98e8cae9ceec009f1904a5dbe0c11a59a932272a85a19553509db03",
+    "01-identity.txt": "fcf120fda86e8aad07ea45d32b6e4fb4f680ad5613a9f9582c8654383ce30304",
+    "02-prices.json": "805ed835931143f7c641857a51860f25e7c37b613a352e4fb45300ce39fd05e8",
+    "02-prices.md": "ee2caadfecc73832afd5bdce7d92ab8798b07d7a42a6259f67d0bddb0a0f745e",
+    "03-plan-summary.json": "1de1a19e4c772489d267a2b10ce985d845abfea852b2d5b691467e856b5fbf5c",
+    "04-inventory-before.json": "bf23226385d343042506696a7b83665142551241800aa6981152d0122bcddd28",
+    "05-images.json": "5f0be0e0713fda24ed128162e8b8cf7d00d50fad88f3f96b184cdaeccd093bab",
+    "06-go-no-go.json": "f6ee528b93d66ec3c6a79322fbbc902afc4a004854b50e74fdac4aaf0de42ebb",
+    "capture-plan.json": "c83af4a459cad91e3ea34a615f052b1b9af5a56cfeabe3e2014a67ef4cb9b130"
+  },
+  "result": "staged",
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "staged_at": "2026-09-20T16:13:51Z"
+}

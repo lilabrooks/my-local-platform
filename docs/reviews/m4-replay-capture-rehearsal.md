@@ -386,3 +386,70 @@ lint failure was an extra blank line in this record, which was removed.
 The other 11 `make lint` checks passed with no skips; the corrected Markdown
 passed a separate run of the pinned `davidanson/markdownlint-cli2:v0.23.2`
 container. `git diff --check` passed.
+
+## Completed bounded qualification on 2026-09-20 UTC
+
+Status: local qualification passed on the owner-selected merged candidate
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee` (PR #147). The owner explicitly
+approved one qualification and held merges during its local handoff. The old
+`d63d028` evidence remains unchanged; no receipt was relabelled.
+
+Local run `20260920T153931Z` ran abort, controlled SIGTERM, machine capture,
+then demo. Each passed on its first runtime attempt. Capture ran from
+15:43:52Z to 15:48:12Z, preserved all eight exports and verified cleanup.
+Its 39 accepted samples observed peak lag 586, 12 members and 12 desired
+replicas, then lag zero, one member and one replica. This establishes this
+run's result; it does not diagnose the two historical failed captures.
+
+The demo ran from 15:48:52Z to 15:52:07Z. Its separate cohort reached lag 596
+and 12 consumers, drained to zero and returned to one consumer. Healthy
+and dead-letter counter deltas were each one; replay completion and cleanup
+passed. The full demo dashboard range includes replay of capture and demo
+records and ends with lag 1206. That screenshot does not prove replay drain.
+
+ArgoCD, the owner's two iTerm2 images, Grafana, and Tempo were opened and
+inspected in order. The scaling dashboard range was fixed to
+15:48:52Z–15:51:40Z. Minikube was stopped before the separate Compose Tempo
+practice; its trace `13354af13c10ec084b2bc248fe79466a` joined ingest, Kafka,
+consume and four persisted attempts at 15:55:21.997Z. This is local visual
+practice, not AWS evidence. The machine demo receipt's original
+`pending-human-capture` field remains unchanged; `visual-review.json` records
+the later human review separately.
+
+The final remote `main` check matched the candidate. The merge hold ended
+at 15:57:38Z. Preflight `20260920T155738Z` consumed the four exact-SHA receipts
+and passed all 16 checks: local receipt and artifact validation, lint, seven
+Go modules with race detection, 204 Python tests, controller rehearsal, image
+builds, eight Terraform test runs, and Kubernetes validation. The preflight's
+normal golangci CI delegation was its one lint skip; the other 11 lint checks
+passed. No source, load, cadence, threshold, or timeout changed during this
+qualification.
+
+The [qualification manifest](../evidence/m4-local/20260920T153931Z/qualification.json)
+records the measured results, inspected visual files and raw SHA-256 values.
+Private raw files and images were backed up and byte-compared outside git.
+
+### Diagnosed setup refusals and bounded corrections
+
+Before load, an explicit Compose stop using `.env` refused because that
+private file was absent. The three known Compose application containers were
+then stopped directly and image readiness/provenance passed. Builds used the
+repository's default `.env.example`. No proof event or demo had started.
+A dedicated failed-command log and exact refusal timestamp were not retained;
+these are absent, not reconstructed. The qualification note preserves the
+observed error and correction.
+
+While the one preflight was still running, `aws-price-template` and the
+subsequent `aws-prices` command each refused with `preflight receipt is
+missing`, before writing their outputs. After preflight passed, the normal
+pricing sequence passed its one recheck at 16:01:14Z. No preflight, capture,
+or demo was repeated. The refusal record retains both invocations.
+
+Raw archive roots are `.evidence/m4-local/` and its `20260920T153931Z/`
+subdirectory. Hashes below identify preserved records; they are not substitute
+passing receipts.
+
+| Relative file | SHA-256 |
+|---|---|
+| `qualification-474dca7.json` | `c319f852a45eaff9ce8fdac802ddbf1d24f0812befe4f94473c749e98193dc17` |
+| `20260920T153931Z/price-preparation-refusal.json` | `586f70189015b75c6948b2bc8c7a114e2784b32cc9e9faab403c643d22ccf5ce` |

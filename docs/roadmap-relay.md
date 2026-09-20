@@ -5,11 +5,11 @@ Status: **M0 through M3 are built. M3's whole-application proof passed on
 2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
 is closed. M4's contract, local foundation, AWS deployment render, and local
 rehearsal are complete.** Cheap-tier staging in
-[#96](https://github.com/lilabrooks/my-local-platform/issues/96) is authorized.
-The project-budget amendment removed the account-wide alarm blocker; staging
-waits for amendment review and an explicit candidate/qualification handoff.
-Cheap dev apply, images, the reviewed staging plan, GO and publication remain.
-The later hourly apply in
+[#96](https://github.com/lilabrooks/my-local-platform/issues/96) completed on
+2026-09-20 for source `474dca7`; closure awaits its evidence PR merge. The
+[staging packet](evidence/m4-staging/20260920T155738Z/publication.json)
+records immutable images, the reviewed hourly plan and GO. Final inventory
+found no hourly runtime. The later hourly apply in
 [#97](https://github.com/lilabrooks/my-local-platform/issues/97) requires a
 separate owner decision.
 
