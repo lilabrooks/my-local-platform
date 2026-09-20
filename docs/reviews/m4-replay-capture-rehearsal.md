@@ -1,6 +1,16 @@
 # M4 replay capture rehearsal
 
-Status: Run `20260920T042557Z` passed all four local machine rehearsals on
+Status: the latest qualified and staged source is `474dca7`, with local run
+`20260920T153931Z` passing all four machine rehearsals and all four visual
+views. #96 closed when
+[PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged on
+2026-09-20 UTC. #97 still awaits separate paid-run authority. See the
+[completed qualification](#completed-bounded-qualification-on-2026-09-20-utc)
+and [staging record](m4-96-staging-20260920.md). Earlier receipts and the
+historical failure/F1 disagreement remain unchanged.
+
+Historical status before the budget amendment merged: Run `20260920T042557Z`
+passed all four local machine rehearsals on
 `d63d028`; all four visual views passed inspection. Both historical failed capture
 receipts remain unchanged, and their cause/F1 disagreement is not resolved by
 this pass. The [bounded completion plan](../plan-m4-96-completion.md) governs

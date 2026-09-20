@@ -6,12 +6,13 @@ Status: **M0 through M3 are built. M3's whole-application proof passed on
 is closed. M4's contract, local foundation, AWS deployment render, and local
 rehearsal are complete.** Cheap-tier staging in
 [#96](https://github.com/lilabrooks/my-local-platform/issues/96) completed on
-2026-09-20 for source `474dca7`; closure awaits its evidence PR merge. The
+2026-09-20 for source `474dca7` and closed when
+[PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged. The
 [staging packet](evidence/m4-staging/20260920T155738Z/publication.json)
 records immutable images, the reviewed hourly plan and GO. Final inventory
-found no hourly runtime. The later hourly apply in
-[#97](https://github.com/lilabrooks/my-local-platform/issues/97) requires a
-separate owner decision.
+found no hourly runtime. M4's only remaining issue is
+[#97](https://github.com/lilabrooks/my-local-platform/issues/97), waiting for
+separate owner approval of the paid validation and teardown.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -49,12 +50,18 @@ the fast one.
 | MSK Serverless | $0.75/cluster-hr + $0.0015/partition-hr + $0.10/GB in, $0.05/GB out | **~$547/mo in cluster-hours alone** |
 | MSK Provisioned | 3-broker HA minimum, 3x kafka.m5.large @ $0.21/hr | ~$460/mo before storage |
 
-Rates checked 2026-08-24 against <https://aws.amazon.com/msk/pricing/> and two
-independent calculators. Verify again before M4 -- both schedules change.
+The table records the original 2026-08-24 comparison against
+<https://aws.amazon.com/msk/pricing/> and two independent calculators. The
+[2026-09-20 staging worksheet](evidence/m4-staging/20260920T155738Z/02-prices.md)
+records the later AWS price check for the selected topology; it does not
+revalidate the unused MSK Provisioned alternative.
 
-MSK bills for existing, and it is five times EKS. Hourly, though, the full M4
-stack -- MSK Serverless, EKS control plane, two nodes, one NAT -- is roughly
-**$1/hr**. A four-hour session costs about four dollars.
+The selected topology modeled **$1.0219/hour** on 2026-09-20, including MSK
+Serverless and its 13 partitions, EKS, two nodes, NAT and its public IPv4,
+and RDS with storage. This is a dated estimate, not a measured session bill.
+The approved window is three hours, with cleanup starting at 150 minutes,
+a $1.25/hour shape limit and a $5 session maximum. Refresh expired or changed
+AWS pricing observations before the paid run.
 
 So M0 through M3 run free on docker-compose and minikube, and M4 is a single
 measured session ending in `terraform destroy`. This is
@@ -278,7 +285,7 @@ session.
 | Stage | Why it was selected | Release condition |
 |---|---|---|
 | M3 | Establish the relay's semantics and operator evidence locally. | Satisfied: [#90](https://github.com/lilabrooks/my-local-platform/issues/90) closed after the whole-application proof passed. |
-| M4 | Test the same application against the live AWS surfaces local infrastructure cannot reproduce. | Released: follow the dependency chain beginning with contract [#91](https://github.com/lilabrooks/my-local-platform/issues/91). |
+| M4 | Test the same application against the live AWS surfaces local infrastructure cannot reproduce. | Staging complete through [#96](https://github.com/lilabrooks/my-local-platform/issues/96); [#97](https://github.com/lilabrooks/my-local-platform/issues/97) waits for separate paid-run approval. |
 
 ---
 
@@ -407,6 +414,12 @@ validation remains unverified and requires separate owner authorization. The
 fixed paid shape is estimated at $1.02/hour, capped at $1.25/hour and $5 total,
 and ends in destroy.**
 
+Status: the contract, foundation, local qualification and cheap staging are
+complete. Issues #91, #92, #93, #94, #95, #101, #136 and #96 are closed.
+Only #97 remains open; its staging dependency is satisfied and its remaining
+gate is explicit owner approval of the paid session. The sequence below
+retains the planned scope.
+
 [#90](https://github.com/lilabrooks/my-local-platform/issues/90) closed after
 the M3 proof passed, releasing M4's contract work. Its governed sequence begins
 at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
@@ -426,7 +439,7 @@ at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
 
 3. Render the AWS relay deployment and evidence stack in
    [#94](https://github.com/lilabrooks/my-local-platform/issues/94). The render
-   is implemented and locally validated; merge closes the issue.
+   is implemented and locally validated; the issue is closed.
 4. Rehearse the deployment, demonstration, evidence capture, abort path, and
    cleanup locally in
    [#95](https://github.com/lilabrooks/my-local-platform/issues/95).
@@ -441,6 +454,14 @@ at [#91](https://github.com/lilabrooks/my-local-platform/issues/91):
 
 Approval for #96 does not authorize #97. The low-cost staging mutation and the
 hourly EKS, MSK, and RDS session are separate decisions.
+
+Keep qualified runtime source `474dca7` and its local run `20260920T153931Z`.
+The evidence-only merge does not replace that candidate or require another
+local rehearsal. Before #97, refresh only expired or changed AWS observations
+and their dependent plan/GO inputs. A deliberate runtime source change needs
+a new candidate decision. The
+[staging record](reviews/m4-96-staging-20260920.md) preserves the actual
+commands, results and handoff limits.
 
 ADR 0010 and the [AWS relay runbook](runbook-aws-relay.md) fix the handoff
 across that sequence:
@@ -475,6 +496,10 @@ this door open: "when the goal shifts to learning MSK's control plane." This is
 that shift, narrow enough to name precisely.
 
 ### Before the first apply
+
+Status: these staging prerequisites were completed in #96. For #97, verify
+the existing budget and immutable images and refresh the applicable AWS
+observations; their presence does not authorize the hourly apply.
 
 1. Create the persistent project AWS Budget before tax from
    `infra/terraform/guardrails/`. Its actual-spend alerts fire above 80% and
@@ -581,7 +606,10 @@ belongs rather than being restated here:
 | Per-tenant ordering | [ADR 0006](adr/0006-kafka-over-sqs-for-delivery.md#verification), and `make relay-verify-ordering` on every push |
 | Lag-based autoscaling beats an HPA on CPU | [ADR 0007](adr/0007-keda-lag-autoscaling.md#verification), measured 2026-08-27 |
 | In-cluster Prometheus and Grafana for the demo | [ADR 0008](adr/0008-in-cluster-observability-for-the-demo.md#verification), measured 2026-08-27 |
+| Exact-source local qualification and visual practice for M4 staging | [Qualification manifest](evidence/m4-local/20260920T153931Z/qualification.json) and [rehearsal record](reviews/m4-replay-capture-rehearsal.md#completed-bounded-qualification-on-2026-09-20-utc), verified 2026-09-20 |
+| Cheap AWS tier, immutable images, reviewed hourly plan and GO | [Staging packet](evidence/m4-staging/20260920T155738Z/publication.json) and [staging record](reviews/m4-96-staging-20260920.md), verified 2026-09-20; no hourly runtime applied |
 
-**M3's whole-application result was verified on 2026-09-05. M4 remains
-unverified.** Re-check every MSK and EKS cost figure against current pricing
-before M4; both schedules change.
+**M3's whole-application result was verified on 2026-09-05. M4's local
+qualification and AWS staging were verified on 2026-09-20; the paid AWS
+workload, teardown and settled session cost remain unverified under #97.**
+The staging packet is historical evidence, not perpetual execution approval.

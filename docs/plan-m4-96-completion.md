@@ -1,8 +1,9 @@
 # Bounded plan to complete M4 issue #96
 
 Status: #96 staging completed on 2026-09-20 UTC for frozen source
-`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; issue closure awaits the evidence
-PR merge. Local run `20260920T153931Z` passed all four machine rehearsals and
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; the issue closed when
+[PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged.
+Local run `20260920T153931Z` passed all four machine rehearsals and
 all four visual views. Preflight `20260920T155738Z` passed all 16 checks.
 The cheap dev tier was applied, both immutable images were staged, and the
 hourly plan was reviewed without applying it. GO passed at 16:13:51Z; the
@@ -16,8 +17,8 @@ The owner explicitly selected `474dca7` for one new qualification after PR #147
 merged. The merge hold ended at 15:57:38Z. Both old and new receipts remain
 bound to their original SHAs. The dated plan below retains its original
 `d63d028` prediction; the execution record above supplies the approved
-candidate replacement and final result. No additional qualification is needed
-to merge this evidence-only PR.
+candidate replacement and final result. The evidence publication and later
+documentation-only merges do not require another local qualification.
 
 **Approved sequence: prepare the evidence handoff, then run the merged machine
 capture once before the demo.** Freeze the candidate and use the result to decide what

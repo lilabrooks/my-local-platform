@@ -9,9 +9,10 @@
 #   messaging        ~660 MB   kafka + rabbitmq
 #   tools            ~285 MB   kafka-ui (optional; needs messaging)
 #   obs              ~490 MB   collector + prometheus + tempo + grafana
-#   apps              ~40 MB   relay ingest + deliver + sink (built from source)
+#   apps              ~40 MB   estimate; relay ingest + deliver + sink
 #   ------------------------------------------------------------------
-#   all            ~1,570 MB
+#   infrastructure ~1,570 MB   historical estimate; excludes apps
+#   all                       no recorded complete-stack measurement
 #
 # The measured M2 minikube setup adds ~3.5 GB on top and has a 6 GB cap, which
 # makes it the single largest consumer -- `make k8s-down` when not doing GitOps

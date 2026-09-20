@@ -352,9 +352,13 @@ FAIL  relay  45000ms  event evt_... was not delivered to the sink
 even though nothing is broken. Stop one side:
 
 ```bash
-docker compose --env-file .env -f local/docker-compose.yml \
-  stop relay-ingest relay-deliver sink
+docker compose --env-file "$([ -f .env ] && echo .env || echo .env.example)" \
+  -f local/docker-compose.yml stop relay-ingest relay-deliver sink
 ```
+
+`.env` is optional and gitignored, so a bare `--env-file .env` fails with
+`couldn't find env file` on a fresh checkout. The Makefile falls back to
+`.env.example` for the same reason; see `ENV_FILE` in the `Makefile`.
 
 The same applies to the M2 demo: it runs in the cluster, so the compose apps
 have to be down or the lag and pod-count picture is measuring half the work.

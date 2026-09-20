@@ -17,6 +17,7 @@ is the reference application across Compose, minikube, and live AWS.
 ## Table of contents
 
 - [Quick start](#quick-start)
+- [Starting and stopping](#starting-and-stopping)
 - [What runs here](#what-runs-here)
 - [System diagram](#system-diagram)
 - [Relay](#relay)
@@ -54,17 +55,75 @@ when you need local overrides:
 cp .env.example .env
 ```
 
-Run `make urls` to print service addresses. `make down` stops the stack and
-keeps its volumes; `make clean` stops it and deletes all local data.
+Run `make urls` to print service addresses. See
+[Starting and stopping](#starting-and-stopping) for pausing, resuming, and
+tearing down.
 
 > **Host capacity:** Kubernetes is the resource-bound path. On 2026-09-08, the
 > current development host was a MacBook Air (`Mac16,12`, Apple M4, 10 cores,
 > 16 GB, arm64) running macOS 26.6.2, with Docker assigned 10 CPUs and about
-> 8 GB. A minimum host has not been measured. Repository measurements put all
-> Compose profiles together at about 1.6 GB under sustained load. The
-> Kubernetes test used a 4 CPU, 6 GiB minikube node; the same workload failed
-> with 3 GiB. See the
-> [measured memory breakdown](docs/runbook-local.md#profiles).
+> 8 GB. A minimum host has not been measured. The historical estimate for the
+> four Compose infrastructure profiles is about 1.6 GB under sustained load;
+> the complete stack, with the application containers, has no recorded
+> measurement. The Kubernetes test used a 4 CPU, 6 GiB minikube node; the same
+> workload failed with 3 GiB. See the
+> [memory breakdown and evidence limits](docs/runbook-local.md#profiles).
+
+## Starting and stopping
+
+Compose and Kubernetes stop and start independently. Pausing keeps the
+containers and their volumes. Tearing down removes the containers;
+`make clean` also deletes the Compose data volumes.
+
+| Goal | Command |
+|---|---|
+| Start the Compose stack | `make up`, or a subset — see [Profiles](docs/runbook-local.md#profiles) |
+| Pause it, keeping containers and data | `docker compose ... stop` — full command below |
+| Resume it | `docker compose ... start` with the profiles you want running |
+| Remove the containers, keep the volumes | `make down` |
+| Remove the containers and **delete the Compose data volumes** | `make clean` |
+| Pause the local cluster, keeping its state | `make k8s-down` |
+| Resume the cluster | `make k8s-up` |
+
+Choose shutdown profiles to cover every service you want stopped. On resume,
+choose only the profiles you want running; the selections can differ. `start`
+starts every existing container in its selection, even ones you previously
+stopped on purpose.
+
+The example below stops `core`, `messaging` and `obs`; include `tools` or `apps`
+if you also want those services stopped. `.env` is optional and gitignored, so
+the env file is resolved the way the `Makefile` resolves it:
+
+```bash
+env_file=$([ -f .env ] && echo .env || echo .env.example)
+docker compose --env-file "$env_file" -f local/docker-compose.yml \
+  --profile core --profile messaging --profile obs stop
+```
+
+Pause is the cheap path: `stop` leaves the containers in place, so resuming
+needs no rebuild or re-seed, and Kafka offsets, Postgres rows, Prometheus
+storage and Grafana storage survive on their volumes. `make down` is heavier —
+it removes the containers, so the next `make up` rebuilds from source and
+re-seeds.
+
+Three things to know before you pause:
+
+- **Process memory does not survive.** The sink holds its retained deliveries,
+  counters and its latency and fail-rate controls in memory only, so a pause
+  discards them. The cluster's Grafana and ArgoCD port-forwards
+  (`make monitoring-ui` and `make argocd-ui`) have to be started again too.
+- **Order matters across the two stacks.** The cluster's relay workloads and
+  the KEDA scaler both reach Kafka in Compose, so delivery and lag collection
+  stop without it: `make k8s-down` → `stop`, then `start` → `make k8s-up`.
+- **`make up` is not always the right way back.** It starts every profile
+  including `apps`, whose `relay-deliver` joins the same Kafka consumer group as
+  the cluster's delivery consumers. If you were running the cluster workloads,
+  resume with `start` and a selection that leaves `apps` out. See
+  [do not run the compose apps and the cluster apps together](docs/runbook-k8s.md#do-not-run-the-compose-apps-and-the-cluster-apps-together).
+
+Full detail, including which profile costs what, is in the local runbook under
+[Pausing](docs/runbook-local.md#pausing) and
+[Resetting](docs/runbook-local.md#resetting).
 
 ## What runs here
 
@@ -134,9 +193,13 @@ M0 through M3 and the locally testable M4 implementation are complete,
 including the one-shot runtime bootstrap packaged in
 [issue #136](https://github.com/lilabrooks/my-local-platform/issues/136). The
 live EKS, RDS, and MSK proof remains unverified and separately authorized.
-[Issue #96](https://github.com/lilabrooks/my-local-platform/issues/96) tracks
-staging; [issue #97](https://github.com/lilabrooks/my-local-platform/issues/97)
-tracks the paid run.
+Cheap-tier staging completed on 2026-09-20 in
+[issue #96](https://github.com/lilabrooks/my-local-platform/issues/96), closed
+by [PR #148](https://github.com/lilabrooks/my-local-platform/pull/148).
+[Issue #97](https://github.com/lilabrooks/my-local-platform/issues/97) tracks
+the paid validation and teardown, awaiting separate owner approval. See the
+[staging record](docs/reviews/m4-96-staging-20260920.md) for the completed
+qualification and staged runtime source `474dca7`.
 
 The [relay goal](docs/goal-relay.md) states the behavior and limits. The
 [relay roadmap](docs/roadmap-relay.md) records the milestone sequence and its

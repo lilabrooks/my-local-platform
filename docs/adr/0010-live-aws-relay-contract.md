@@ -521,8 +521,9 @@ $1.0219/hour against the $1.25 limit; GO was generated at 16:13:51Z.
 publication checkout. The [staging packet](../evidence/m4-staging/20260920T155738Z/publication.json)
 binds GO and all eight inputs; `execution_authorized` is false. The
 [staging record](../reviews/m4-96-staging-20260920.md) records actual actions,
-private artifact hashes, qualification and scope limits. #96 closure requires
-its evidence PR to merge; #97 remains unapproved. These dated observations do
+private artifact hashes, qualification and scope limits.
+[PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged on
+2026-09-20 and closed #96; #97 remains unapproved. These dated observations do
 not claim that the AWS inputs will remain fresh for a later paid session.
 
 Budget amendment checked on 2026-09-20 UTC:

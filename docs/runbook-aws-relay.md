@@ -1,8 +1,9 @@
 # Live AWS relay validation runbook
 
 Status: #96 staging completed on 2026-09-20 UTC for frozen source
-`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; issue closure awaits the evidence
-PR merge. Local run `20260920T153931Z` passed all four machine rehearsals and
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; the issue closed when
+[PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged.
+Local run `20260920T153931Z` passed all four machine rehearsals and
 all four visual views. Preflight `20260920T155738Z` passed all 16 checks.
 The cheap dev tier was applied, both immutable images were staged, and the
 hourly plan was reviewed without applying it. GO passed at 16:13:51Z; the
@@ -12,7 +13,7 @@ and no hourly runtime. #97 still requires separate paid-run approval.
 See the [staging record](reviews/m4-96-staging-20260920.md) for commands,
 results, preserved hashes and the closure boundary.
 
-The [bounded completion plan](plan-m4-96-completion.md) governs that handoff.
+The [bounded completion plan](plan-m4-96-completion.md) governed the completed handoff.
 The [rehearsal record](reviews/m4-replay-capture-rehearsal.md) preserves the
 original receipts and both historical failed captures.
 No command on this page authorizes an AWS mutation.
@@ -1020,10 +1021,10 @@ the provisional packet before adding the settled cost. Use
 | #91 | owner accepts ADR 0010 and this runbook |
 | #92 | IAM/TLS transport passes local tests |
 | #93 | disabled and enabled Terraform plans pass their resource-shape checks |
-| #94 | rendered workloads preserve this topology, identity, and evidence path (implemented; merge closes the issue) |
+| #94 | rendered workloads preserve this topology, identity, and evidence path (completed; issue closed) |
 | #95 | the full runbook, including abort and cleanup, passes locally |
 | #136 | the shared topic, schema, secret, and in-cluster bootstrap path passes offline checks |
-| #96 | cheap staging, images, budget alarm, current prices, and exact plan are separately approved and captured |
+| #96 | cheap staging, images, budget alarm, current prices, and exact plan are separately approved and captured (completed; issue closed) |
 | #97 | paid proof ends in destroy, empty inventories, and a settled final cost |
 
 Changing identity provider, public exposure, resource or partition counts,
