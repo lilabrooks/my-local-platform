@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "local_run_id": "20260920T153931Z",
+  "aws_run_id": "20260920T155738Z",
+  "result": "passed",
+  "kind": "curated qualification handoff; raw files retained privately",
+  "attempts": {
+    "capture": 1,
+    "demo": 1
+  },
+  "capture": {
+    "started_at": "2026-09-20T15:43:52Z",
+    "finished_at": "2026-09-20T15:48:12Z",
+    "cleanup_verified": true,
+    "export_count": 8,
+    "accepted_samples": 39,
+    "observations": 44,
+    "peak_lag": 586.0,
+    "peak_members": 12.0,
+    "peak_replicas": 12.0,
+    "final": {
+      "lag": 0.0,
+      "members": 1.0,
+      "replicas": 1.0
+    }
+  },
+  "demo": {
+    "started_at": "2026-09-20T15:48:52Z",
+    "finished_at": "2026-09-20T15:52:07Z",
+    "observations": {
+      "dead_letter_counter_delta": 1,
+      "event_ids": [
+        "evt_edaef729012a322c2cf18423e03bc7ed",
+        "evt_de755eee26b95cc8c5d3c3c76defa96a"
+      ],
+      "final_consumers": 1,
+      "final_lag": 0,
+      "healthy_delivery_counter_delta": 1,
+      "peak_consumers": 12,
+      "peak_lag": 596,
+      "replay_completed": true,
+      "scale_samples": 23
+    },
+    "cleanup": {
+      "keda_pause_absent": true,
+      "sink_baseline_restored": true,
+      "verification_port_forward_stopped": true
+    }
+  },
+  "visual_review": {
+    "schema_version": 1,
+    "reviewed_at": "2026-09-20T15:57:38.327248+00:00",
+    "candidate": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+    "local_run_id": "20260920T153931Z",
+    "result": "passed",
+    "order": [
+      "argocd",
+      "terminal",
+      "grafana",
+      "tempo"
+    ],
+    "views": [
+      {
+        "environment": "minikube mlp",
+        "notes": "Five Synced/Healthy ArgoCD applications; API source revision matches 474dca7.",
+        "files": [
+          {
+            "path": "visuals/argocd-apps.png",
+            "sha256": "cb0db81400cbe9a63800154374d1f2289d84ce423f7d63d0ae900f9eeeda3cf7",
+            "bytes": 113140
+          }
+        ],
+        "inspected_legible": true
+      },
+      {
+        "environment": "iTerm2, saved minikube demo transcript",
+        "notes": "Owner saved both images; scaling/drain table and replay/completion inspected and legible.",
+        "files": [
+          {
+            "path": "visuals/terminal-demo.png",
+            "sha256": "ea1ea73b8393ba7a08b1ddb2a163652fd2c0f282d92359a446eadb49ad67bb69",
+            "bytes": 517101
+          },
+          {
+            "path": "visuals/terminal-demo-replay.png",
+            "sha256": "c53224111abc1b2059fb592a4e99cb5f8e34f056b1e04bdc7841653a379de75f",
+            "bytes": 686693
+          }
+        ],
+        "inspected_legible": true
+      },
+      {
+        "environment": "minikube Grafana localhost:3001",
+        "notes": "Scaling interval 15:48:52Z\u201315:51:40Z: maximum lag 596, 12 consumers/group members, last lag 0 and members 1. Separate full-run image through 15:52:07Z includes replay of capture and demo records with visible lag 1206; it does not establish replay drain.",
+        "files": [
+          {
+            "path": "visuals/grafana-lag.png",
+            "sha256": "4dc5b76f8a4df5b2d2b84d47e860ba945a8300174b026f9532c00a4e408ab594",
+            "bytes": 94563
+          },
+          {
+            "path": "visuals/grafana-demo-and-replay.png",
+            "sha256": "e62a060218cff4d20f8c03564851048fe2e433b54fb771510c099d4f5e553247",
+            "bytes": 93160
+          }
+        ],
+        "inspected_legible": true
+      },
+      {
+        "environment": "Compose Grafana localhost:3000 and Tempo localhost:3200",
+        "notes": "Separate smoke-traces practice after minikube stopped: trace 13354af13c10ec084b2bc248fe79466a, event evt_0633b3a60e1dd053630f16e960d61a41. UI 11:55:21.997 America/Toronto = 15:55:21.997 UTC. Ingest, Kafka, consume, four persisted attempts legible.",
+        "files": [
+          {
+            "path": "visuals/tempo-trace.png",
+            "sha256": "ef923ef5abcad3fb37eb8c3aee9ec4332825285ec029bfdf95dd72d378dd9a5e",
+            "bytes": 83555
+          },
+          {
+            "path": "visuals/tempo-trace-spans.png",
+            "sha256": "ab2c26cb075ac76dd44974bb60b9903554ce51cab802dd9d7837de55761bfc88",
+            "bytes": 88177
+          }
+        ],
+        "inspected_legible": true
+      }
+    ],
+    "machine_receipts_unchanged": {
+      "k8s-sigterm.json": "ceeccfcfd6540712639d573b52a4120c1f35f9cd324ad57ab3183ddc3a021b25",
+      "demo-rehearsal.json": "f10ba4edb0b73391cd7e438e6bc774a794a9b855f669015f27443c0b2a01d58f",
+      "abort-rehearsal.json": "3aa6f64c762028a4df0da3af4c2d774dd5537a8f4a5521b67552936bbc40614a",
+      "capture-result.json": "b65b9f5c65fbb4b2e07be2abf6da007f93a550bf089aedf0f1ff8213105d2198"
+    },
+    "note": "Human visual review is separate; automated receipts unchanged."
+  },
+  "raw_sha256": {
+    "10-event.json": "d89c7b119cfc8cbd968fb6789e1c1d25d6775503f79b96e0e52cc6a92cfd1763",
+    "11-attempts.json": "e88aed310dea924f1bc903bb3a9f21bd99b030b689b7fbdcb370bb136dda9f65",
+    "12-metrics.txt": "dcaee19c60f0acf99dae650fdd88262f8a87a893a9dd13fbc02816eb7880c0c5",
+    "13-trace.json": "defa8e780a67dfe0a1e7479b91129a3cad592a2acf023aa61c99578c5780a086",
+    "14-keda.txt": "4750e11f79216b99b833d7c69eaa955b1ad1a6f21c8df5f70cbf7e4826e81a71",
+    "15-dlq.json": "a275cbc78558e4347384027ae239ccb30eec9d00bec6a05eb85a3e6613893f47",
+    "16-replay.json": "b28ab947b8bb152be8331fc16202b12cd4c842d838afb7c77469293f99772df6",
+    "abort-rehearsal.json": "3aa6f64c762028a4df0da3af4c2d774dd5537a8f4a5521b67552936bbc40614a",
+    "all-receipts-verified.json": "efeeaecfe1396d1021fa7f20d2cedb79316b65edbc88852952ee048861ff69bf",
+    "application-logs.txt": "a6e4774e00878b3306345af5e302824e0eea4af777b04229e2281083167d961b",
+    "capture-console.log": "35236925d524e329f9183d225683daa1ec18412bf2057e55742ae421aff25627",
+    "capture-result.json": "b65b9f5c65fbb4b2e07be2abf6da007f93a550bf089aedf0f1ff8213105d2198",
+    "demo-console.log": "3dc9f038f9db7b7af7cebc5f5f857e4e00ad0fc6defdc1e793d9f45d0e2c9d18",
+    "demo-rehearsal.json": "f10ba4edb0b73391cd7e438e6bc774a794a9b855f669015f27443c0b2a01d58f",
+    "demo-transcript.txt": "46155b6c53bcbbc860834565d6783a90f5fbb6246dab0fec2cadfd0837fcba1a",
+    "k8s-sigterm.json": "ceeccfcfd6540712639d573b52a4120c1f35f9cd324ad57ab3183ddc3a021b25",
+    "preflight-command-result.json": "ec176e6cfb78ba95a33b7da4800e90b70f5d4da886c6b23ca84b88c35bdaf128",
+    "price-preparation-refusal.json": "586f70189015b75c6948b2bc8c7a114e2784b32cc9e9faab403c643d22ccf5ce",
+    "visual-compose-command-results.json": "e12f7694a396337564afe2b7f2ef6961fd6539ba21bcaff4e71b25d86f0f3b4b",
+    "visual-review.json": "29d5cda5a742cc24011c81724806832630097d8e0d7510e3d22510b0a71eeec7",
+    "visuals/argocd-apps.png": "cb0db81400cbe9a63800154374d1f2289d84ce423f7d63d0ae900f9eeeda3cf7",
+    "visuals/grafana-demo-and-replay.png": "e62a060218cff4d20f8c03564851048fe2e433b54fb771510c099d4f5e553247",
+    "visuals/grafana-lag.png": "4dc5b76f8a4df5b2d2b84d47e860ba945a8300174b026f9532c00a4e408ab594",
+    "visuals/tempo-trace-spans.png": "ab2c26cb075ac76dd44974bb60b9903554ce51cab802dd9d7837de55761bfc88",
+    "visuals/tempo-trace.png": "ef923ef5abcad3fb37eb8c3aee9ec4332825285ec029bfdf95dd72d378dd9a5e",
+    "visuals/terminal-demo-replay.png": "c53224111abc1b2059fb592a4e99cb5f8e34f056b1e04bdc7841653a379de75f",
+    "visuals/terminal-demo.png": "ea1ea73b8393ba7a08b1ddb2a163652fd2c0f282d92359a446eadb49ad67bb69",
+    "visuals/terminal-practice.png": "9ed8dfaa1f6766a15f861588a6b74703792c7837760d59bf225c7c9606cf7011"
+  }
+}

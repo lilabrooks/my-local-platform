@@ -1,0 +1,225 @@
+{
+  "captures": [
+    {
+      "command": "make aws-account-check AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT",
+      "implemented_by": "#96",
+      "order": 1,
+      "output": "01-identity.txt",
+      "phase": "before_paid_window",
+      "source": "repository identity plus read-only AWS account APIs"
+    },
+    {
+      "command": "make aws-prices AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT",
+      "implemented_by": "#96",
+      "order": 2,
+      "output": "02-prices.md",
+      "phase": "before_paid_window",
+      "source": "dated official AWS price sources and checked arithmetic"
+    },
+    {
+      "command": "make aws-plan AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_PLAN_SUMMARY=$RAW_EVIDENCE/03-plan-summary.json AWS_TF_ARGS=\"-var enable_eks=true -var enable_msk=true -var enable_rds=true -var eks_operator_cidr=${AWS_OPERATOR_CIDR:?set the reviewed IPv4 /32}\"",
+      "order": 3,
+      "output": "03-plan-summary.json",
+      "phase": "before_paid_window",
+      "precondition": "cheap tier applied, inventory and images staged; AWS_OPERATOR_CIDR is the current reviewed IPv4 /32; plan only, no apply",
+      "source": "reviewed Terraform plan"
+    },
+    {
+      "command": "make aws-inventory-empty AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_INVENTORY_FILE=$RAW_EVIDENCE/04-inventory-before.json",
+      "implemented_by": "#96",
+      "order": 4,
+      "output": "04-inventory-before.json",
+      "phase": "before_paid_window",
+      "source": "tagged and service-native AWS inventory helper owned by #96"
+    },
+    {
+      "command": "make aws-stage-images AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_IMAGE_EVIDENCE=$RAW_EVIDENCE/05-images.json",
+      "implemented_by": "#96",
+      "order": 5,
+      "output": "05-images.json",
+      "phase": "before_paid_window",
+      "source": "ECR image staging and inspection helper owned by #96"
+    },
+    {
+      "command": "make aws-go-no-go AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT M4_OPERATOR=$M4_OPERATOR",
+      "implemented_by": "#96",
+      "order": 6,
+      "output": "06-go-no-go.json",
+      "phase": "before_paid_window",
+      "source": "cross-checked release packet bound to one run and commit"
+    },
+    {
+      "command": "make aws-live-run AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT M4_OPERATOR=$M4_OPERATOR",
+      "order": 7,
+      "output": "00-session.json",
+      "phase": "before_paid_window",
+      "source": "session controller"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --deploy",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "implemented_by": "#97",
+      "order": 10,
+      "output": "10-event.json",
+      "phase": "live_window",
+      "source": "relay ingest response and idempotent repeat"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output 11-attempts.json",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "order": 11,
+      "output": "11-attempts.json",
+      "phase": "live_window",
+      "source": "GET /v1/events/{id}/attempts"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output 12-metrics.txt",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "implemented_by": "#97",
+      "order": 12,
+      "output": "12-metrics.txt",
+      "phase": "live_window",
+      "queries": [
+        "max(relay_consumer_group_lag_total{group=\"relay-deliver\"})",
+        "max(relay_group_members{group=\"relay-deliver\"})",
+        "max(relay_topic_partitions_unassigned{group=\"relay-deliver\"})",
+        "max(relay_group_unassigned_members{group=\"relay-deliver\"})",
+        "kube_deployment_spec_replicas{namespace=\"mlp\",deployment=\"relay-deliver\"}"
+      ],
+      "source": "fresh Prometheus instant samples during the bounded cohort; source timestamps checked before aggregation"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output 13-trace.json",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "order": 13,
+      "output": "13-trace.json",
+      "phase": "live_window",
+      "source": "Tempo trace API joined to the capture event and persisted attempt coordinates"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output 14-keda.txt",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "order": 14,
+      "output": "14-keda.txt",
+      "phase": "live_window",
+      "source": "Kubernetes Deployment, pod, and ScaledObject state"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output 15-dlq.json",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "implemented_by": "#97",
+      "order": 15,
+      "output": "15-dlq.json",
+      "phase": "live_window",
+      "source": "delivery DLQ consumer with source topic, partition, and offset"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output 16-replay.json",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "implemented_by": "#97",
+      "order": 16,
+      "output": "16-replay.json",
+      "phase": "live_window",
+      "source": "relay replay Job logs and matched delivery outcomes"
+    },
+    {
+      "command": "python3 scripts/m4-live-capture.py --environment aws --context \"$AWS_KUBE_CONTEXT\" --run-id \"$AWS_RUN_ID\" --commit \"$AWS_APPROVED_COMMIT\" --verify-output application-logs.txt",
+      "execution": "one bounded run at step 10; later commands verify its exports without repeating the load",
+      "order": 17,
+      "output": "application-logs.txt",
+      "phase": "live_window",
+      "publication": "scan-only; excerpts belong in the named JSON evidence",
+      "source": "all relay and sink containers since the session start"
+    },
+    {
+      "command": "make aws-down; make aws-state-empty",
+      "order": 20,
+      "output": "20-destroy.txt",
+      "phase": "destroy_first",
+      "source": "controller-owned state-backed destroy, log cleanup, and empty-state transcript"
+    },
+    {
+      "command": "make aws-inventory-empty AWS_RUN_ID=$AWS_RUN_ID AWS_APPROVED_COMMIT=$AWS_APPROVED_COMMIT AWS_INVENTORY_FILE=$RAW_EVIDENCE/21-inventory-after.json",
+      "implemented_by": "#96",
+      "order": 21,
+      "output": "21-inventory-after.json",
+      "phase": "after_destroy",
+      "source": "same inventory helper and query set as 04-inventory-before.json"
+    },
+    {
+      "command": "make aws-cost >$RAW_EVIDENCE/22-cost-immediate.txt",
+      "order": 22,
+      "output": "22-cost-immediate.txt",
+      "phase": "after_destroy",
+      "source": "provisional Cost Explorer output"
+    },
+    {
+      "command": "make aws-cost-final AWS_RUN_ID=$AWS_RUN_ID",
+      "order": 23,
+      "output": "23-cost-final.txt",
+      "phase": "after_billing_settles",
+      "source": "settled account-wide daily service totals over session UTC dates; not exact M4 attribution"
+    }
+  ],
+  "commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "failure_transition": {
+    "next_phase": "destroy_first",
+    "required_followups": [
+      "after_destroy",
+      "after_billing_settles"
+    ],
+    "skip_remaining_live_captures": true
+  },
+  "paid_window": {
+    "destroy_starts_after_success_or_failure": true,
+    "evidence_deadline_minutes": 150,
+    "hard_deadline_minutes": 180,
+    "prepare_before_apply": true,
+    "sanitize_after_destroy": true
+  },
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "screenshots": [
+    {
+      "file": "argocd-apps.png",
+      "order": 1,
+      "required": true,
+      "surface": "ArgoCD",
+      "visible_state": "all child Applications are synced and healthy"
+    },
+    {
+      "file": "terminal-demo.png",
+      "order": 2,
+      "required": true,
+      "surface": "terminal",
+      "visible_state": "event, idempotency, attempt, DLQ, and replay assertions passed"
+    },
+    {
+      "file": "grafana-lag.png",
+      "order": 3,
+      "required": true,
+      "surface": "Grafana relay dashboard",
+      "visible_state": "lag rise and drain plus scale out and return to one"
+    },
+    {
+      "file": "tempo-trace.png",
+      "order": 4,
+      "required": true,
+      "surface": "Grafana Explore with Tempo",
+      "visible_state": "one trace contains ingest, produce, consume, and webhook attempts"
+    },
+    {
+      "deadline_behavior": "skip rather than delay destroy",
+      "files": [
+        "aws-console-eks.png",
+        "aws-console-msk.png",
+        "aws-console-rds.png",
+        "aws-console-cost.png"
+      ],
+      "order": 5,
+      "required": false,
+      "surface": "AWS console",
+      "visible_state": "optional orientation views; command exports remain authoritative"
+    }
+  ]
+}

@@ -1,0 +1,177 @@
+{
+  "availability": {
+    "ec2_nodes": {
+      "availability_zones": [
+        "us-east-1a",
+        "us-east-1b",
+        "us-east-1c",
+        "us-east-1d",
+        "us-east-1f"
+      ],
+      "instance_type": "t3.medium",
+      "passed": true,
+      "required_availability_zones": [
+        "us-east-1a",
+        "us-east-1b"
+      ]
+    },
+    "eks_standard_support": {
+      "passed": true,
+      "version": "1.35"
+    },
+    "gate": {
+      "failures": [],
+      "passed": true
+    },
+    "msk_serverless_region": {
+      "documented_region_present": true,
+      "documented_serverless_source": "https://docs.aws.amazon.com/msk/latest/developerguide/serverless.html",
+      "passed": true,
+      "region": "us-east-1",
+      "service_region_present": true
+    },
+    "rds_postgres": {
+      "availability_zones": [
+        "us-east-1a",
+        "us-east-1b",
+        "us-east-1c",
+        "us-east-1d",
+        "us-east-1f"
+      ],
+      "engine_version": "17.11",
+      "instance_class": "db.t4g.micro",
+      "passed": true,
+      "required_availability_zones": [
+        "us-east-1a",
+        "us-east-1b"
+      ],
+      "storage_type": "gp3"
+    }
+  },
+  "aws": {
+    "account_id": "[REDACTED:ACCOUNT_ID]",
+    "account_matches_profile": true,
+    "caller_arn": "arn:aws:sts::[REDACTED:ACCOUNT_ID]:assumed-role/AWSReservedSSO_AdministratorAccess_96476f6f8b22b629/lbrooks-admin",
+    "profile": "aws-public-change-feed"
+  },
+  "backend": {
+    "bucket": "mlp-tfstate-[REDACTED:ACCOUNT_ID]",
+    "encryption": "AES256",
+    "exists": true,
+    "public_access_blocked": true,
+    "versioning": "Enabled"
+  },
+  "budget": {
+    "active": true,
+    "has_notification_subscriber": true,
+    "limit_usd": "5.0",
+    "name": "mlp-live-aws-monthly",
+    "notification_count": 3,
+    "scope": {
+      "cost_allocation_tag_status": "Active",
+      "include_tax": false,
+      "tag_key": "Project",
+      "tag_value": "my-local-platform"
+    },
+    "subscriber_count": 3,
+    "subscribers": [
+      {
+        "address": "[REDACTED:EMAIL]",
+        "type": "EMAIL"
+      },
+      {
+        "address": "[REDACTED:EMAIL]",
+        "type": "EMAIL"
+      },
+      {
+        "address": "[REDACTED:EMAIL]",
+        "type": "EMAIL"
+      }
+    ]
+  },
+  "captured_at": "2026-09-20T16:01:37Z",
+  "eks": {
+    "source": "https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html",
+    "standard_support": true,
+    "status": "STANDARD_SUPPORT",
+    "version": "1.35"
+  },
+  "gate": {
+    "failures": [],
+    "passed": true
+  },
+  "quotas": {
+    "gate": {
+      "failures": [],
+      "passed": true
+    },
+    "items": [
+      {
+        "limit": "100.0",
+        "name": "EKS clusters",
+        "passed": true,
+        "quota_code": "L-1194D53C",
+        "remaining": "100.0",
+        "required": "1",
+        "used": "0"
+      },
+      {
+        "limit": "10",
+        "limit_source": "https://docs.aws.amazon.com/msk/latest/developerguide/limits.html",
+        "name": "MSK Serverless clusters",
+        "passed": true,
+        "quota_code": "documented-default-limit",
+        "remaining": "10",
+        "required": "1",
+        "used": "0"
+      },
+      {
+        "limit": "40",
+        "name": "RDS DB instances",
+        "passed": true,
+        "quota_code": "DBInstances",
+        "remaining": "40",
+        "required": "1",
+        "used": "0"
+      },
+      {
+        "limit": "32.0",
+        "name": "All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests",
+        "passed": true,
+        "quota_code": "L-34B43A08",
+        "remaining": "32.0",
+        "required": "6",
+        "used": "0"
+      },
+      {
+        "limit": "5.0",
+        "name": "EC2-VPC Elastic IPs",
+        "passed": true,
+        "quota_code": "L-0263D0A3",
+        "remaining": "5.0",
+        "required": "1",
+        "used": "0"
+      }
+    ]
+  },
+  "region": "us-east-1",
+  "repository": {
+    "name_with_owner": "[REDACTED:OPERATOR]/my-local-platform",
+    "url": "https://github.com/[REDACTED:OPERATOR]/my-local-platform"
+  },
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee",
+  "sources": {
+    "ec2_offerings": "https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instance-type-offerings.html",
+    "ec2_spot_quotas": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-spot-limits.html",
+    "eks_quotas": "https://docs.aws.amazon.com/eks/latest/userguide/service-quotas.html",
+    "eks_versions": "https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html",
+    "msk_quotas": "https://docs.aws.amazon.com/msk/latest/developerguide/limits.html",
+    "msk_serverless": "https://docs.aws.amazon.com/msk/latest/developerguide/serverless.html",
+    "rds_offerings": "https://docs.aws.amazon.com/cli/latest/reference/rds/describe-orderable-db-instance-options.html",
+    "rds_quotas": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Limits.html",
+    "regional_parameters": "https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-public-parameters-global-infrastructure.html",
+    "vpc_quotas": "https://docs.aws.amazon.com/vpc/latest/userguide/amazon-vpc-limits.html"
+  }
+}

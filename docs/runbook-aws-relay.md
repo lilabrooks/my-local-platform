@@ -1,18 +1,17 @@
 # Live AWS relay validation runbook
 
-Status: #96 cheap staging remains authorized. Candidate `d63d028` passed all
-four local machine rehearsals and all four visual views on 2026-09-20 UTC;
-preflight `20260920T050446Z` passed all 16 checks. The backend and persistent
-budget were created. The account-wide budget initially blocked staging on
-unrelated spending. The owner then authorized the project-budget amendment:
-`Project` is Active for billing, the $5 monthly budget filters that project
-before tax, and all three notifications read back `OK`. The shared live budget
-gate passes. A real-provider inspection plan verified 14 resource tags and EKS
-instance/volume/network-interface propagation; it was not applied or accepted
-as a staging plan. The amendment is prepared on `codex/m4-project-budget` for
-review. Local receipts remain unchanged at their original SHA. No cheap dev
-apply, image staging, staging hourly plan, GO or publication has completed.
-Issue #97 still requires separate paid-run approval.
+Status: #96 staging completed on 2026-09-20 UTC for frozen source
+`474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; issue closure awaits the evidence
+PR merge. Local run `20260920T153931Z` passed all four machine rehearsals and
+all four visual views. Preflight `20260920T155738Z` passed all 16 checks.
+The cheap dev tier was applied, both immutable images were staged, and the
+hourly plan was reviewed without applying it. GO passed at 16:13:51Z; the
+[sanitized staging packet](evidence/m4-staging/20260920T155738Z/publication.json)
+passed `verify-stage`. Final inventory at 16:13:47Z found two ECR repositories
+and no hourly runtime. #97 still requires separate paid-run approval.
+See the [staging record](reviews/m4-96-staging-20260920.md) for commands,
+results, preserved hashes and the closure boundary.
+
 The [bounded completion plan](plan-m4-96-completion.md) governs that handoff.
 The [rehearsal record](reviews/m4-replay-capture-rehearsal.md) preserves the
 original receipts and both historical failed captures.
