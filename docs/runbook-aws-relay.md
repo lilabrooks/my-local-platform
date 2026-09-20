@@ -238,6 +238,20 @@ read-only export for at most 60 seconds, within the proof/session deadline.
 Other command failures, oversized output, and secret-scan failures stop capture.
 A successful log export remains required; this does not repeat replay or load.
 
+The fixed load has two observation boundaries from Prometheus: one before the
+600 submissions start and one after every producer finishes. Samples used to
+prove cohort scale-out must follow the first boundary. Releasing the sink delay
+and completing the cohort require broker and metric observations after the
+second boundary, with the same broker clock limitation described above.
+Completion is checked before sampling, so producers finishing during a query
+cannot make an earlier zero-lag sample eligible. The original 480-second window
+and fixed 600-event, 16-tenant cohort remain unchanged.
+
+A fresh final drain without the required scale-out observations fails that
+cohort; it does not extend the sample or submit extra load. Its metrics export
+is retained before the scale-out assertions so the failed terminal observation
+can be inspected. A failed capture receipt remains failed even with that file.
+
 A missing or stale sample is retried within the original baseline, 480-second
 load, or 120-second replay-drain window. It cannot prove scale, release the
 sink delay, or satisfy the final drain. Persistent staleness fails at the

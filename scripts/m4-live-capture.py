@@ -999,6 +999,7 @@ class Capture:
         self.changed_sink = True
         self.http("sink", "/control", {"latency_ms": 1000, "fail_rate": 0})
         load_ids = []
+        load_started_at = self.wait(lambda: self.pending_metric("vector(time())"), 30)
 
         def post(i):
             body = {
@@ -1018,6 +1019,7 @@ class Capture:
         with self.load_pool() as pool:
             futures = [pool.submit(post, i) for i in range(600)]
             released = False
+            submitted_at = None
             end = time.monotonic() + 480
             while True:
                 self.guard()
@@ -1031,7 +1033,17 @@ class Capture:
                         raise CaptureError(
                             "load producer failed"
                         ) from future.exception()
-                sample = self.pending_sample()
+                # Snapshot completion BEFORE sampling. Futures can finish while
+                # Prometheus requests run; that must not make an older zero-lag
+                # sample eligible to release the sink or complete this cohort.
+                submitted = all(f.done() for f in futures)
+                if submitted and submitted_at is None:
+                    submitted_at = self.pending_metric("vector(time())")
+                sample = self.pending_sample(
+                    not_before=(
+                        submitted_at if submitted_at is not None else load_started_at
+                    )
+                )
                 self.guard()
                 if time.monotonic() >= end:
                     raise CaptureError(
@@ -1041,7 +1053,7 @@ class Capture:
                     samples.append(sample)
                 if (
                     sample is not None
-                    and all(f.done() for f in futures)
+                    and submitted_at is not None
                     and sample["lag"] == 0
                     and not released
                 ):
@@ -1049,7 +1061,7 @@ class Capture:
                     released = True
                 if (
                     sample is not None
-                    and all(f.done() for f in futures)
+                    and submitted_at is not None
                     and released
                     and sample["lag"] == 0
                     and sample["replicas"] == 1
@@ -1058,13 +1070,6 @@ class Capture:
                     load_ids = [f.result() for f in futures]
                     break
                 time.sleep(3)
-        if (
-            len(set(load_ids)) != 600
-            or max(s["lag"] for s in samples) <= 0
-            or max(s["replicas"] for s in samples) <= 1
-            or max(s["members"] for s in samples) <= 1
-        ):
-            raise CaptureError("load cohort or backlog observation is incomplete")
         self.write(
             "12-metrics.txt",
             {
@@ -1073,8 +1078,17 @@ class Capture:
                 "samples": samples,
                 "load_event_ids": load_ids,
                 "cohort": marker,
+                "load_started_at_prometheus_seconds": load_started_at,
+                "submitted_at_prometheus_seconds": submitted_at,
             },
         )
+        if (
+            len(set(load_ids)) != 600
+            or max(s["lag"] for s in samples) <= 0
+            or max(s["replicas"] for s in samples) <= 1
+            or max(s["members"] for s in samples) <= 1
+        ):
+            raise CaptureError("load cohort or backlog observation is incomplete")
         self.write(
             "14-keda.txt",
             {

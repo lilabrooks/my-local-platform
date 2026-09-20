@@ -1,6 +1,6 @@
 # M4 replay capture rehearsal
 
-Status: Local failure preserved; correction awaiting review and merge.
+Status: Two local failures preserved; load-observation correction awaiting review and merge.
 No AWS resources were created. Issue #96 remains open.
 
 ## Observed on 2026-09-20 UTC
@@ -88,3 +88,57 @@ cluster probe exercised the first revision only.
 
 Fresh rehearsals and visual review of the next merged candidate remain required
 before AWS staging. The original failed run must not be reused as a pass.
+
+## Merged candidate on 2026-09-20 UTC
+
+PR #145 merged as `1e7c30ee562e813e1e28bdd9a1a7c4184c958e6e`; CI run 204
+passed on its reviewed head, with the same tracked tree. Local `main` was
+fast-forwarded to the squash commit and the completed repair branch removed.
+The new clean checkout and rebuilt workload images used that exact revision.
+All five ArgoCD applications reported it as synced and healthy.
+
+Private local run: `20260920T012921Z`.
+
+- Shutdown, controller, and abort rehearsals passed.
+- The integrated demo passed in 217.727 seconds: peak lag 597, peak consumers
+  12, final zero lag and one consumer, fresh healthy-delivery and dead-letter
+  counter increments, replay complete, and cleanup verified.
+- Capture started at `01:35:12Z` and failed at `01:36:20Z` with
+  `load cohort or backlog observation is incomplete`. Cleanup was verified.
+  Only event, attempt, and trace exports were written. The revised replay and
+  application-log paths were not reached, so this run does not validate them.
+
+The original load sample array was not exported before its assertion failed.
+The failure condition combines event-ID uniqueness and three peak observations;
+the receipt cannot identify which individual condition failed. Read-only
+Prometheus history shows one member until `01:36:23Z`, then five; the replica
+series still reported one until `01:36:44Z`, then five. Kubernetes recorded
+scale-out at `01:36:15Z`. These are consistent with the capture accepting an
+older terminal sample, but are not the original query responses.
+
+Source inspection and offline regression exercise a concrete gap: producer
+futures can finish during sampling, and a recent pre-submission zero-lag sample
+can then release the sink delay and finish the loop before scale-out is observed.
+The repair takes a Prometheus boundary before submission and another after all
+600 producers complete, and uses the existing broker/scrape ordering checks.
+It retains the terminal metrics before validating peak observations. The fixed
+load, polling cadence, and 480-second window stay unchanged; a genuinely quiet
+cohort still fails without extra load or observation time.
+
+No full rehearsal was repeated after this failure. ArgoCD's visual view was
+captured, while the remaining visual rehearsal is incomplete. No live preflight
+packet or AWS resources were created. The account still matched the selected
+profile, the backend and persistent budget were absent, and EKS 1.35 reported
+standard support in a fresh read-only check.
+
+### Load-observation repair verification
+
+`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests`
+passed 193 tests. The capture suite includes real Prometheus response fixtures
+for pre-submission samples, producers completing during a query, transient and
+persistent missing completion clocks, hard errors, and a quiet cohort that
+fails immediately. Both ordering scenarios fail against `1e7c30e` and pass
+with the repair. `make aws-preflight-check` and `git diff --check` passed.
+
+After explicit bindings corrected the new test fixture's Ruff findings, all
+34 capture tests passed again. `make lint` passed all 12 checks with no skips.
