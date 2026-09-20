@@ -11,7 +11,7 @@
 #   obs              ~490 MB   collector + prometheus + tempo + grafana
 #   apps              ~40 MB   estimate; relay ingest + deliver + sink
 #   ------------------------------------------------------------------
-#   infrastructure ~1,570 MB   measured before apps were added
+#   infrastructure ~1,570 MB   historical estimate; excludes apps
 #   all                       no recorded complete-stack measurement
 #
 # The measured M2 minikube setup adds ~3.5 GB on top and has a 6 GB cap, which

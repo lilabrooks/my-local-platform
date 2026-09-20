@@ -62,12 +62,12 @@ tearing down.
 > **Host capacity:** Kubernetes is the resource-bound path. On 2026-09-08, the
 > current development host was a MacBook Air (`Mac16,12`, Apple M4, 10 cores,
 > 16 GB, arm64) running macOS 26.6.2, with Docker assigned 10 CPUs and about
-> 8 GB. A minimum host has not been measured. Repository measurements put the
-> four Compose infrastructure profiles together at about 1.6 GB under sustained
-> load; the complete stack, with the application containers, has no recorded
+> 8 GB. A minimum host has not been measured. The historical estimate for the
+> four Compose infrastructure profiles is about 1.6 GB under sustained load;
+> the complete stack, with the application containers, has no recorded
 > measurement. The Kubernetes test used a 4 CPU, 6 GiB minikube node; the same
 > workload failed with 3 GiB. See the
-> [measured memory breakdown](docs/runbook-local.md#profiles).
+> [memory breakdown and evidence limits](docs/runbook-local.md#profiles).
 
 ## Starting and stopping
 
@@ -110,8 +110,8 @@ Three things to know before you pause:
 
 - **Process memory does not survive.** The sink holds its retained deliveries,
   counters and its latency and fail-rate controls in memory only, so a pause
-  discards them. Port-forwards such as `make grafana-ui` and `make argocd-ui`
-  have to be started again too.
+  discards them. The cluster's Grafana and ArgoCD port-forwards
+  (`make monitoring-ui` and `make argocd-ui`) have to be started again too.
 - **Order matters across the two stacks.** The cluster's relay workloads and
   the KEDA scaler both reach Kafka in Compose, so delivery and lag collection
   stop without it: `make k8s-down` → `stop`, then `start` → `make k8s-up`.

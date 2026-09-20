@@ -78,12 +78,13 @@ the JVM services grow substantially:
 | `apps` | ~40 MB (estimate) | relay-ingest, relay-deliver, sink (built from source) |
 | **all** | **no recorded measurement** | every profile above, `apps` included |
 
-Two limits on those numbers. The `~1.6 GB` figure was recorded in `5e652c8`,
-two days before `f93da81` added the `apps` profile, so it measures the four
-infrastructure profiles and not the complete stack. The `apps` estimate is the
-one in the header comment of `local/docker-compose.yml`, which labels
-`~1,570 MB` as the infrastructure subtotal. **No measurement of the complete
-stack is recorded**, so do not use `all` for capacity planning without taking one.
+Two limits on those numbers. The Compose header's `~1,570 MB` infrastructure
+subtotal is a historical estimate, not a recorded combined measurement. The
+four rounded infrastructure rows sum to 1,575 MB. The header's estimate appeared in
+`5e652c8`, two days before `f93da81` added the `apps` profile. The `apps`
+figure is also an estimate from the header of `local/docker-compose.yml`.
+**No measurement of the complete stack is recorded**, so do not use `all`
+for capacity planning without taking one.
 
 `apps` is listed anyway because the table omitted it, which made `all` read as
 the union of the four rows above — and that omission is what hides the fact
@@ -543,8 +544,10 @@ Postgres rows, Prometheus storage and Grafana storage all have persistent
 mounts, so none of this touches them. **Process memory does not survive.** The
 sink keeps its retained deliveries, counters and its latency and fail-rate
 controls in memory only, and builds a fresh instance at startup, so a pause
-discards them. Port-forwards are not durable either: `make grafana-ui` and
-`make argocd-ui` are foreground sessions and have to be started again.
+discards them. The cluster's Grafana and ArgoCD port-forwards
+(`make monitoring-ui` and `make argocd-ui`) are foreground sessions and have to
+be started again. Compose Grafana publishes host port 3000 and needs no
+port-forward.
 
 **A local cluster pauses separately, and the order matters.** The cluster's
 relay workloads and the KEDA scaler both reach Kafka over
