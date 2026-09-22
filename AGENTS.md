@@ -207,6 +207,10 @@ YAML those tests read.
 - **floci drops privileges to uid 1001** even started as root, and defaults to
   in-memory storage. Both are handled in `local/docker-compose.yml`; do not
   "simplify" them away.
+- **Floci 2.1.0's standard image has no curl.** Use its bundled
+  `/usr/local/bin/healthcheck.sh`, which requires HTTP 200 from
+  `/_floci/health`. Verify the probe exists and succeeds when upgrading the
+  image.
 - **The OTel collector validates every *defined* exporter at startup**, not only
   those a pipeline uses. That is why Datadog lives in a separate config file
   rather than behind a comment.
@@ -226,7 +230,12 @@ and its earlier deferral rationale.
 
 When no issue is named, inspect the current milestone, open issues, stated
 dependencies, owner gates, and triggers. Recommend the next item and explain
-the choice. GitHub mutations require separate authority.
+the choice. Backlog mutations require separate authority.
+
+A request to fix an existing PR or its CI authorizes committing and pushing
+scoped fixes to that PR's branch and running its checks. Merging,
+force-pushing, closing PRs, and changing repository settings require explicit
+authorization.
 
 Each planned issue starts with these fields:
 

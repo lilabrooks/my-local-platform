@@ -62,7 +62,7 @@ services:
       - floci-data:/data
 
   floci:
-    image: floci/floci:2.0.1
+    image: floci/floci:2.1.0
     container_name: mlp-floci
     profiles: [core, all]
     ports:
@@ -83,7 +83,9 @@ services:
       floci-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_floci/health"]
+      # The standard Floci image has no curl. Its bundled probe requires
+      # HTTP 200 from /_floci/health, rather than just an open port.
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -237,7 +239,7 @@ services:
   # DD_API_KEY. Nothing in the app code knows Datadog exists.
   # ---------------------------------------------------------------------------
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.160.0
+    image: otel/opentelemetry-collector-contrib:0.161.0
     container_name: mlp-otel-collector
     profiles: [obs, all]
     # Which config file is used decides whether Datadog receives telemetry.
@@ -274,7 +276,7 @@ services:
       - tempo-data:/var/tempo
 
   grafana:
-    image: grafana/grafana:13.2.1
+    image: grafana/grafana:13.2.2
     container_name: mlp-grafana
     profiles: [obs, all]
     ports:
