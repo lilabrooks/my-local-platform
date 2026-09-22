@@ -83,7 +83,9 @@ services:
       floci-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_floci/health"]
+      # The standard Floci image has no curl. Its bundled probe requires
+      # HTTP 200 from /_floci/health, rather than just an open port.
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 5s
       timeout: 3s
       retries: 20
