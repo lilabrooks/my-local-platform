@@ -142,7 +142,7 @@ The Terraform matrix covers:
 - `infra/terraform/guardrails`
 - `infra/terraform/envs/dev`
 
-Each job installs Terraform 1.15.8 and runs:
+Each job installs Terraform 1.16.3 and runs:
 
 ```bash
 terraform fmt -check -recursive
@@ -350,7 +350,7 @@ The lint script discovers every file named `Dockerfile`, excluding
 `.terraform`, and checks each one with Hadolint. The check covers Dockerfile
 syntax and Hadolint's default Docker and shell rules.
 
-### Terraform formatting: Terraform 1.15.8
+### Terraform formatting: Terraform 1.16.3
 
 The lint script runs:
 
@@ -715,7 +715,7 @@ scans when those tools recognize their contents.
 
 See [Terraform matrix](#terraform-matrix) for the 3 stacks and commands.
 `make terraform-check` runs the same sequence with the installed supported
-Terraform version; CI installs 1.15.8.
+Terraform version; CI installs 1.16.3.
 
 `terraform validate` checks parsing, references, types, and provider schemas.
 The guardrail stack's mocked test fixes the persistent budget's name, limit,
@@ -854,7 +854,7 @@ runtime and installation dependencies needed to execute those checks.
 | ShellCheck, actionlint, Hadolint, golangci-lint, Trivy, Gitleaks | Matching native binaries or the pinned container fallbacks in `scripts/lint.sh`. Actionlint's embedded-shell analysis uses ShellCheck when available. Go analysis also needs the module dependency graph. |
 | Go formatting, build, vet, tidy, and tests | Go 1.27 as declared by each `go.mod` (1.27.0 in 6 modules and 1.27 in `tools/m4-bootstrap`), module downloads, and a race-detector-capable host with cgo/C compiler support for `-race`. |
 | Python tests and repository preflight | Python 3.14 in CI; standard-library `unittest`, JSON, hashing, subprocess, and filesystem libraries. Git history, Make, and Go are needed by the preflight and Make-entry-point tests. CI installs no third-party Python requirements for this job. |
-| Terraform format, validate, and mocked tests | Terraform 1.15.8 in CI; provider and module downloads during backend-free initialization. Versions are detailed below. |
+| Terraform format, validate, and mocked tests | Terraform 1.16.3 in CI; provider and module downloads during backend-free initialization. Versions are detailed below. |
 | TFLint | Docker image `ghcr.io/terraform-linters/tflint:v0.64.0`, built-in recommended Terraform rules, and AWS ruleset 0.44.0 downloaded by `tflint --init`. The lint script has no native TFLint path. |
 | Kubernetes rendering and invariants | Go and the YAML libraries below, kubectl's Kustomize renderer, Helm, Docker, Python 3, and `kube-prometheus-stack` chart 88.5.4. |
 | Kubernetes schemas and embedded telemetry configuration | Digest-pinned kubeconform 0.8.0 image, downloaded Kubernetes 1.35.0 schemas, Tempo 3.0.3, and OpenTelemetry Collector Contrib 0.159.0. The schema script runs the service binaries directly in Docker. |

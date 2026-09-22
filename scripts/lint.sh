@@ -197,7 +197,7 @@ fi
 # script used whatever `terraform` was on PATH, or skipped entirely when there
 # was none. Two versions of `fmt` disagree about formatting, which is the whole
 # check.
-TERRAFORM_VERSION=1.15.8
+TERRAFORM_VERSION=1.16.3
 tf_fail=0 tf_out=""
 if has terraform && pinned "$TERRAFORM_VERSION" "$(terraform version 2>&1 | head -1)"; then
   out=$(terraform fmt -check -recursive infra/terraform 2>&1) || {
