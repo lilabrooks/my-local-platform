@@ -102,6 +102,12 @@ charge for the budget or its email notifications.
 | `enable_eks` | Control plane + 3× `t3.medium` Spot + NAT gateway | **~$120** |
 | `enable_msk` | MSK Serverless + 13 topic partitions | **~$0.77/hour** |
 
+The EKS figure is a Spot ballpark: it adds the third worker at the Spot rate the
+earlier ~$115 estimate implied, and that rate has not been rechecked. At the
+on-demand upper bound the runtime gate uses, the control plane, three workers,
+the NAT gateway and its public IPv4 address cost $0.2748/hour, about $200.60
+per 730-hour month, before NAT data processing and other usage charges.
+
 The fixed relay-validation shape in
 [ADR 0010](adr/0010-live-aws-relay-contract.md) models at approximately
 **$1.06/hour** before small usage charges, using rates rechecked on 2026-09-05

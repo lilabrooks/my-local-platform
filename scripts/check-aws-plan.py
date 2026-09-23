@@ -292,6 +292,50 @@ def eks_dependency_review(plan: dict[str, Any], eks_enabled: bool) -> dict[str, 
     }
 
 
+def node_group_shape_failures(plan: dict[str, Any], shape: dict[str, Any]) -> list[str]:
+    """Compare each planned node group with the shape the summary reports.
+
+    runtime_shape comes from the runtime contract's locals, not from the node
+    group, so a node group edited alone could create two workers while GO
+    reads three. Two workers leave room for about four delivery pods.
+    Terraform tests cannot read resources inside the EKS module; the saved
+    plan can. A missing value fails closed.
+    """
+    if not shape["enable_eks"]:
+        return []
+    eks = shape["eks"]
+    expected = {
+        "desired_size": eks["node_desired"],
+        "max_size": eks["node_maximum"],
+        "capacity_type": eks["node_capacity_type"],
+    }
+    failures = []
+    root = plan.get("planned_values", {}).get("root_module", {})
+    for module in modules(root):
+        for resource in module.get("resources", []):
+            if resource.get("mode", "managed") != "managed":
+                continue
+            if resource.get("type") != "aws_eks_node_group":
+                continue
+            values = resource.get("values") or {}
+            scaling = values.get("scaling_config")
+            if not isinstance(scaling, list) or len(scaling) != 1 or not isinstance(scaling[0], dict):
+                scaling = [{}]
+            planned = {
+                "desired_size": scaling[0].get("desired_size"),
+                "max_size": scaling[0].get("max_size"),
+                "capacity_type": values.get("capacity_type"),
+            }
+            address = resource.get("address", "aws_eks_node_group")
+            for key, value in expected.items():
+                if planned[key] != value:
+                    failures.append(
+                        f"{address} plans {key} {planned[key]!r}, but the reported "
+                        f"shape says {value!r}"
+                    )
+    return failures
+
+
 def required_output(plan: dict[str, Any], name: str) -> Any:
     output = plan.get("planned_values", {}).get("outputs", {}).get(name)
     if not output or "value" not in output:
@@ -394,6 +438,7 @@ def main() -> int:
     creates = hourly_counts(all_creates)
     changed_hourly_resources = hourly_changes(plan)
     failures = gate_failures(shape, planned, creates, changed_hourly_resources)
+    failures.extend(node_group_shape_failures(plan, shape))
     coverage = project_tag_coverage(plan, shape["enable_eks"])
     failures.extend(coverage["gate"]["failures"])
     dependencies = eks_dependency_review(plan, shape["enable_eks"])

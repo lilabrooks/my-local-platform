@@ -1467,6 +1467,32 @@ func TestGroupWaitKeepsWaitingThroughPermissionErrors(t *testing.T) {
 	}
 }
 
+func TestGroupWaitConfirmsExitAfterSIGKILLReturnsEPERM(t *testing.T) {
+	oldGrace, oldKillGrace, oldPoll := groupExitGrace, groupKillGrace, groupPollInterval
+	groupExitGrace, groupKillGrace, groupPollInterval = 0, time.Second, time.Millisecond
+	defer func() { groupExitGrace, groupKillGrace, groupPollInterval = oldGrace, oldKillGrace, oldPoll }()
+	kills, probesAfterKill := 0, 0
+
+	// The last member awaits reaping through the grace and the kill, then its
+	// reaping removes the group during the kill grace.
+	err := waitForGroupExit(42, func(_ int, value syscall.Signal) error {
+		if value == syscall.SIGKILL {
+			kills++
+			return syscall.EPERM
+		}
+		if kills == 0 {
+			return syscall.EPERM
+		}
+		probesAfterKill++
+		return syscall.ESRCH
+	})
+
+	if err != nil || kills != 1 || probesAfterKill != 1 {
+		t.Fatalf("result=%v kills=%d probes after kill=%d, want exit confirmed after SIGKILL returned EPERM",
+			err, kills, probesAfterKill)
+	}
+}
+
 func TestGroupWaitOutlastsAMemberAwaitingItsReaper(t *testing.T) {
 	previous := groupExitGrace
 	groupExitGrace = 5 * time.Second

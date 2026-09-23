@@ -1045,7 +1045,7 @@ func (c *controller) blockCleanupOnProcess(err error) int {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	fmt.Fprintln(os.Stderr, "cleanup blocked: resources may still be running.")
-	fmt.Fprintln(os.Stderr, "Confirm that no process from this run remains: `pgrep -l -g <group>` must print nothing for each process group named above, and `pgrep -fl 'm4-live-run|terraform'` must list none from this run.")
+	fmt.Fprintln(os.Stderr, "Confirm that no process from this run remains: `pgrep -l -g <group>` must print nothing and exit 1 for each process group named above (exit 2 or 3 means pgrep itself failed and proves nothing), and `pgrep -fl 'm4-live-run|terraform'` must list none from this run.")
 	fmt.Fprintln(os.Stderr, "Then follow the AWS runbook's manual recovery procedure. Do not force-unlock or start another Terraform command while any remain.")
 	return 1
 }

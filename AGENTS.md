@@ -21,7 +21,7 @@ This bills a personal AWS account. Two rules:
    `make aws-live-run`, or `make aws-runtime-bootstrap` without explicit
    permission.**
    The default tier is ~$0/month, but `enable_rds` (~$15/mo) and `enable_eks`
-   (~$110/mo) create real hourly charges.
+   (~$120/mo) create real hourly charges.
 2. **The EKS `kubernetes_version` must be in STANDARD support.** A version in
    extended support bills at $0.60/cluster-hour instead of $0.10 — $438/month
    rather than $73, applied automatically with no approval step. Check first:

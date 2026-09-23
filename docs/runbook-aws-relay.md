@@ -99,19 +99,25 @@ kube-proxy, the Pod Identity agent and node-exporter take 1 slot each per
 worker, leaving 39 on 3 workers. The rendered stack uses 22 of them before any
 delivery pod: CoreDNS 2, KEDA 3, monitoring 5, ArgoCD 7, and relay ingest,
 sink, collector and Tempo 5. That leaves 17 for delivery pods, so KEDA's
-maximum of 12 fits with 5 spare, fewer while a Job runs. Two workers fit only
-about 4, which is why ADR 0010's
+maximum of 12 fits with 5 spare in steady state, fewer while a Job or rollout
+runs. Let rollouts settle before load. Two workers fit only about 4, which is
+why ADR 0010's
 [worker capacity amendment](adr/0010-live-aws-relay-contract.md#worker-capacity-amendment-accepted-2026-09-22)
-raised the desired count to three, the node group's maximum. At that maximum
-there is little room to replace a Spot worker before it stops, so a reclaimed
-worker can leave two until its replacement joins, with delivery pods beyond
-about 4 Pending meanwhile. Recheck this arithmetic if the rendered stack
-changes.
+raised the desired count to three, the node group's maximum.
+
+A Spot reclamation can leave two workers until a replacement joins. EKS
+launches a replacement when a worker receives a rebalance recommendation, but
+drains the old worker first if the two-minute interruption notice arrives
+before the replacement is Ready. Delivery pods beyond about 4 then wait in
+Pending. Before load, confirm three Ready, schedulable workers and record each
+worker's allocatable pod count: observe it on the new cluster rather than
+assuming 17. Recheck this arithmetic if the rendered stack changes.
 
 The capture's replica series is `kube_deployment_spec_replicas`, the desired
 count, so it would not show pods left Pending. Record running replicas and
 Pending pods beside desired replicas before relying on scaling evidence, and
-record any worker lost during the capture. Do not weaken the capture's
+record the Ready worker count and any worker lost during the capture. Do not
+weaken the capture's
 acceptance to fit.
 
 Then trace the remaining prerequisites through the existing deployment:
@@ -1007,10 +1013,12 @@ backfill them from refreshed raw inputs; preserve them and request owner review.
 
    ```bash
    pgid=replace-with-the-process-group-from-the-error
-   pgrep -l -g "$pgid"                # must print nothing
-   pgrep -fl 'm4-live-run|terraform'  # must list nothing from this attempt
+   pgrep -l -g "$pgid"; echo "exit $?"  # must print no process, then exit 1
+   pgrep -fl 'm4-live-run|terraform'    # must list nothing from this attempt
    ```
 
+   pgrep exits 1 when nothing matches. Exit 2 or 3 means pgrep itself failed,
+   so its empty output proves nothing; resolve that before continuing.
    Repeat the first check for each process group the controller's error
    named, and skip it when the error named none. If a member remains, wait for
    it to exit. If one survives `SIGKILL`, do not force-unlock or start

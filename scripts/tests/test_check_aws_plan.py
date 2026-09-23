@@ -106,7 +106,10 @@ def eks_plan(addons=None, bootstrap=False, cni_policy=True):
         "type": "aws_eks_node_group",
         "name": "this",
         "index": 0,
-        "values": {},
+        "values": {
+            "scaling_config": [{"desired_size": 3, "max_size": 3, "min_size": 1}],
+            "capacity_type": "SPOT",
+        },
     }]
     if cni_policy:
         node_resources.append(cni_policy_attachment())
@@ -206,6 +209,49 @@ class EksDependencyReviewTest(unittest.TestCase):
 
         self.assertFalse(review["required"])
         self.assertTrue(review["gate"]["passed"])
+
+
+class NodeGroupShapeTest(unittest.TestCase):
+    @staticmethod
+    def node_group_values(plan):
+        node_module = plan["planned_values"]["root_module"]["child_modules"][0]["child_modules"][0]
+        return node_module["resources"][0]["values"]
+
+    def test_node_group_matching_the_reported_shape_passes(self):
+        runtime = shape(hourly_enabled=True, enable_eks=True)
+
+        self.assertEqual(CHECK.node_group_shape_failures(eks_plan(), runtime), [])
+
+    def test_node_group_edited_alone_is_rejected(self):
+        # runtime_shape still reports three workers; apply would create two.
+        plan = eks_plan()
+        self.node_group_values(plan)["scaling_config"][0]["desired_size"] = 2
+
+        failures = CHECK.node_group_shape_failures(
+            plan, shape(hourly_enabled=True, enable_eks=True)
+        )
+
+        self.assertEqual(failures, [
+            f"{NODE_GROUP_MODULE}.aws_eks_node_group.this[0] plans desired_size 2, "
+            "but the reported shape says 3"
+        ])
+
+    def test_missing_scaling_or_another_capacity_type_fails_closed(self):
+        plan = eks_plan()
+        values = self.node_group_values(plan)
+        del values["scaling_config"]
+        values["capacity_type"] = "ON_DEMAND"
+
+        failures = CHECK.node_group_shape_failures(
+            plan, shape(hourly_enabled=True, enable_eks=True)
+        )
+
+        self.assertEqual(len(failures), 3, failures)
+        for key in ("desired_size None", "max_size None", "capacity_type 'ON_DEMAND'"):
+            self.assertTrue(any(key in failure for failure in failures), failures)
+
+    def test_cheap_tier_is_not_compared(self):
+        self.assertEqual(CHECK.node_group_shape_failures({}, shape()), [])
 
 
 class PlanShapeTest(unittest.TestCase):
@@ -491,6 +537,14 @@ class GuardScriptTest(unittest.TestCase):
         root_module["resources"].extend(network_addons())
         root_module["child_modules"][0]["address"] = NODE_GROUP_MODULE
         root_module["child_modules"][0]["resources"].append(cni_policy_attachment())
+        root_module["child_modules"][0]["resources"][0]["values"].update({
+            "scaling_config": [{"desired_size": 3, "max_size": 3, "min_size": 1}],
+            "capacity_type": "SPOT",
+        })
+        node_group_drift_plan_json = json.loads(json.dumps(plan_json))
+        node_group_drift_plan_json["planned_values"]["root_module"]["child_modules"][0][
+            "resources"
+        ][0]["values"]["scaling_config"][0]["desired_size"] = 2
         missing_cni_plan_json = json.loads(json.dumps(plan_json))
         missing_cni_plan_json["planned_values"]["root_module"]["resources"] = [
             resource
@@ -533,6 +587,8 @@ case " $* " in
       printf '%s\\n' '{json.dumps(incomplete_plan_json)}'
     elif [ "${{MLP_FAKE_MISSING_CNI:-}}" = 1 ]; then
       printf '%s\\n' '{json.dumps(missing_cni_plan_json)}'
+    elif [ "${{MLP_FAKE_NODE_GROUP_DRIFT:-}}" = 1 ]; then
+      printf '%s\\n' '{json.dumps(node_group_drift_plan_json)}'
     elif [ "${{MLP_FAKE_CHEAP:-}}" = 1 ]; then
       printf '%s\\n' '{json.dumps(cheap_plan_json)}'
     else
@@ -892,6 +948,22 @@ esac
         summary = json.loads(self.summary.read_text(encoding="utf-8"))
         self.assertFalse(summary["gate"]["passed"])
         self.assertFalse(summary["eks_dependencies"]["gate"]["passed"])
+
+    def test_node_group_that_differs_from_the_reported_shape_is_rejected(self):
+        environment = self.environment.copy()
+        environment["MLP_FAKE_NODE_GROUP_DRIFT"] = "1"
+
+        result = self._run("plan", environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "aws_eks_node_group.example plans desired_size 2, but the reported shape says 3",
+            result.stderr,
+        )
+        summary = json.loads(self.summary.read_text(encoding="utf-8"))
+        self.assertFalse(summary["gate"]["passed"])
+        # The summary GO reads still reports three workers.
+        self.assertEqual(summary["shape"]["eks"]["node_desired"], 3)
 
     def test_complete_eks_plan_records_its_dependencies(self):
         result = self._run("plan")

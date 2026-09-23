@@ -88,11 +88,15 @@ three-node maximum, $1.25/hour limit and 1-to-12 delivery range stay as
 specified.
 
 At the 2026-09-05 rates, the third worker adds $0.0416/hour to the on-demand
-upper bound, raising the modeled rate from $1.0219 to $1.0635/hour. Running at
-the node group's maximum also leaves little room to replace a Spot worker
-before it stops. Capacity Rebalancing can exceed a group's maximum by at most
-10 percent of desired capacity, 0.3 of a worker here, so a reclaimed worker can
-leave two until its replacement joins.
+upper bound, raising the modeled rate from $1.0219 to $1.0635/hour.
+
+A Spot reclamation can still leave two workers for a while. According to
+[AWS's managed node group documentation](https://docs.aws.amazon.com/eks/latest/userguide/managed-node-groups.html),
+EKS attempts to launch a replacement when a worker receives a rebalance
+recommendation. If the two-minute interruption notice arrives before that
+replacement is Ready, EKS drains the old worker anyway. AWS also notes that
+the recommendation can arrive together with the notice. The runbook therefore
+asks operators to record worker losses during the capture.
 
 Lowering KEDA's AWS maximum to what two workers fit would cost nothing, but
 the paid run would no longer repeat the local 1-to-12 demonstration. Two
@@ -622,6 +626,22 @@ The amendment was checked on 2026-09-22 without AWS calls:
 - The account check's Spot quota already requires six vCPUs, three workers at
   the maximum.
 - `make test`, `make lint` and `make terraform-check` passed.
+
+An independent review found two gaps and one unsupported claim:
+
+- A node group edited to two workers still passed every Terraform test,
+  because the shape test reads the runtime contract rather than the node
+  group.
+- No test would fail if GO's Terraform-and-price comparison were removed.
+- The Spot explanation relied on a fractional-worker inference that AWS's
+  documentation does not support.
+
+The plan gate now compares each planned node group's desired size, maximum and
+capacity type with the reported shape; a two-worker node group beside a
+three-worker shape fails it. New tests reject a Terraform model that differs
+from the price receipt, and accept Terraform's float rounding of the same
+total. Removing either check in a disposable copy fails its tests. The Spot
+text now cites AWS's documented drain timing.
 
 Staging completed on 2026-09-20 UTC for source
 `474dca7e8e121c08f2951b02871cfe4c4b87e2ee`. Local run `20260920T153931Z`
