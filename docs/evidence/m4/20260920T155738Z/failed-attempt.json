@@ -1,0 +1,37 @@
+{
+  "checks": {
+    "apply_exit": {
+      "reported_exit": -1,
+      "status": "failed"
+    },
+    "cleanup_overdue": false,
+    "cleanup_verified": false,
+    "cost_exit": {
+      "reported_exit": 0,
+      "status": "passed"
+    },
+    "destroy_exit": {
+      "reported_exit": 2,
+      "status": "failed"
+    },
+    "inventory_exit": {
+      "reported_exit": 2,
+      "status": "failed"
+    },
+    "log_cleanup_passed": true,
+    "terraform_state_exit": {
+      "reported_exit": 2,
+      "status": "failed"
+    },
+    "transcript_passed": true
+  },
+  "cleanup_finished_at": "2026-09-22T18:14:09Z",
+  "controller_phase": "cleanup_failed",
+  "demonstration_passed": false,
+  "publication_scope": "last controller observation; unknown outcomes are not teardown proof; raw diagnostics and screenshots withheld",
+  "result": "failed",
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "secret_scan_state": "not_started",
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+}

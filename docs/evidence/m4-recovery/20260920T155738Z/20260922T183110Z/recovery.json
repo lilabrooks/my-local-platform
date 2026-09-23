@@ -1,0 +1,19 @@
+{
+  "cleanup_verified": true,
+  "controller_snapshot_sha256": "a4b5e447cd41f52af7adc7ab133806532dc7165dc8ab5ac8f4ec7f965a0f2d72",
+  "demonstration_passed": false,
+  "evidence_sha256": {
+    "identity.json": "deef17b3c5d28aa03e4e48d7a62434f8d7ff37d1c3465866f6d43102a5eada14",
+    "inventory.json": "d0cf7fbdf33d8d721d000f9d993b27522ae58be3f1804655c210fdee1e942acb",
+    "state.json": "2a377f6aa3adfe7275b0ac56f920d7595e05e9c0ce26f18fa8a8c81a28db6aba"
+  },
+  "identity_verified": true,
+  "observation_id": "20260922T183110Z",
+  "observed_at": "2026-09-22T18:31:18Z",
+  "original_publication_sha256": "712a8987f83a0e44e175aea2e2eb0bc16d9704ccd2531619a58935c61765bbaa",
+  "result": "recovered",
+  "run_id": "20260920T155738Z",
+  "schema_version": 1,
+  "session_sha256": "0787556c1008f4f8aad5aab7466fb27319bb2630fac19c852f8b2d6b77b2f2c6",
+  "source_commit": "474dca7e8e121c08f2951b02871cfe4c4b87e2ee"
+}

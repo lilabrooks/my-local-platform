@@ -1,0 +1,11 @@
+# Gitleaks loads this file from the scan root in `make lint` and CI. It keeps
+# every default rule and adds one narrow exception; see "Accepted Gitleaks
+# findings" in docs/repository-file-checks.md.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "SHA-256 digest of the private secret-scan report in published M4 evidence"
+regexTarget = "line"
+regexes = ['''"secret_scan_sha256": "[0-9a-f]{64}"''']

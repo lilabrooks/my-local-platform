@@ -127,6 +127,31 @@ class LiveRunMakeTargetTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
 
+    def test_live_stop_records_the_requested_reason(self):
+        for extra, reason in (
+            ([], "evidence_complete"),
+            (["AWS_STOP_REASON=infrastructure_failed"], "infrastructure_failed"),
+        ):
+            with self.subTest(reason=reason):
+                result = subprocess.run(
+                    [
+                        "make",
+                        "--no-print-directory",
+                        "--dry-run",
+                        "aws-live-stop",
+                        "AWS_RUN_ID=20260908T000000Z",
+                        *extra,
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f'--reason "{reason}"', result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

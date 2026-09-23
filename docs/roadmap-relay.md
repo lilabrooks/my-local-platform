@@ -1,6 +1,6 @@
 # Roadmap: `relay`, the first application
 
-Date: 2026-08-24 · Last audited: 2026-09-20
+Date: 2026-08-24 · Last audited: 2026-09-22
 Status: **M0 through M3 are built. M3's whole-application proof passed on
 2026-09-05, and [#90](https://github.com/lilabrooks/my-local-platform/issues/90)
 is closed. M4's contract, local foundation, AWS deployment render, and local
@@ -11,8 +11,11 @@ rehearsal are complete.** Cheap-tier staging in
 [staging packet](evidence/m4-staging/20260920T155738Z/publication.json)
 records immutable images, the reviewed hourly plan and GO. Final inventory
 found no hourly runtime. M4's only remaining issue is
-[#97](https://github.com/lilabrooks/my-local-platform/issues/97), waiting for
-separate owner approval of the paid validation and teardown.
+[#97](https://github.com/lilabrooks/my-local-platform/issues/97). Its approved
+2026-09-22 attempt failed before workload deployment because the EKS network
+add-on was missing. The [attempt record](reviews/m4-97-live-attempt-20260922.md)
+tracks cleanup and the local repair. A repaired candidate needs qualification,
+new staging and separate approval before another paid run.
 
 `relay` is a webhook delivery service: tenants POST events to it, it durably
 buffers them in Kafka partitioned by tenant, and a consumer group delivers them
@@ -59,6 +62,8 @@ revalidate the unused MSK Provisioned alternative.
 The selected topology modeled **$1.0219/hour** on 2026-09-20, including MSK
 Serverless and its 13 partitions, EKS, two nodes, NAT and its public IPv4,
 and RDS with storage. This is a dated estimate, not a measured session bill.
+The 2026-09-22 worker capacity amendment adds a third node, which raises the
+model to $1.0635/hour at the same rates.
 The approved window is three hours, with cleanup starting at 150 minutes,
 a $1.25/hour shape limit and a $5 session maximum. Refresh expired or changed
 AWS pricing observations before the paid run.
@@ -411,7 +416,7 @@ healthy`.
 **The owner accepted the contract in
 [ADR 0010](adr/0010-live-aws-relay-contract.md) on 2026-09-05. Live AWS
 validation remains unverified and requires separate owner authorization. The
-fixed paid shape is estimated at $1.02/hour, capped at $1.25/hour and $5 total,
+fixed paid shape is estimated at $1.06/hour, capped at $1.25/hour and $5 total,
 and ends in destroy.**
 
 Status: the contract, foundation, local qualification and cheap staging are
@@ -474,7 +479,7 @@ across that sequence:
 | Data | 12-partition delivery topic, one-partition DLQ, two ingest replicas, deliver scales 1 to 12 |
 | Exposure | EKS API restricted to the operator; workload UIs and sink reached only by `kubectl port-forward` |
 | Session | three hours, destroy begins at 2 hours 30 minutes, $1.25/hour shape gate, $5 maximum |
-| Terminal condition | success or failure runs state-backed destroy, service-native empty inventories, and a settled cost capture |
+| Terminal condition | success or failure runs state-backed destroy once process exit is confirmed (otherwise cleanup is blocked for owner recovery), service-native empty inventories, and a settled cost capture |
 
 The three foundation issues consume #91 independently: issue #92 proves IAM
 transport, issue #93 produces guarded Terraform, and issue #101 makes shutdown

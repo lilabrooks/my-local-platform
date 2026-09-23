@@ -23,4 +23,6 @@ the rehearsal; do not repeat a run solely to fill this template. -->
 - AWS decision: <!-- Local-only, cheap-tier check, or staged hourly session;
   explain why and name untested surfaces. For live work, link the authority,
   applicable budget/deadlines, cleanup scope/result, and required billing status.
+  For new or changed AWS boundaries, link the dependency review, resolved
+  versions/order, early readiness checks and phase/cleanup time budgets.
   A local-only change needs no AWS approval or billing receipt. -->

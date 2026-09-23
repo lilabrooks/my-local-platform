@@ -237,7 +237,7 @@ class ImageStageTest(unittest.TestCase):
                     "eks": {
                         "kubernetes_version": "1.35",
                         "node_capacity_type": "SPOT",
-                        "node_desired": 2,
+                        "node_desired": 3,
                         "node_maximum": 3,
                     },
                     "rds": {"engine_version": "17.11"},
@@ -460,11 +460,11 @@ class ImageStageTest(unittest.TestCase):
 
         self.assertEqual(
             receipt["total_hourly_usd"],
-            "1.021850684931506849315068493",
+            "1.063450684931506849315068493",
         )
         self.assertTrue(receipt["gate"]["passed"])
         markdown = STAGE.price_markdown(receipt)
-        self.assertIn("$1.0219/hour", markdown)
+        self.assertIn("$1.0635/hour", markdown)
         self.assertIn("https://aws.amazon.com/msk/pricing/", markdown)
 
     def test_price_input_requires_an_explicit_fresh_review(self):
@@ -642,6 +642,53 @@ class ImageStageTest(unittest.TestCase):
                         "operator-one",
                         FakeRunner(),
                     )
+
+    @staticmethod
+    def set_modelled_cost(run: Path, value: float) -> None:
+        path = run / "03-plan-summary.json"
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        plan["shape"]["expected_hourly_usd"] = value
+        path.write_text(json.dumps(plan), encoding="utf-8")
+
+    def test_go_packet_rejects_terraform_cost_that_differs_from_prices(self):
+        # A valid three-worker receipt beside Terraform's two-worker model.
+        run_id = "20260908T040000Z"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = self.write_release_inputs(root, run_id)
+            self.set_modelled_cost(run, 1.0218506849315068)
+
+            with mock.patch.object(STAGE, "ROOT", root):
+                with self.assertRaisesRegex(
+                    STAGE.StageError, "Terraform and current price arithmetic differ"
+                ):
+                    STAGE.build_go_no_go(
+                        run_id,
+                        COMMIT,
+                        "us-east-1",
+                        "operator-one",
+                        FakeRunner(),
+                    )
+
+    def test_go_packet_accepts_terraform_float_rounding_of_the_price_total(self):
+        run_id = "20260908T040000Z"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = self.write_release_inputs(root, run_id)
+            price = json.loads((run / "02-prices.json").read_text(encoding="utf-8"))
+            # Terraform reports its model as a JSON float, not a Decimal string.
+            self.set_modelled_cost(run, float(price["total_hourly_usd"]))
+
+            with mock.patch.object(STAGE, "ROOT", root):
+                receipt = STAGE.build_go_no_go(
+                    run_id,
+                    COMMIT,
+                    "us-east-1",
+                    "operator-one",
+                    FakeRunner(),
+                )
+
+        self.assertEqual(receipt["decision"], "go")
 
     def test_go_packet_rejects_weakened_state_backend(self):
         run_id = "20260908T040000Z"

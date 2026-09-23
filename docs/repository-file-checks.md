@@ -499,10 +499,23 @@ gitleaks detect --source=. --no-banner --redact
 
 CI checks out full history before `make lint`, so Gitleaks can detect a secret
 that was committed and later removed. Findings are redacted in command output.
-The local result covers the history available in the local clone.
+The local result covers the history available in the local clone. In a git
+worktree, the Docker fallback sees none: the worktree's `.git` file points
+outside the mounted directory, so Gitleaks reports "0 commits scanned" and
+passes without checking anything. Run it from a normal clone instead.
 
 Gitleaks accepts a local binary only when it reports version 8.30.1. Its Docker
 fallback is `zricethezav/gitleaks:v8.30.1`.
+
+#### Accepted Gitleaks findings
+
+[`.gitleaks.toml`](../.gitleaks.toml) keeps every default rule and allows one
+line shape: `"secret_scan_sha256": "<64 hex characters>"`. Published M4 evidence
+records that field as the SHA-256 of the private secret-scan report. The key
+contains "secret", so the default `generic-api-key` rule reports the digest as a
+credential. It is a digest, and the published packet is hash-bound, so the field
+cannot be renamed. The same kind of value under any other key is still
+reported.
 
 ## Go build and test checks
 

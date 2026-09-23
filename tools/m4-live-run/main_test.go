@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,9 +29,10 @@ type fakeExecutor struct {
 	calls        [][]string
 	environments [][]string
 	statuses     map[string][]int
+	failures     map[string]error
 }
 
-func (f *fakeExecutor) Run(arguments []string, environment []string, output io.Writer) int {
+func (f *fakeExecutor) Run(arguments []string, environment []string, output io.Writer) (int, error) {
 	f.calls = append(f.calls, append([]string(nil), arguments...))
 	f.environments = append(f.environments, append([]string(nil), environment...))
 	target := ""
@@ -51,7 +53,7 @@ func (f *fakeExecutor) Run(arguments []string, environment []string, output io.W
 	if output != nil {
 		_, _ = io.WriteString(output, "fake "+target+"\n")
 	}
-	return status
+	return status, f.failures[target]
 }
 
 func (f *fakeExecutor) Signal(os.Signal) {}
@@ -64,9 +66,9 @@ type blockingExecutor struct {
 	signal   os.Signal
 }
 
-func (b *blockingExecutor) Run([]string, []string, io.Writer) int {
+func (b *blockingExecutor) Run([]string, []string, io.Writer) (int, error) {
 	<-b.released
-	return 130
+	return 130, nil
 }
 
 func (b *blockingExecutor) Signal(value os.Signal) {
@@ -83,9 +85,9 @@ type stubbornExecutor struct {
 	cleared  bool
 }
 
-func (s *stubbornExecutor) Run([]string, []string, io.Writer) int {
+func (s *stubbornExecutor) Run([]string, []string, io.Writer) (int, error) {
 	<-s.released
-	return 137
+	return 137, nil
 }
 
 func (s *stubbornExecutor) Signal(value os.Signal) {
@@ -100,11 +102,45 @@ func (s *stubbornExecutor) ClearPending() {
 	s.mu.Unlock()
 }
 
+// groupedExecutor is a stubborn apply whose process group is known.
+type groupedExecutor struct {
+	stubbornExecutor
+	group int
+}
+
+func (g *groupedExecutor) ActiveGroup() int { return g.group }
+
+// killDeliveryExecutor reports apply's exit as SIGKILL is sent, so the exit
+// result and the final deadline are both ready when stopApply next selects.
+type killDeliveryExecutor struct {
+	result  chan<- executionResult
+	signals []os.Signal
+}
+
+func (k *killDeliveryExecutor) Run([]string, []string, io.Writer) (int, error) { return 0, nil }
+
+func (k *killDeliveryExecutor) Signal(value os.Signal) {
+	k.signals = append(k.signals, value)
+	if value == syscall.SIGKILL {
+		k.result <- executionResult{status: 137}
+	}
+}
+
+func (k *killDeliveryExecutor) ClearPending() {}
+
+// firedTimer stands in for a grace period that has already expired.
+func firedTimer(time.Duration) <-chan time.Time {
+	fired := make(chan time.Time, 1)
+	fired <- time.Now()
+	return fired
+}
+
 type fakeAWS struct {
 	account         string
 	accountFailures int
 	accountCalls    int
 	logsPassed      bool
+	logCalls        int
 }
 
 func (f *fakeAWS) Account() (string, error) {
@@ -116,6 +152,7 @@ func (f *fakeAWS) Account() (string, error) {
 }
 
 func (f *fakeAWS) DeleteRuntimeLogs(output io.Writer) bool {
+	f.logCalls++
 	_, _ = io.WriteString(output, "fake log cleanup\n")
 	return f.logsPassed
 }
@@ -204,7 +241,8 @@ func TestValidateSessionRequiresFixedDeadlines(t *testing.T) {
 	}
 }
 
-func TestPreSessionRefusalDoesNotSpendRunOrDestroy(t *testing.T) {
+func prepareCommittedRun(t *testing.T) (string, string, string) {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(".evidence/\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -234,6 +272,11 @@ func TestPreSessionRefusalDoesNotSpendRunOrDestroy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	return root, raw, commit
+}
+
+func TestPreSessionRefusalDoesNotSpendRunOrDestroy(t *testing.T) {
+	root, raw, commit := prepareCommittedRun(t)
 	executor := &fakeExecutor{statuses: map[string][]int{"verify-go-no-go": {2}}}
 	c := &controller{root: root, runID: testRunID, commit: commit, profile: "fixture", region: "us-east-1", executor: executor}
 	if status := c.run(make(chan os.Signal)); status != 2 {
@@ -246,6 +289,73 @@ func TestPreSessionRefusalDoesNotSpendRunOrDestroy(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(raw, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("refusal left %s: %v", name, err)
 		}
+	}
+}
+
+type sessionExecutor struct {
+	fakeExecutor
+	raw    string
+	commit string
+}
+
+func (s *sessionExecutor) Run(arguments []string, environment []string, output io.Writer) (int, error) {
+	status, err := s.fakeExecutor.Run(arguments, environment, output)
+	if err == nil && status == 0 && len(arguments) > 2 && arguments[2] == "start-session" {
+		session := testSession()
+		session.Commit = s.commit
+		if writeErr := writeJSONAtomic(filepath.Join(s.raw, "00-session.json"), session); writeErr != nil {
+			return 1, nil
+		}
+	}
+	return status, err
+}
+
+func TestControllerRequiresConfirmedApplyExitBeforeCleanup(t *testing.T) {
+	for _, unconfirmed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unconfirmed), func(t *testing.T) {
+			root, raw, commit := prepareCommittedRun(t)
+			writeTestJSON(t, filepath.Join(raw, "01-identity.txt"), map[string]any{
+				"aws": map[string]string{"account_id": testAccount},
+			})
+			runner := &sessionExecutor{
+				fakeExecutor: fakeExecutor{statuses: map[string][]int{"aws-up": {137}}},
+				raw:          raw, commit: commit,
+			}
+			if unconfirmed {
+				runner.failures = map[string]error{"aws-up": errProcessExitUnconfirmed}
+			}
+			aws := &fakeAWS{account: testAccount, logsPassed: true}
+			current := &controller{
+				root: root, raw: raw, runID: testRunID, commit: commit,
+				operator: "fixture", profile: "fixture", region: "us-east-1",
+				executor: runner, aws: aws, now: func() time.Time { return testStarted },
+			}
+
+			if status := current.run(make(chan os.Signal)); status != 1 {
+				t.Fatalf("status=%d, want failed run", status)
+			}
+			var state controllerState
+			if err := readJSON(filepath.Join(raw, "controller-state.json"), &state, "state"); err != nil {
+				t.Fatal(err)
+			}
+			if unconfirmed {
+				if len(runner.calls) != 3 || aws.accountCalls != 0 || aws.logCalls != 0 {
+					t.Fatalf("commands ran after unconfirmed apply: %v; AWS=%+v", runner.calls, aws)
+				}
+				if state.Phase != "cleanup_failed" || state.CleanupBlockedReason != "process_exit_unconfirmed" ||
+					state.CleanupVerified == nil || *state.CleanupVerified || state.ApplyExit != nil ||
+					state.DestroyStartedAt != "" || state.DestroyExit != nil || state.CleanupFinishedAt != "" {
+					t.Fatalf("unconfirmed exit was not preserved: %+v", state)
+				}
+				status, err := currentStatus(root, testRunID, testStarted)
+				if err != nil || status["cleanup_blocked_reason"] != "process_exit_unconfirmed" {
+					t.Fatalf("operator status hid the blocked cleanup: %v, %v", status, err)
+				}
+			} else if state.Phase != "complete" || state.ApplyExit == nil || *state.ApplyExit != 137 ||
+				state.Result != "apply_failed_cleanup_complete" || state.CleanupVerified == nil || !*state.CleanupVerified {
+				t.Fatalf("confirmed failed apply did not clean up: %+v", state)
+			}
+		})
 	}
 }
 
@@ -271,10 +381,10 @@ func TestApplyIsInterruptedAtDestroyDeadline(t *testing.T) {
 		now:      func() time.Time { return deadline },
 	}
 
-	status := current.runApply(deadline, make(chan os.Signal))
+	status, err := current.runApply(deadline, make(chan os.Signal))
 
-	if status != 130 || current.stopReason != "destroy_deadline" {
-		t.Fatalf("status=%d reason=%q", status, current.stopReason)
+	if err != nil || status != 130 || current.stopReason != "destroy_deadline" {
+		t.Fatalf("status=%d reason=%q error=%v", status, current.stopReason, err)
 	}
 	if runner.signal != os.Interrupt {
 		t.Fatalf("got signal %v, want interrupt", runner.signal)
@@ -299,13 +409,13 @@ func TestApplyEscalatesAndReturnsWhenChildIgnoresSignals(t *testing.T) {
 		after:    immediate,
 	}
 
-	status := current.runApply(deadline, make(chan os.Signal))
+	status, err := current.runApply(deadline, make(chan os.Signal))
 	close(runner.released)
 
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	if status != 124 {
-		t.Fatalf("status=%d, want 124", status)
+	if status != 124 || !errors.Is(err, errProcessExitUnconfirmed) {
+		t.Fatalf("status=%d error=%v, want unconfirmed exit", status, err)
 	}
 	want := []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
 	if len(runner.signals) != len(want) {
@@ -329,21 +439,284 @@ func TestRepeatedOperatorSignalsEscalateApplyImmediately(t *testing.T) {
 	signals <- syscall.SIGINT
 	current := &controller{
 		executor: runner,
-		after: func(time.Duration) <-chan time.Time {
+		after: func(delay time.Duration) <-chan time.Time {
+			if delay == applyKillGrace {
+				return time.After(time.Millisecond)
+			}
 			return nil
 		},
 	}
 
-	status := current.stopApply(make(chan int), signals, syscall.SIGINT)
+	status, err := current.stopApply(make(chan executionResult), signals, syscall.SIGINT)
 
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	if status != 124 {
-		t.Fatalf("status=%d, want 124", status)
+	if status != 124 || !errors.Is(err, errProcessExitUnconfirmed) {
+		t.Fatalf("status=%d error=%v, want unconfirmed exit", status, err)
 	}
 	want := []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
 	if !slices.Equal(runner.signals, want) {
 		t.Fatalf("signals=%v, want %v", runner.signals, want)
+	}
+}
+
+func TestApplyEscalationSurvivesHeartbeats(t *testing.T) {
+	runner := &stubbornExecutor{released: make(chan struct{})}
+	var delays []time.Duration
+	current := &controller{
+		raw: t.TempDir(), runID: testRunID, executor: runner, now: time.Now,
+		after: func(delay time.Duration) <-chan time.Time {
+			delays = append(delays, delay)
+			// A real heartbeat must arrive before each shortened grace expires.
+			return time.After(1500 * time.Millisecond)
+		},
+	}
+	applyResult := make(chan executionResult, 1)
+	done := make(chan executionResult, 1)
+	go func() {
+		status, err := current.stopApply(applyResult, make(chan os.Signal), syscall.SIGINT)
+		done <- executionResult{status: status, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		if outcome.status != 124 || !errors.Is(outcome.err, errProcessExitUnconfirmed) {
+			t.Fatalf("result=%+v, want unconfirmed exit", outcome)
+		}
+	case <-time.After(7 * time.Second):
+		applyResult <- executionResult{status: 130}
+		<-done
+		t.Fatal("heartbeats prevented escalation from completing")
+	}
+	if !slices.Equal(delays, []time.Duration{applyInterruptGrace, applyTerminateGrace, applyKillGrace}) {
+		t.Fatalf("grace periods restarted: %v", delays)
+	}
+	if !slices.Equal(runner.signals, []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Fatalf("signals=%v", runner.signals)
+	}
+	if _, err := os.Stat(filepath.Join(current.raw, "controller-state.json")); err != nil {
+		t.Fatalf("heartbeat did not write state during escalation: %v", err)
+	}
+}
+
+func TestRepeatedSignalsDoNotSkipExitConfirmation(t *testing.T) {
+	runner := &stubbornExecutor{released: make(chan struct{})}
+	killed := make(chan struct{})
+	current := &controller{
+		raw: t.TempDir(), executor: runner, now: time.Now,
+		after: func(delay time.Duration) <-chan time.Time {
+			if delay == applyKillGrace {
+				close(killed)
+			}
+			return nil
+		},
+	}
+	signals := make(chan os.Signal, 3)
+	for range 3 {
+		signals <- syscall.SIGINT
+	}
+	applyResult := make(chan executionResult, 1)
+	done := make(chan executionResult, 1)
+	go func() {
+		status, err := current.stopApply(applyResult, signals, syscall.SIGINT)
+		done <- executionResult{status: status, err: err}
+	}()
+	select {
+	case <-killed:
+	case <-time.After(2 * time.Second):
+		applyResult <- executionResult{status: 137}
+		<-done
+		t.Fatal("operator signals did not reach SIGKILL")
+	}
+	select {
+	case outcome := <-done:
+		t.Fatalf("stop returned without an apply exit: %+v", outcome)
+	case <-time.After(50 * time.Millisecond):
+	}
+	applyResult <- executionResult{status: 137}
+	select {
+	case outcome := <-done:
+		if outcome.err != nil || outcome.status != 137 {
+			t.Fatalf("confirmed exit result=%+v", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("confirmed exit did not release the stop")
+	}
+	if !slices.Equal(runner.signals, []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Fatalf("signals=%v", runner.signals)
+	}
+}
+
+func TestFinalDeadlineKeepsAnApplyExitThatArrivedWithIt(t *testing.T) {
+	raw := t.TempDir()
+	// Go chooses at random among ready select cases. Without the final check
+	// for a result, about half of these stops would report an unconfirmed exit.
+	for attempt := range 200 {
+		result := make(chan executionResult, 1)
+		runner := &killDeliveryExecutor{result: result}
+		current := &controller{
+			raw: raw, runID: testRunID, executor: runner, now: time.Now, after: firedTimer,
+		}
+
+		status, err := current.stopApply(result, make(chan os.Signal), syscall.SIGINT)
+
+		if err != nil || status != 137 {
+			t.Fatalf("attempt %d: status=%d error=%v, want the delivered exit", attempt, status, err)
+		}
+		if !slices.Equal(runner.signals, []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}) {
+			t.Fatalf("attempt %d: signals=%v", attempt, runner.signals)
+		}
+	}
+}
+
+func TestUnconfirmedApplyStopNamesItsProcessGroup(t *testing.T) {
+	runner := &groupedExecutor{stubbornExecutor: stubbornExecutor{released: make(chan struct{})}, group: 4242}
+	current := &controller{
+		raw: t.TempDir(), runID: testRunID, executor: runner, now: time.Now, after: firedTimer,
+	}
+
+	status, err := current.stopApply(make(chan executionResult), make(chan os.Signal), syscall.SIGINT)
+
+	if status != 124 || !errors.Is(err, errProcessExitUnconfirmed) {
+		t.Fatalf("status=%d error=%v, want unconfirmed exit", status, err)
+	}
+	if !strings.Contains(err.Error(), "(process group 4242)") {
+		t.Fatalf("error does not name the process group: %v", err)
+	}
+}
+
+// releaseAfterFirstSignal lets a stubborn apply exit once it has been
+// signalled, so a test sees only the signals sent before apply exits.
+func releaseAfterFirstSignal(t *testing.T, runner *stubbornExecutor) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runner.mu.Lock()
+		count := len(runner.signals)
+		runner.mu.Unlock()
+		if count > 0 || time.Now().After(deadline) {
+			if count == 0 {
+				t.Error("apply received no stop signal")
+			}
+			close(runner.released)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStopRequestDuringApplyStartsWithInterrupt(t *testing.T) {
+	raw := t.TempDir()
+	writeTestJSON(t, filepath.Join(raw, "stop-request.json"), stopRequest{
+		SchemaVersion: 1,
+		RunID:         testRunID,
+		Reason:        "infrastructure_failed",
+		RequestedAt:   utcText(testStarted),
+	})
+	runner := &stubbornExecutor{released: make(chan struct{})}
+	signals := make(chan os.Signal, 1)
+	// requestStop wakes a controller that is applying with SIGTERM.
+	signals <- syscall.SIGTERM
+	current := &controller{
+		runID:    testRunID,
+		commit:   testCommit,
+		profile:  "test-profile",
+		region:   "us-east-1",
+		raw:      raw,
+		executor: runner,
+		now:      func() time.Time { return testStarted },
+		after: func(time.Duration) <-chan time.Time {
+			return nil
+		},
+	}
+	go releaseAfterFirstSignal(t, runner)
+
+	status, err := current.runApply(testStarted.Add(destroyAfter), signals)
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if err != nil || status != 137 {
+		t.Fatalf("status=%d error=%v, want 137", status, err)
+	}
+	if !slices.Equal(runner.signals, []os.Signal{syscall.SIGINT}) {
+		t.Fatalf("signals=%v, want SIGINT alone before apply exits", runner.signals)
+	}
+	if current.stopReason != "infrastructure_failed" {
+		t.Fatalf("reason=%q, want the stop request's reason", current.stopReason)
+	}
+}
+
+func TestStateWriteFailureInterruptsApplyWithSIGINT(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &stubbornExecutor{released: make(chan struct{})}
+	current := &controller{
+		runID:    testRunID,
+		commit:   testCommit,
+		profile:  "test-profile",
+		region:   "us-east-1",
+		raw:      filepath.Join(blocker, "raw"),
+		executor: runner,
+		now:      func() time.Time { return testStarted },
+		after: func(time.Duration) <-chan time.Time {
+			return nil
+		},
+	}
+	go releaseAfterFirstSignal(t, runner)
+
+	status, err := current.runApply(testStarted.Add(destroyAfter), make(chan os.Signal))
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if err != nil || status != 137 || current.stopReason != "state_write_failed" {
+		t.Fatalf("status=%d reason=%q error=%v", status, current.stopReason, err)
+	}
+	if !slices.Equal(runner.signals, []os.Signal{syscall.SIGINT}) {
+		t.Fatalf("signals=%v, want SIGINT alone before apply exits", runner.signals)
+	}
+}
+
+func TestRequestStopValidatesReasonAndWakesAnApplyingController(t *testing.T) {
+	root := t.TempDir()
+	raw := prepareRun(t, root)
+	writeTestJSON(t, filepath.Join(raw, "controller-state.json"), controllerState{
+		SchemaVersion: 1,
+		RunID:         testRunID,
+		Commit:        testCommit,
+		ControllerPID: os.Getpid(),
+		Phase:         "applying",
+		UpdatedAt:     utcText(testStarted),
+	})
+	signalled := 0
+	previous := signalProcess
+	signalProcess = func(pid int, _ syscall.Signal) error {
+		signalled = pid
+		return nil
+	}
+	defer func() { signalProcess = previous }()
+
+	for _, reason := range []string{"Infrastructure failed", "capture-failed", "1_failed", strings.Repeat("a", 65)} {
+		if _, err := requestStop(root, testRunID, reason, testStarted); err == nil || !strings.Contains(err.Error(), "stop reason must") {
+			t.Fatalf("reason %q: got %v, want a reason error", reason, err)
+		}
+	}
+	if signalled != 0 {
+		t.Fatal("a rejected reason signalled the controller")
+	}
+	if _, err := os.Stat(filepath.Join(raw, "stop-request.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a rejected reason wrote a stop request: %v", err)
+	}
+
+	path, err := requestStop(root, testRunID, "infrastructure_failed", testStarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request stopRequest
+	if err := readJSON(path, &request, "stop request"); err != nil {
+		t.Fatal(err)
+	}
+	if request.Reason != "infrastructure_failed" || signalled != os.Getpid() {
+		t.Fatalf("reason=%q signalled=%d", request.Reason, signalled)
 	}
 }
 
@@ -358,8 +731,8 @@ func TestApplyPassesControllerPIDAsMakeArgumentAndEnvironment(t *testing.T) {
 		now:      func() time.Time { return testStarted },
 	}
 
-	if status := current.runApply(testStarted.Add(destroyAfter), make(chan os.Signal)); status != 0 {
-		t.Fatalf("apply returned %d", status)
+	if status, err := current.runApply(testStarted.Add(destroyAfter), make(chan os.Signal)); err != nil || status != 0 {
+		t.Fatalf("apply returned %d, %v", status, err)
 	}
 	pid := "MLP_AWS_LIVE_CONTROLLER_PID=" + strconv.Itoa(os.Getpid())
 	if len(runner.calls) != 1 || !slices.Contains(runner.calls[0], pid) {
@@ -607,6 +980,34 @@ func TestCleanupFailureIsRecordedAndCostStillRuns(t *testing.T) {
 	}
 	if state.Phase != "cleanup_failed" || state.CostExit == nil || *state.CostExit != 0 {
 		t.Fatalf("unexpected failure state: %+v", state)
+	}
+}
+
+func TestCleanupStopsAfterAnUnconfirmedDestroyExit(t *testing.T) {
+	root := t.TempDir()
+	raw := prepareRun(t, root)
+	writeTestJSON(t, filepath.Join(raw, "01-identity.txt"), map[string]any{
+		"aws": map[string]string{"account_id": testAccount},
+	})
+	runner := &fakeExecutor{failures: map[string]error{"aws-down": errProcessExitUnconfirmed}}
+	aws := &fakeAWS{account: testAccount, logsPassed: true}
+	current := &controller{
+		root: root, raw: raw, runID: testRunID, commit: testCommit,
+		executor: runner, aws: aws, now: func() time.Time { return testStarted },
+	}
+	if status := current.cleanup(testSession(), 137); status != 1 {
+		t.Fatalf("status=%d, want failed cleanup", status)
+	}
+	if len(runner.calls) != 1 || runner.calls[0][1] != "aws-down" || aws.logCalls != 0 {
+		t.Fatalf("commands followed the unconfirmed destroy: %v; AWS=%+v", runner.calls, aws)
+	}
+	var state controllerState
+	if err := readJSON(filepath.Join(raw, "controller-state.json"), &state, "state"); err != nil {
+		t.Fatal(err)
+	}
+	if state.Phase != "cleanup_failed" || state.CleanupBlockedReason != "process_exit_unconfirmed" ||
+		state.CleanupVerified == nil || *state.CleanupVerified || state.DestroyExit != nil || state.CleanupFinishedAt != "" {
+		t.Fatalf("unconfirmed destroy was not preserved: %+v", state)
 	}
 }
 
@@ -995,8 +1396,134 @@ func TestProcessExecutorClearsPendingSignalAndMapsExitStatus(t *testing.T) {
 	runner.Signal(syscall.SIGTERM)
 	runner.ClearPending()
 
-	if status := runner.Run([]string{"/bin/sh", "-c", "exit 7"}, nil, io.Discard); status != 7 {
-		t.Fatalf("status=%d, want 7", status)
+	if status, err := runner.Run([]string{"/bin/sh", "-c", "exit 7"}, nil, io.Discard); err != nil || status != 7 {
+		t.Fatalf("status=%d error=%v, want 7", status, err)
+	}
+}
+
+func TestProcessExecutorRejectsUnconfirmedExitAndReuse(t *testing.T) {
+	oldGrace, oldKillGrace, oldPoll := groupExitGrace, groupKillGrace, groupPollInterval
+	groupExitGrace, groupKillGrace, groupPollInterval = 0, time.Millisecond, time.Millisecond
+	defer func() { groupExitGrace, groupKillGrace, groupPollInterval = oldGrace, oldKillGrace, oldPoll }()
+	root := t.TempDir()
+	runner := &processExecutor{
+		root:        root,
+		groupSignal: func(int, syscall.Signal) error { return syscall.EPERM },
+	}
+	if _, err := runner.Run([]string{"/bin/sh", "-c", "exit 0"}, nil, io.Discard); !errors.Is(err, errProcessExitUnconfirmed) {
+		t.Fatalf("unconfirmed group exit returned %v", err)
+	}
+	marker := filepath.Join(root, "second-command")
+	if _, err := runner.Run([]string{"/bin/sh", "-c", `: > "$1"`, "sh", marker}, nil, io.Discard); !errors.Is(err, errProcessExitUnconfirmed) ||
+		!strings.Contains(err.Error(), "process group ") {
+		t.Fatalf("executor reuse returned %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second command was started: %v", err)
+	}
+}
+
+func TestGroupWaitRejectsFailedKillAndSurvivingMembers(t *testing.T) {
+	oldGrace, oldKillGrace, oldPoll := groupExitGrace, groupKillGrace, groupPollInterval
+	groupExitGrace, groupKillGrace, groupPollInterval = 0, time.Millisecond, time.Millisecond
+	defer func() { groupExitGrace, groupKillGrace, groupPollInterval = oldGrace, oldKillGrace, oldPoll }()
+	for _, probeErr := range []error{nil, syscall.EPERM} {
+		for _, killErr := range []error{syscall.EPERM, syscall.EINVAL, nil} {
+			kills := 0
+			err := waitForGroupExit(42, func(_ int, value syscall.Signal) error {
+				if value == syscall.SIGKILL {
+					kills++
+					return killErr
+				}
+				return probeErr // The group remains present even after the kill request.
+			})
+			if !errors.Is(err, errProcessExitUnconfirmed) || kills != 1 {
+				t.Fatalf("probe error=%v kill error=%v: result=%v kills=%d", probeErr, killErr, err, kills)
+			}
+		}
+	}
+}
+
+func TestGroupWaitKeepsWaitingThroughPermissionErrors(t *testing.T) {
+	oldGrace, oldPoll := groupExitGrace, groupPollInterval
+	groupExitGrace, groupPollInterval = time.Second, time.Millisecond
+	defer func() { groupExitGrace, groupPollInterval = oldGrace, oldPoll }()
+	probes, kills := 0, 0
+
+	err := waitForGroupExit(42, func(_ int, value syscall.Signal) error {
+		if value == syscall.SIGKILL {
+			kills++
+			return nil
+		}
+		probes++
+		if probes < 3 {
+			return syscall.EPERM // A member that has exited but awaits reaping.
+		}
+		return syscall.ESRCH
+	})
+
+	if err != nil || probes != 3 || kills != 0 {
+		t.Fatalf("result=%v probes=%d kills=%d, want exit confirmed after EPERM", err, probes, kills)
+	}
+}
+
+func TestGroupWaitConfirmsExitAfterSIGKILLReturnsEPERM(t *testing.T) {
+	oldGrace, oldKillGrace, oldPoll := groupExitGrace, groupKillGrace, groupPollInterval
+	groupExitGrace, groupKillGrace, groupPollInterval = 0, time.Second, time.Millisecond
+	defer func() { groupExitGrace, groupKillGrace, groupPollInterval = oldGrace, oldKillGrace, oldPoll }()
+	kills, probesAfterKill := 0, 0
+
+	// The last member awaits reaping through the grace and the kill, then its
+	// reaping removes the group during the kill grace.
+	err := waitForGroupExit(42, func(_ int, value syscall.Signal) error {
+		if value == syscall.SIGKILL {
+			kills++
+			return syscall.EPERM
+		}
+		if kills == 0 {
+			return syscall.EPERM
+		}
+		probesAfterKill++
+		return syscall.ESRCH
+	})
+
+	if err != nil || kills != 1 || probesAfterKill != 1 {
+		t.Fatalf("result=%v kills=%d probes after kill=%d, want exit confirmed after SIGKILL returned EPERM",
+			err, kills, probesAfterKill)
+	}
+}
+
+func TestGroupWaitOutlastsAMemberAwaitingItsReaper(t *testing.T) {
+	previous := groupExitGrace
+	groupExitGrace = 5 * time.Second
+	defer func() { groupExitGrace = previous }()
+	command := exec.Command("/bin/sh", "-c", "exit 0")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	group := command.Process.Pid
+	// Leave the exited leader unreaped, so the group's only member is a
+	// zombie: macOS then reports EPERM for the group, and Linux success.
+	time.Sleep(200 * time.Millisecond)
+	result := make(chan error, 1)
+	go func() {
+		result <- waitForGroupExit(group, func(target int, value syscall.Signal) error {
+			return syscall.Kill(-target, value)
+		})
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("group wait failed while its member awaited reaping: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("group wait did not finish after the member was reaped")
 	}
 }
 
@@ -1004,9 +1531,9 @@ func TestProcessExecutorStartsAProcessGroupAndSignalsIt(t *testing.T) {
 	root := t.TempDir()
 	ready := filepath.Join(root, "ready")
 	runner := &processExecutor{root: root}
-	result := make(chan int, 1)
+	result := make(chan executionResult, 1)
 	go func() {
-		result <- runner.Run(
+		status, err := runner.Run(
 			[]string{
 				"/bin/sh",
 				"-c",
@@ -1017,6 +1544,7 @@ func TestProcessExecutorStartsAProcessGroupAndSignalsIt(t *testing.T) {
 			nil,
 			io.Discard,
 		)
+		result <- executionResult{status: status, err: err}
 	}()
 	t.Cleanup(func() { runner.Signal(syscall.SIGKILL) })
 
@@ -1043,14 +1571,117 @@ func TestProcessExecutorStartsAProcessGroupAndSignalsIt(t *testing.T) {
 	if pgid != child.Process.Pid {
 		t.Fatalf("pgid=%d pid=%d", pgid, child.Process.Pid)
 	}
+	if group := runner.ActiveGroup(); group != pgid {
+		t.Fatalf("active group=%d, want %d", group, pgid)
+	}
 	runner.Signal(syscall.SIGTERM)
 	select {
-	case status := <-result:
-		if status != 42 {
-			t.Fatalf("status=%d, want 42", status)
+	case outcome := <-result:
+		if outcome.err != nil || outcome.status != 42 {
+			t.Fatalf("result=%+v, want 42", outcome)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("signalled process group did not exit")
+	}
+	if group := runner.ActiveGroup(); group != 0 {
+		t.Fatalf("active group=%d after confirmed exit", group)
+	}
+}
+
+func TestProcessExecutorWaitsForTheWholeProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	finished := filepath.Join(root, "finished")
+	runner := &processExecutor{root: root}
+
+	// The shell exits at once. Its background member keeps the group alive
+	// without holding the output pipe, as Terraform outlived make.
+	status, runErr := runner.Run(
+		[]string{"/bin/sh", "-c", `(sleep 1; : > "$1") >/dev/null 2>&1 & exit 3`, "sh", finished},
+		nil,
+		io.Discard,
+	)
+
+	if runErr != nil || status != 3 {
+		t.Fatalf("status=%d error=%v, want 3", status, runErr)
+	}
+	if _, err := os.Stat(finished); err != nil {
+		t.Fatalf("Run returned before its process group exited: %v", err)
+	}
+}
+
+func TestProcessExecutorKillsGroupMembersThatOutliveTheGrace(t *testing.T) {
+	previous := groupExitGrace
+	groupExitGrace = 200 * time.Millisecond
+	defer func() { groupExitGrace = previous }()
+	root := t.TempDir()
+	leader := filepath.Join(root, "leader")
+	runner := &processExecutor{root: root}
+	started := time.Now()
+
+	status, runErr := runner.Run(
+		[]string{
+			"/bin/sh",
+			"-c",
+			`echo $$ > "$1"; (trap '' INT TERM; sleep 30) >/dev/null 2>&1 & exit 0`,
+			"sh",
+			leader,
+		},
+		nil,
+		io.Discard,
+	)
+
+	if runErr != nil || status != 0 {
+		t.Fatalf("status=%d error=%v, want 0", status, runErr)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("Run waited %s for a member that ignored signals", elapsed)
+	}
+	requireEmptyProcessGroup(t, leader)
+}
+
+func TestProcessExecutorBoundsAnOutputPipeHeldByAGroupMember(t *testing.T) {
+	previous := groupExitGrace
+	groupExitGrace = 200 * time.Millisecond
+	defer func() { groupExitGrace = previous }()
+	root := t.TempDir()
+	leader := filepath.Join(root, "leader")
+	runner := &processExecutor{root: root}
+	var output bytes.Buffer // Not a file, so exec copies it through a pipe.
+	started := time.Now()
+
+	// The shell exits at once. Its background member keeps the output pipe
+	// open, as a descendant of an interrupted make could.
+	status, runErr := runner.Run(
+		[]string{"/bin/sh", "-c", `echo $$ > "$1"; echo started; sleep 30 & exit 0`, "sh", leader},
+		nil,
+		&output,
+	)
+
+	if runErr != nil || status != 0 {
+		t.Fatalf("status=%d error=%v, want 0", status, runErr)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("Run waited %s for a member holding its output pipe", elapsed)
+	}
+	if !strings.Contains(output.String(), "started") {
+		t.Fatalf("output=%q, want the command's output", output.String())
+	}
+	requireEmptyProcessGroup(t, leader)
+}
+
+// requireEmptyProcessGroup checks the group whose leader wrote its PID to path.
+func requireEmptyProcessGroup(t *testing.T, path string) {
+	t.Helper()
+	value, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := strconv.Atoi(strings.TrimSpace(string(value)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(-group, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("process group %d still has members: %v", group, err)
 	}
 }
 

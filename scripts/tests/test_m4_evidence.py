@@ -448,6 +448,49 @@ class M4EvidenceTest(unittest.TestCase):
                     root, RUN_ID, EVIDENCE.load_redactions(redactions)
                 )
 
+    def test_failed_publication_preserves_unconfirmed_process_exit(self):
+        for during_destroy in (False, True):
+            with self.subTest(during_destroy=during_destroy), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                raw = self.create_run(root)
+                redactions = self.write_packet(raw)
+                state = {
+                    "schema_version": 1,
+                    "run_id": RUN_ID,
+                    "commit": COMMIT,
+                    "phase": "cleanup_failed",
+                    "cleanup_verified": False,
+                    "cleanup_blocked_reason": "process_exit_unconfirmed",
+                    "error": "private process diagnostics must stay private",
+                }
+                if during_destroy:
+                    state["apply_exit"] = 130
+                    state["destroy_started_at"] = "2026-09-08T21:30:00Z"
+                (raw / "controller-state.json").write_text(json.dumps(state))
+
+                destination = EVIDENCE.publish(root, RUN_ID, "failed", redactions)
+                packet = (destination / "failed-attempt.json").read_text()
+                summary = json.loads(packet)
+
+                self.assertEqual(summary["cleanup_blocked_reason"], "process_exit_unconfirmed")
+                self.assertFalse(summary["demonstration_passed"])
+                self.assertFalse(summary["checks"]["cleanup_verified"])
+                self.assertEqual(
+                    summary["checks"]["apply_exit"],
+                    {"reported_exit": 130, "status": "failed"}
+                    if during_destroy
+                    else {"reported_exit": None, "status": "unknown"},
+                )
+                self.assertEqual(
+                    summary["checks"]["destroy_exit"],
+                    {"reported_exit": None, "status": "unknown" if during_destroy else "not_run"},
+                )
+                self.assertNotIn("private process diagnostics", packet)
+                self.assertIsNone(summary["cleanup_finished_at"])
+                # A later manual recovery cannot rewrite the original failure.
+                (raw / "controller-state.json").write_text(json.dumps({**state, "phase": "complete"}))
+                EVIDENCE.verify_failed(root, RUN_ID, EVIDENCE.load_redactions(redactions))
+
     def test_passing_publication_requires_capture_and_controller_proof(self):
         for target, change in (
             ("capture-result.json", None),

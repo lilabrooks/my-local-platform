@@ -662,7 +662,7 @@ def validate_price_input(
         (
             "t3.medium on-demand upper bound",
             "t3_medium_hour",
-            Decimal("2"),
+            Decimal("3"),
             Decimal("1"),
             "instance-hour",
             "ec2",
@@ -1007,7 +1007,7 @@ def build_go_no_go(
     if shape.get("eks") != {
         "kubernetes_version": "1.35",
         "node_capacity_type": "SPOT",
-        "node_desired": 2,
+        "node_desired": 3,
         "node_maximum": 3,
     }:
         raise StageError("plan summary has the wrong EKS shape")

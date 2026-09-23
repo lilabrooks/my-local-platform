@@ -111,7 +111,14 @@ def request_stop(run_id: str) -> bool:
             handlers[sig] = signal.signal(sig, signal.SIG_IGN)
     try:
         subprocess.run(
-            ["make", "aws-live-stop", f"AWS_RUN_ID={run_id}"],
+            # Every caller is a failure or cancellation path. Without a
+            # reason, the controller would record evidence_complete.
+            [
+                "make",
+                "aws-live-stop",
+                f"AWS_RUN_ID={run_id}",
+                "AWS_STOP_REASON=capture_failed",
+            ],
             cwd=ROOT,
             timeout=30,
             check=True,

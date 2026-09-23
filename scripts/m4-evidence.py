@@ -1623,7 +1623,13 @@ def failed_summary(raw: Path, run_id: str) -> dict[str, Any]:
             if value is not None
             else (
                 "not_run"
-                if state.get("cleanup_blocked_reason") == "identity_unverified"
+                if (
+                    state.get("cleanup_blocked_reason") == "identity_unverified"
+                    or (
+                        state.get("cleanup_blocked_reason") == "process_exit_unconfirmed"
+                        and not state.get("destroy_started_at")
+                    )
+                )
                 and key != "apply_exit"
                 else "unknown"
             ),
@@ -1650,7 +1656,7 @@ def failed_summary(raw: Path, run_id: str) -> dict[str, Any]:
     )
     if not finished:
         checks["cleanup_overdue"] = None
-    return {
+    summary = {
         "schema_version": 1,
         "run_id": run_id,
         "source_commit": preflight["commit"],
@@ -1662,6 +1668,11 @@ def failed_summary(raw: Path, run_id: str) -> dict[str, Any]:
         "secret_scan_state": scan["state"],
         "publication_scope": "last controller observation; unknown outcomes are not teardown proof; raw diagnostics and screenshots withheld",
     }
+    # This fixed reason is safe to publish. Preserve the shape of historical
+    # packets and never copy arbitrary controller diagnostics into a packet.
+    if state.get("cleanup_blocked_reason") == "process_exit_unconfirmed":
+        summary["cleanup_blocked_reason"] = "process_exit_unconfirmed"
+    return summary
 
 
 def snapshot_failed_attempt(raw: Path, run_id: str) -> Path:

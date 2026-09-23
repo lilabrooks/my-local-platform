@@ -24,6 +24,9 @@ AWS_PRICE_EVIDENCE ?= .evidence/m4/$(AWS_RUN_ID)/02-prices.md
 AWS_GO_NO_GO ?= .evidence/m4/$(AWS_RUN_ID)/06-go-no-go.json
 AWS_KUBECONFIG ?= $(HOME)/.kube/config
 AWS_KUBE_CONTEXT ?= mlp-aws-$(AWS_RUN_ID)
+# Recorded as the controller's stop_reason. Name the cause when stopping a
+# failed attempt, for example AWS_STOP_REASON=infrastructure_failed.
+AWS_STOP_REASON ?= evidence_complete
 AWS_REAL_ENV = env -i \
 	HOME="$(HOME)" \
 	PATH="$(PATH)" \
@@ -829,7 +832,7 @@ aws-live-status: ## Show the active live AWS deadline and cleanup state
 .PHONY: aws-live-stop
 aws-live-stop: ## Stop evidence capture and ask the controller to clean up now
 	@test -n "$(AWS_RUN_ID)" || { echo "AWS_RUN_ID is required" >&2; exit 2; }
-	go -C tools/m4-live-run run . stop --run-id "$(AWS_RUN_ID)"
+	go -C tools/m4-live-run run . stop --run-id "$(AWS_RUN_ID)" --reason "$(AWS_STOP_REASON)"
 
 .PHONY: aws-live-rehearse
 aws-live-rehearse: ## Run the local controller and abort-path tests without AWS

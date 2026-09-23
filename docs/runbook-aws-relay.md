@@ -1,6 +1,16 @@
 # Live AWS relay validation runbook
 
-Status: #96 staging completed on 2026-09-20 UTC for frozen source
+Status: #97's approved 2026-09-22 attempt failed during worker provisioning;
+both workers reported an uninitialized CNI plugin. The session was aborted,
+and no application capture ran. See the
+[attempt and recovery record](reviews/m4-97-live-attempt-20260922.md).
+The local add-on repair requires a newly qualified candidate, new staging and
+separate paid-run approval. The historical #96 source must not be rerun. The
+same change repairs the stop path that left a node group outside state and adds
+a plan-gate review of EKS networking prerequisites. For pod capacity, the owner
+chose a third worker, so the fixed shape now runs three desired workers.
+
+Staging for #96 completed on 2026-09-20 UTC for frozen source
 `474dca7e8e121c08f2951b02871cfe4c4b87e2ee`; the issue closed when
 [PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged.
 Local run `20260920T153931Z` passed all four machine rehearsals and
@@ -9,7 +19,7 @@ The cheap dev tier was applied, both immutable images were staged, and the
 hourly plan was reviewed without applying it. GO passed at 16:13:51Z; the
 [sanitized staging packet](evidence/m4-staging/20260920T155738Z/publication.json)
 passed `verify-stage`. Final inventory at 16:13:47Z found two ECR repositories
-and no hourly runtime. #97 still requires separate paid-run approval.
+and no hourly runtime. #97 was awaiting separate paid-run approval at that point.
 See the [staging record](reviews/m4-96-staging-20260920.md) for commands,
 results, preserved hashes and the closure boundary.
 
@@ -37,10 +47,10 @@ An earlier approval does not imply a later one.
 
 | Component | Shape |
 |---|---|
-| EKS | Kubernetes 1.35 in standard support, two desired Spot `t3.medium` nodes, range 1 to 3 |
+| EKS | Kubernetes 1.35 in standard support, three desired Spot `t3.medium` nodes, range 1 to 3 |
 | MSK Serverless | one cluster, 12-partition delivery topic, one-partition DLQ |
 | RDS | one private single-AZ `db.t4g.micro`, 20 GB gp3 |
-| Relay | two ingest pods; deliver scales from 1 to 12; one relay image digest |
+| Relay | two ingest pods; KEDA scales deliver from 1 to 12, which three workers fit (see [pod capacity](#infrastructure-prerequisites)); one relay image digest |
 | Sink | one private `ClusterIP` pod |
 | Platform | KEDA, ArgoCD, Prometheus, Grafana, Tempo in EKS |
 | ECR | immutable `mlp-dev/relay` and `mlp-dev/sink` repositories; git SHA tags, digest deployments |
@@ -53,6 +63,69 @@ Pod Identity associations belong to `relay-capture`, `relay-bootstrap`, `relay-i
 `relay-deliver`, and `keda-operator`. The sink has no AWS role. KEDA uses
 `identityOwner: keda`.
 
+### Infrastructure prerequisites
+
+The resolved EKS module disables `bootstrap_self_managed_addons`. AWS's
+[CreateCluster API](https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateCluster.html#API_CreateCluster_RequestSyntax)
+documents that this suppresses VPC CNI, CoreDNS and kube-proxy. This topology
+must declare them explicitly alongside the Pod Identity agent.
+
+The EKS and VPC modules are pinned exactly. `make aws-plan` runs
+`scripts/check-aws-plan.py`, which reviews the saved plan's end state. With
+self-managed bootstrap disabled, the gate requires all four add-ons with known
+versions (an unpinned version is unknown at plan time), the VPC CNI as a
+before-compute add-on, and `AmazonEKS_CNI_Policy` on every managed node group's
+role. The summary's `eks_dependencies` records the result. The 2026-09-22 saved
+plan fails this gate.
+
+Placement is not ordering. The module creates add-ons without
+`before_compute` after the node groups, which cannot become Ready without the
+CNI. `before_compute` only removes that wait: the module starts those add-ons
+with the cluster and delays compute by 30 seconds, without waiting for them.
+CoreDNS and kube-proxy wait for the node groups and must be ready before
+application bootstrap. Save the dated `aws eks describe-addon-versions` output
+for the four pins privately with the staging evidence.
+
+The VPC CNI uses the worker role, and aws-node runs on the host network, so the
+IMDSv2 hop limit of 1 does not block it. Workload Pod Identity associations do
+not supply that permission. Changing the CNI identity is a separate reviewed
+configuration change that also needs a gate change; see
+[AWS's CNI permissions](https://docs.aws.amazon.com/eks/latest/userguide/cni-iam-role.html).
+
+Pod capacity is part of this review, and local rehearsal cannot show it:
+minikube allows 110 pods per node. With the VPC CNI's default networking, each
+`t3.medium` worker allows 17 pods, as the 2026-09-22 nodes reported. aws-node,
+kube-proxy, the Pod Identity agent and node-exporter take 1 slot each per
+worker, leaving 39 on 3 workers. The rendered stack uses 22 of them before any
+delivery pod: CoreDNS 2, KEDA 3, monitoring 5, ArgoCD 7, and relay ingest,
+sink, collector and Tempo 5. That leaves 17 for delivery pods, so KEDA's
+maximum of 12 fits with 5 spare in steady state, fewer while a Job or rollout
+runs. Let rollouts settle before load. Two workers fit only about 4, which is
+why ADR 0010's
+[worker capacity amendment](adr/0010-live-aws-relay-contract.md#worker-capacity-amendment-accepted-2026-09-22)
+raised the desired count to three, the node group's maximum.
+
+A Spot reclamation can leave two workers until a replacement joins. EKS
+launches a replacement when a worker receives a rebalance recommendation, but
+drains the old worker first if the two-minute interruption notice arrives
+before the replacement is Ready. Delivery pods beyond about 4 then wait in
+Pending. Before load, confirm three Ready, schedulable workers and record each
+worker's allocatable pod count: observe it on the new cluster rather than
+assuming 17. Recheck this arithmetic if the rendered stack changes.
+
+The capture's replica series is `kube_deployment_spec_replicas`, the desired
+count, so it would not show pods left Pending. Record running replicas and
+Pending pods beside desired replicas before relying on scaling evidence, and
+record the Ready worker count and any worker lost during the capture. Do not
+weaken the capture's
+acceptance to fit.
+
+Then trace the remaining prerequisites through the existing deployment:
+private network paths and image pulls, workload identity, secret/config
+handoff, MSK topics and RDS initialization, KEDA, and the observability stack.
+Use the shared [dependency review](application-validation.md#review-runtime-dependencies)
+for new applications; only include the capabilities their contract uses.
+
 ## Stop conditions
 
 Do not apply if any of these is false:
@@ -63,6 +136,9 @@ Do not apply if any of these is false:
 - current published inputs keep the modeled shape at or below $1.25/hour;
 - the reviewed plan has no more than one EKS cluster, one MSK cluster, one RDS
   instance, one NAT gateway, three worker nodes, or 13 topic partitions;
+- the plan summary's `eks_dependencies` gate passed, and the pod-capacity
+  decision under [Infrastructure prerequisites](#infrastructure-prerequisites)
+  is recorded;
 - every hourly resource is opt-in, tagged `Project=my-local-platform` and
   `Ephemeral=true`, and appears in the destroy plan;
 - the local rehearsal for deploy, demo, abort, evidence, redaction, and cleanup
@@ -73,9 +149,9 @@ Do not apply if any of these is false:
   tax; the reviewed plan passes project and EKS child-resource tag coverage;
 - the repository owner has separately authorized this hourly apply.
 
-After apply, any unexpected resource, public workload endpoint, identity
-failure, shape-gate failure, or standard-support mismatch stops the demo and
-starts destroy.
+During provisioning or after apply, any unexpected resource, public workload
+endpoint, identity failure, shape-gate failure, standard-support mismatch, or
+confirmed missing runtime prerequisite ends the attempt and starts destroy.
 
 ## Clock and spend
 
@@ -88,10 +164,24 @@ per-run maximum.
 The controller starts a conservative clock immediately before apply. It starts
 destroy at 2 hours 30 minutes even if evidence is incomplete. Do not extend the
 sample to obtain a successful result. If Terraform is still applying at the
-deadline, the controller sends `SIGINT`, waits 30 seconds, sends `SIGTERM`,
-waits 10 seconds, and sends `SIGKILL`. Cleanup starts after a final 5-second
-wait. Another operator signal advances the sequence immediately. The executing
-repository owner owns the controller and cleanup.
+deadline or when an operator stops the run, the controller sends `SIGINT`,
+waits 30 seconds, sends `SIGTERM`, waits 10 seconds, and sends `SIGKILL`.
+`SIGINT` lets Terraform stop its provider plugins and record partial creates; a
+plugin that receives `SIGTERM` exits mid-request. Heartbeats do not reset these
+grace periods. Another operator signal advances to the next signal immediately;
+after `SIGKILL`, further signals do not skip the final 5-second exit check.
+Cleanup requires confirmation that the whole apply process group has exited.
+If that remains unconfirmed, the controller exits with `phase: cleanup_failed`,
+`cleanup_blocked_reason: process_exit_unconfirmed` and `cleanup_verified: false`,
+without starting destroy. `make aws-live-status` exposes that blocked reason.
+An unconfirmed exit from a cleanup command also stops
+further commands. The controller's error names the process group it could not
+confirm. The owner must confirm all run processes have exited, as step 2 of
+[manual recovery](#controller-stopped-unexpectedly) describes, before
+continuing that recovery. Resources may still be billable; the controller does
+not report their cleanup as complete. Run the controller on the Mac, as below:
+in a Linux container without an init process, unreaped zombies keep the group
+alive and block cleanup.
 
 The project $5 monthly AWS Budget before tax is a delayed forgotten-resource alert.
 The controller enforces the session clock because billing data cannot arrive
@@ -105,6 +195,27 @@ the [coverage limits](costs.md#project-budget-coverage): a zero tagged subtotal
 does not establish zero cost, and some fees remain unallocated. During #97,
 inspect the actual node/volume tags and service-created resources. The session
 clock, inventory and destroy checks remain required even when the budget is OK.
+
+### Waiting within the paid window
+
+The [2026-09-22 timing record](reviews/m4-97-live-attempt-20260922.md#measured-waiting)
+shows 9m58s for EKS control-plane creation, with RDS, MSK and NAT provisioned
+in parallel. The managed node group then spent at least 18m30s creating
+without ready networking. Abort to verified cleanup took another 23m05s.
+These are one run's observations, not AWS service bounds.
+
+Keep the existing 150-minute destroy deadline and 30-minute cleanup reserve.
+Before approval, budget backward for teardown, proof/exports, deployment and
+provisioning. The four deployment command caps below sum to 58m30s, before
+other setup, rollout and baseline waits; proof has a 20-minute cap. Record an
+earlier stop point if the remaining work no longer fits. Those caps do not
+predict normal durations or authorize using the cleanup reserve for proof.
+
+Use phase changes and readiness to decide whether to keep waiting. The
+controller currently observes the apply process and overall clock; it does
+not diagnose Kubernetes health during apply. The checkpoints below are an
+operator responsibility. No timeout increase or live repair follows from a
+slow phase.
 
 ## Configuration and secrets
 
@@ -553,6 +664,24 @@ Require all three flags true, the fixed resource counts, the intended IPv4
 and GO packet. Replanning or rewriting a receipt requires a new GO and another
 review; do not apply or alter the state after this plan is approved.
 
+Review the full saved plan for the infrastructure prerequisites as well:
+
+```bash
+(
+  umask 077
+  terraform -chdir=infra/terraform/envs/dev show -json \
+    .terraform/mlp-reviewed.tfplan > ".evidence/m4/$run_id/plan-private.json"
+)
+```
+
+Keep this file private. `make terraform-check` asserts the four pinned EKS
+add-ons in mocked configuration, and the plan gate checks their placement,
+known versions and the CNI policy in this saved plan (`eks_dependencies` in the
+summary). Neither proves usability, which still needs live evidence, and
+neither checks the remaining prerequisites or pod capacity. Record that review,
+the gate result and the pod-capacity arithmetic for the planned three workers
+against the saved plan hash in the staging record before GO.
+
 After identity, budget, quota, availability, plan, inventory, and image
 receipts all pass, write the final staging decision:
 
@@ -624,6 +753,49 @@ Starting this target authorizes both the reviewed apply and automatic cleanup.
 It uses `caffeinate -i` on macOS, creates `00-session.json` immediately before
 apply, and remains in the foreground. Keep the Mac powered, open, and online.
 Use another terminal for the capture commands below.
+
+### Observe infrastructure while apply runs
+
+Check phase transitions and, while waiting, about every two minutes. This is
+an operator cadence, not a new service timeout. Use read-only queries against
+the account, region and cluster bound to the approved plan, and retain dated
+observations privately in the run directory. Avoid repeating full inventories
+when one service's status answers the question.
+
+| Earliest point | Observation | Decision |
+|---|---|---|
+| Control plane is creating | `aws eks describe-cluster`; controller status and remaining time | Wait within the reviewed phase budget while AWS is provisioning; inspect any service failure immediately. |
+| API is available and the first node registers | Node conditions; `kube-system` Pods/DaemonSets/Deployments; `aws eks list-addons` and `describe-addon` | Correlate CNI startup with the node's reason. A CNI absent from both the plan and cluster is a confirmed missing prerequisite and requires abort. CoreDNS and kube-proxy are expected to be absent until the node group is active. If aws-node exists but is not Ready or keeps restarting, read its container log and the add-on's `describe-addon` health; an API-server or EC2 permission error that persists is a failed phase. |
+| Node group is still creating | `aws eks describe-nodegroup` health plus the Kubernetes observations above | `CREATING` with no AWS health issues does not establish node readiness; on 2026-09-22 three such responses preceded the diagnosis. Inspect stagnant or failed conditions; a transient unready node alone is not a failure. A worker that terminates and is replaced (as at 17:57Z that day) is not a readiness result: record the instance and its state reason from `aws ec2 describe-instances`, then keep judging readiness from node conditions. |
+| Apply succeeds, before capture | Both expected workers ready, four planned add-ons active, system networking/DNS workloads ready | Continue only if the remaining deployment and proof fit before destroy. Otherwise request cleanup. |
+
+For Kubernetes observations, generate a run-private kubeconfig with
+`aws eks update-kubeconfig --dry-run`, using an explicit profile, region and
+alias. Verify its server against `describe-cluster` and pass that file and
+context explicitly to every `kubectl` call, with a bounded request timeout.
+Read nodes and system workload status; do not deploy a diagnostic workload or
+mutate the cluster. The capture helper creates its own verified kubeconfig
+after successful apply.
+
+A confirmed failure requests cleanup immediately, even while Terraform is
+applying:
+
+```bash
+make aws-live-stop AWS_RUN_ID="$run_id" AWS_STOP_REASON=infrastructure_failed
+```
+
+The reason defaults to `evidence_complete`, so a failed attempt names its own;
+the capture helper records `capture_failed` itself. During apply, the
+controller interrupts Terraform with `SIGINT` first and waits for the apply
+process group to exit before destroy. If the bounded stop cannot confirm exit,
+use the manual recovery path after confirming termination; do not start a
+second Terraform process. A create that was in flight can still be
+missing from state. Before trusting destroy, list each `Creating...` line in
+the controller's output that has no matching `Creation complete`, and reconcile
+those resources with the recovery procedure below. Keep the observed failure
+and timestamp in the run record. Analysis and repair follow verified cleanup.
+
+### Capture the application proof
 
 After the controller reports a successful apply, execute the single bounded
 deployment and machine-capture path in that second terminal:
@@ -837,7 +1009,25 @@ backfill them from refreshed raw inputs; preserve them and request owner review.
    `make aws-whoami AWS_PROFILE_NAME="$profile"` and compare the account with
    `.evidence/m4/$run_id/failed-publication/01-identity.txt`. Stop if they differ.
 2. Confirm that the controller and every Terraform process from this attempt
-   are gone. Check `terraform -chdir=infra/terraform/envs/dev workspace show`
+   are gone:
+
+   ```bash
+   pgid=replace-with-the-process-group-from-the-error
+   pgrep -l -g "$pgid"; echo "exit $?"  # must print no process, then exit 1
+   pgrep -fl 'm4-live-run|terraform'    # must list nothing from this attempt
+   ```
+
+   pgrep exits 1 when nothing matches. Exit 2 or 3 means pgrep itself failed,
+   so its empty output proves nothing; resolve that before continuing.
+   Repeat the first check for each process group the controller's error
+   named, and skip it when the error named none. If a member remains, wait for
+   it to exit. If one survives `SIGKILL`, do not force-unlock or start
+   Terraform; restart the Mac. Before restarting, copy the run's private
+   evidence, and any execution checkout under `/private/tmp`, to durable
+   storage, because macOS may clear that directory. Resources keep charging
+   until recovery removes them.
+
+   Check `terraform -chdir=infra/terraform/envs/dev workspace show`
    in a shell without `TF_WORKSPACE` or `TF_DATA_DIR` overrides; require
    `default`. An unexpected workspace requires owner review before recovery.
    Run `make aws-init AWS_PROFILE_NAME="$profile" AWS_REAL_REGION=us-east-1`,
@@ -864,6 +1054,34 @@ backfill them from refreshed raw inputs; preserve them and request owner review.
    ```
 
    Never force-unlock a state that an active Terraform process still owns.
+   Any resource whose create was in flight when apply stopped can exist in AWS
+   without a Terraform state entry. On 2026-09-22 the stop command's `SIGTERM`
+   killed the provider during the node-group create; the controller now starts
+   with `SIGINT`, which makes this less likely without ruling it out. Start from
+   the controller output's unfinished `Creating...` lines and the post-destroy
+   inventory, not from tags alone. The hourly types are the EKS cluster and its
+   node groups, the RDS instance, the MSK cluster and the NAT gateway; apply
+   the same identity checks to each, and delete EKS node groups before their
+   cluster.
+
+   For a node group, compare `aws eks list-nodegroups` with
+   `terraform state list` before retrying a cluster deletion blocked by
+   attached node groups. Preserve the group's ARN, project tag and account
+   match against the failed run's receipts. Under the run's teardown authority,
+   delete only that confirmed run-owned group with `aws eks delete-nodegroup`
+   and wait for `aws eks wait nodegroup-deleted` before retrying `aws-down`.
+   Do not import or delete an unidentified resource, and do not restart the
+   spent live session. Preserve the original controller result and publish
+   recovery separately after both empty checks pass.
+
+   A delete request returning `DELETING` does not release the parent yet.
+   Observe the child until the service confirms deletion, then retry the
+   parent. A waiter timeout calls for another status observation and continued
+   cleanup within the existing authority; it does not prove the child is gone.
+   The controller's finite retries cannot repair an untracked child dependency.
+   AWS documents the required order in
+   [Delete a cluster](https://docs.aws.amazon.com/eks/latest/userguide/delete-cluster.html).
+
 3. Delete only CloudWatch log groups beginning with `/aws/eks/mlp-` or
    `/aws/msk/mlp-`:
 
@@ -907,6 +1125,16 @@ rejects backend credential/endpoint overrides. Failed or absent checks yield
 perform no destroy, login, initialization, or lock repair. The destructive
 recovery steps above remain subject to owner authority and process checks.
 
+The tagging API can keep returning deleted resources after both empty checks
+pass. Resolve each remaining project-tagged entry through its own service's
+describe call, such as `aws ec2 describe-instances`, `describe-volumes`,
+`describe-network-interfaces`, `describe-nat-gateways`,
+`describe-security-groups`, `describe-security-group-rules` or
+`describe-subnets` for EC2 entries. Save the results privately in the run
+directory, as `97-tagging-residual-check.json` did. A `NotFound` error or a
+`terminated` or `deleted` state resolves an entry; a failed query leaves it
+unresolved. Retained bootstrap and budget resources are expected.
+
 The original demonstration remains failed after recovery. Both the failed
 snapshot and the linked recovery packet are retained; #97 stays open.
 
@@ -929,6 +1157,41 @@ missing date. Keep waiting if AWS still reports estimated data.
 The owner accepted these shared-account totals on 2026-09-11. They include
 other activity in the same account and do not establish exact M4 attribution
 or prove the $5 per-run maximum. `make aws-cost` remains a month-to-date view.
+
+### Settled cost after a failed attempt
+
+`make aws-cost-final` requires a completed controller with verified cleanup. A
+failed attempt keeps its original `cleanup_failed` receipt, even after a
+separate recovery observation verifies cleanup, so the target refuses it. Do
+not edit that receipt. Instead, at least 48 hours after the verified recovery
+observation, run the same read-only query by hand and keep a dated copy with
+that observation:
+
+```bash
+(
+  umask 077
+  observation_dir=".evidence/m4/$run_id/recovery/$observation_id"
+  account=$(jq -r .aws.account_id ".evidence/m4/$run_id/failed-publication/01-identity.txt")
+  aws ce get-cost-and-usage \
+    --profile "$profile" \
+    --region us-east-1 \
+    --time-period Start="$session_start_date",End="$day_after_recovery" \
+    --granularity DAILY \
+    --metrics UnblendedCost \
+    --group-by Type=DIMENSION,Key=SERVICE \
+    --filter "{\"Dimensions\":{\"Key\":\"LINKED_ACCOUNT\",\"Values\":[\"$account\"]}}" \
+    --output json > "$observation_dir/cost-settled-$(date -u +%Y%m%dT%H%M%SZ).json"
+)
+```
+
+Use the session start date and the day after the recovery observation, in UTC.
+If the response has a `NextPageToken`, repeat the query with
+`--next-page-token` and keep every page. Every `ResultsByTime` entry must report
+`"Estimated": false`; otherwise keep the file and repeat later with a new one.
+Elapsed time alone does not establish settlement. These are account-wide daily
+service totals, not exact session cost. For the 2026-09-22 attempt, the earliest
+collection is 2026-09-24T18:31:18Z, with `Start=2026-09-22,End=2026-09-23`.
+Recheck the shared monthly budget before another paid GO.
 
 ## Sanitizing evidence
 
