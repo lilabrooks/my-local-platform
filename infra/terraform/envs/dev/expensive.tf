@@ -7,9 +7,11 @@
 # data processing), so single_nat_gateway is forced on and it is skipped
 # entirely unless EKS needs egress.
 module "vpc" {
-  count   = local.needs_vpc ? 1 : 0
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 6.7"
+  count  = local.needs_vpc ? 1 : 0
+  source = "terraform-aws-modules/vpc/aws"
+  # Exact: the lock file pins providers, not registry modules. Dependabot
+  # proposes updates.
+  version = "6.7.3"
 
   name = local.name
   cidr = "10.42.0.0/16"
@@ -155,14 +157,17 @@ resource "aws_msk_serverless_cluster" "relay" {
 }
 
 # -----------------------------------------------------------------------------
-# EKS -- roughly $115/month: $73 control plane + 2x t3.medium + NAT gateway.
+# EKS -- roughly $120/month: $73 control plane + 3x t3.medium + NAT gateway.
 # For learning Kubernetes locally, `minikube start` costs nothing. Turn this on
 # when you specifically want to learn EKS itself.
 # -----------------------------------------------------------------------------
 module "eks" {
-  count   = var.enable_eks ? 1 : 0
-  source  = "terraform-aws-modules/eks/aws"
-  version = "~> 21.25"
+  count  = var.enable_eks ? 1 : 0
+  source = "terraform-aws-modules/eks/aws"
+  # Exact, as for the VPC. The add-on bootstrap and placement below depend on
+  # this module's internals. September 20 staging resolved 21.25.1, retained
+  # for the September 22 run; the September 22 repair resolved 21.25.3.
+  version = "21.25.3"
 
   name = local.name
   # Provider defaults tag Terraform resources, but not the instances, volumes,
@@ -189,7 +194,25 @@ module "eks" {
   endpoint_public_access_cidrs = [var.eks_operator_cidr]
 
   addons = {
+    # EKS module 21 disables AWS's self-managed add-on bootstrap. Workers
+    # cannot become Ready without the CNI, and add-ons without
+    # before_compute wait for the node groups. before_compute does not make
+    # compute wait for the add-on; the module only delays compute by 30
+    # seconds. scripts/check-aws-plan.py rejects a saved plan that lacks these
+    # add-ons, their versions or the CNI placement. Versions checked for 1.35
+    # with describe-addon-versions in us-east-1 on 2026-09-22.
+    vpc-cni = {
+      addon_version  = "v1.22.4-eksbuild.3"
+      before_compute = true
+    }
+    kube-proxy = {
+      addon_version = "v1.35.3-eksbuild.29"
+    }
+    coredns = {
+      addon_version = "v1.13.2-eksbuild.31"
+    }
     eks-pod-identity-agent = {
+      addon_version  = "v1.3.10-eksbuild.3"
       before_compute = true
     }
   }

@@ -99,13 +99,14 @@ charge for the budget or its email notifications.
 | Flag | Creates | Approximate monthly cost |
 |---|---|---|
 | `enable_rds` | `db.t4g.micro`, 20 GB gp3, single-AZ | **~$15** |
-| `enable_eks` | Control plane + 2× `t3.medium` Spot + NAT gateway | **~$115** |
+| `enable_eks` | Control plane + 3× `t3.medium` Spot + NAT gateway | **~$120** |
 | `enable_msk` | MSK Serverless + 13 topic partitions | **~$0.77/hour** |
 
 The fixed relay-validation shape in
-[ADR 0010](adr/0010-live-aws-relay-contract.md) was
-rechecked on 2026-09-05 at approximately **$1.02/hour** before small usage
-charges. MSK contributes about $0.77/hour of that total. The runbook rejects a
+[ADR 0010](adr/0010-live-aws-relay-contract.md) models at approximately
+**$1.06/hour** before small usage charges, using rates rechecked on 2026-09-05
+and the third worker added on 2026-09-22. MSK contributes about $0.77/hour of
+that total. The runbook rejects a
 shape above $1.25/hour, starts destroy at 2 hours 30 minutes, marks cleanup
 overdue at 3 hours, and requires separate approval for a $5 maximum. It
 continues an active destroy after that mark.
@@ -115,8 +116,8 @@ Breaking down `enable_eks`, because it is the one that hurts:
 - EKS control plane: $0.10/hour = **~$73/month**, charged whether or not a
   single pod is running.
 - NAT gateway: ~$0.045/hour = **~$32/month**, plus $0.045/GB processed.
-- 2× `t3.medium` Spot instances. The runtime gate deliberately models their
-  on-demand upper bound, about **$0.083/hour** together, rather than predicting
+- 3× `t3.medium` Spot instances. The runtime gate deliberately models their
+  on-demand upper bound, about **$0.125/hour** together, rather than predicting
   a changing Spot discount.
 
 ### The extended-support trap
@@ -166,9 +167,14 @@ so the operator sees that migration before apply.
 It creates the session clock, keeps the controller in the foreground, and
 starts cleanup after an operator stop, failure, signal, or the 150-minute
 destroy deadline. If apply is still running then, the controller interrupts it
-and allows 30 seconds for a graceful exit, then sends `SIGTERM`, waits 10
-seconds, and sends `SIGKILL`. Cleanup starts after another 5 seconds even if
-the apply process has not reported an exit. An hourly `make aws-up` requires
+with `SIGINT` and allows 30 seconds for a graceful exit, then sends `SIGTERM`,
+waits 10 seconds, and sends `SIGKILL`. Cleanup waits for the whole apply
+process group to exit. If the final 5-second check cannot confirm termination,
+the controller records `cleanup_failed` with
+`cleanup_blocked_reason: process_exit_unconfirmed` and starts no destroy.
+The owner must confirm termination and continue manual recovery; charges may
+continue until the resources are removed. Heartbeats never restart the grace
+periods. An hourly `make aws-up` requires
 the controller's fresh, run-bound heartbeat and permit.
 
 After apply succeeds, `make aws-runtime-bootstrap` requires the same live

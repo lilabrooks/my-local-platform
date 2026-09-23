@@ -31,8 +31,10 @@ This bills a personal AWS account. Two rules:
      --query 'clusterVersions[?versionStatus==`STANDARD_SUPPORT`].clusterVersion'
    ```
 
-`make aws-cost` shows month-to-date spend. Everything Terraform creates is
-tagged `Project=my-local-platform`, so nothing left running can hide.
+`make aws-cost` shows month-to-date spend. Project tags support attribution;
+M4 cleanup requires empty dev Terraform state and its full service-native inventory.
+Interrupted creates can leave resources outside state, and tagging results can
+retain deleted resources. See the AWS runbook's recovery procedure.
 
 ## Finding code
 
@@ -60,6 +62,35 @@ testing cannot answer and choose the appropriate cheap or hourly tier;
 staging and hourly execution retain separate owner approvals. Check the shared
 monthly budget and M4's state and inventory scope before adding another AWS app.
 Existing application contracts, including relay's M4 gates, still apply.
+
+**Review AWS runtime dependencies before paying for them.** For each new app or
+changed shared boundary, record who supplies its prerequisites, their resolved
+versions, creation order, IAM/network access, first usable readiness signal,
+and cleanup ownership in the existing validation record. Compare the exact
+plan and rendered deployment with that record. Local platforms can supply
+dependencies that AWS tooling omits; a passing mock test proves only its
+assertions. Add a regression check for each discovered structural omission.
+Use the [dependency review](docs/application-validation.md#review-runtime-dependencies)
+and reuse unchanged evidence instead of adding a separate framework.
+
+When a module or platform leaves out default components, declare them and
+check their placement, pins and permissions in the saved plan. Local clusters
+can allow more pods per node than small AWS workers; count pods against the
+rendered workload. Relay's EKS prerequisites, the plan-gate checks that enforce them
+and its pod-capacity arithmetic are in the AWS runbook's
+[infrastructure prerequisites](docs/runbook-aws-relay.md#infrastructure-prerequisites).
+
+**Observe readiness during provisioning.** Record phase deadlines and the
+earliest read-only health check; a provider's `CREATING` message is not a health
+result. Abort on a confirmed missing prerequisite or failed phase rather than
+waiting for the provider timeout, with `make aws-live-stop` and an
+`AWS_STOP_REASON`; the controller interrupts Terraform with `SIGINT` and waits
+for its process group before cleanup. Preserve the approved cleanup reserve and
+continue cleanup until state and live inventory agree, including partial
+creates. If termination remains unconfirmed, the controller records blocked
+cleanup; confirm all run processes have exited before manual recovery. Never
+start another Terraform operation or force-unlock an active process's state.
+One run's duration is evidence, not a new universal timeout.
 
 For new-app and shared-stack issues, include the guide in Governing anchors
 and write acceptance criteria naming the selected environment, checks, and

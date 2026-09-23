@@ -196,8 +196,11 @@ live EKS, RDS, and MSK proof remains unverified and separately authorized.
 Cheap-tier staging completed on 2026-09-20 in
 [issue #96](https://github.com/lilabrooks/my-local-platform/issues/96), closed
 by [PR #148](https://github.com/lilabrooks/my-local-platform/pull/148).
-[Issue #97](https://github.com/lilabrooks/my-local-platform/issues/97) tracks
-the paid validation and teardown, awaiting separate owner approval. See the
+[Issue #97](https://github.com/lilabrooks/my-local-platform/issues/97) remains
+open. Its approved 2026-09-22 attempt failed before workload deployment because
+the EKS network add-on was missing. The
+[attempt record](docs/reviews/m4-97-live-attempt-20260922.md) tracks cleanup,
+the local repair and the qualification required before another paid run. See the
 [staging record](docs/reviews/m4-96-staging-20260920.md) for the completed
 qualification and staged runtime source `474dca7`.
 
@@ -241,7 +244,10 @@ hours as a failed deadline. It keeps destroying if AWS cleanup runs long.
 `make aws-live-run` owns that clock, stays in the foreground, and enters
 cleanup after success, failure, interruption, or the destroy deadline. If
 Terraform is still applying at that deadline, the controller interrupts it
-before cleanup.
+before cleanup. If it cannot confirm that the apply processes have exited, it
+records blocked cleanup and starts no destroy; resources may keep charging
+until the owner completes the runbook's
+[manual recovery](docs/runbook-aws-relay.md#controller-stopped-unexpectedly).
 
 The AWS path needs Terraform 1.10 or newer, AWS CLI v2, `jq`, Go 1.27 or
 newer, Python 3, and an AWS SSO session. The default Terraform tier contains

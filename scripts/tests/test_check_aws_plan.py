@@ -33,7 +33,7 @@ def shape(**overrides):
         "eks": {
             "kubernetes_version": "1.35",
             "node_capacity_type": "SPOT",
-            "node_desired": 2,
+            "node_desired": 3,
             "node_maximum": 3,
         },
         "rds": {"engine_version": "17.11"},
@@ -45,6 +45,167 @@ def shape(**overrides):
     }
     value.update(overrides)
     return value
+
+
+NODE_GROUP_MODULE = 'module.eks[0].module.eks_managed_node_group["default"]'
+PINNED_ADDONS = {
+    "vpc-cni": ("before_compute", "v1.22.4-eksbuild.3"),
+    "eks-pod-identity-agent": ("before_compute", "v1.3.10-eksbuild.3"),
+    "coredns": ("this", "v1.13.2-eksbuild.31"),
+    "kube-proxy": ("this", "v1.35.3-eksbuild.29"),
+}
+OMIT = object()
+
+
+def network_addons(changes=None):
+    """Planned add-ons as the EKS module names them; None omits one."""
+    selected = {**PINNED_ADDONS, **(changes or {})}
+    resources = []
+    for name, value in selected.items():
+        if value is None:
+            continue
+        placement, version = value
+        values = {"addon_name": name}
+        if version is not None:
+            values["addon_version"] = version
+        resources.append({
+            "address": f'module.eks[0].aws_eks_addon.{placement}["{name}"]',
+            "mode": "managed",
+            "type": "aws_eks_addon",
+            "name": placement,
+            "index": name,
+            "values": values,
+        })
+    return resources
+
+
+def cni_policy_attachment():
+    return {
+        "address": f'{NODE_GROUP_MODULE}.aws_iam_role_policy_attachment.this["AmazonEKS_CNI_Policy"]',
+        "mode": "managed",
+        "type": "aws_iam_role_policy_attachment",
+        "name": "this",
+        "index": "AmazonEKS_CNI_Policy",
+        "values": {"policy_arn": "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"},
+    }
+
+
+def eks_plan(addons=None, bootstrap=False, cni_policy=True):
+    """The planned end state of the fixed EKS topology, shaped like the module."""
+    cluster = {
+        "address": "module.eks[0].aws_eks_cluster.this[0]",
+        "mode": "managed",
+        "type": "aws_eks_cluster",
+        "name": "this",
+        "index": 0,
+        "values": {} if bootstrap is OMIT else {"bootstrap_self_managed_addons": bootstrap},
+    }
+    node_resources = [{
+        "address": f"{NODE_GROUP_MODULE}.aws_eks_node_group.this[0]",
+        "mode": "managed",
+        "type": "aws_eks_node_group",
+        "name": "this",
+        "index": 0,
+        "values": {},
+    }]
+    if cni_policy:
+        node_resources.append(cni_policy_attachment())
+    return {"planned_values": {"root_module": {"child_modules": [{
+        "address": "module.eks[0]",
+        "resources": [cluster, *network_addons(addons)],
+        "child_modules": [{"address": NODE_GROUP_MODULE, "resources": node_resources}],
+    }]}}}
+
+
+class EksDependencyReviewTest(unittest.TestCase):
+    def test_complete_plan_passes_and_records_pinned_addons(self):
+        review = CHECK.eks_dependency_review(eks_plan(), True)
+
+        self.assertTrue(review["gate"]["passed"], review["gate"]["failures"])
+        self.assertIs(review["bootstrap_self_managed_addons"], False)
+        self.assertEqual(
+            review["addons"]["vpc-cni"],
+            {"placement": "before_compute", "version": "v1.22.4-eksbuild.3"},
+        )
+        self.assertEqual(review["cni_policy_node_groups"], [NODE_GROUP_MODULE])
+
+    def test_the_failed_2026_09_22_plan_shape_is_rejected(self):
+        # Only the Pod Identity agent, with its version left to the module's
+        # lookup, which the saved plan could not resolve.
+        plan = eks_plan(addons={
+            "vpc-cni": None,
+            "coredns": None,
+            "kube-proxy": None,
+            "eks-pod-identity-agent": ("before_compute", None),
+        })
+
+        failures = CHECK.eks_dependency_review(plan, True)["gate"]["failures"]
+
+        for name in ("vpc-cni", "coredns", "kube-proxy"):
+            self.assertIn(
+                f"EKS add-on {name} is missing while self-managed networking "
+                "bootstrap is disabled",
+                failures,
+            )
+        self.assertIn(
+            "EKS add-on eks-pod-identity-agent has no known version in the saved plan",
+            failures,
+        )
+
+    def test_cni_that_waits_for_compute_is_rejected(self):
+        plan = eks_plan(addons={"vpc-cni": ("this", "v1.22.4-eksbuild.3")})
+
+        failures = CHECK.eks_dependency_review(plan, True)["gate"]["failures"]
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("vpc-cni must be a before_compute add-on", failures[0])
+
+    def test_node_role_without_cni_permission_is_rejected(self):
+        failures = CHECK.eks_dependency_review(eks_plan(cni_policy=False), True)[
+            "gate"
+        ]["failures"]
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("lacks AmazonEKS_CNI_Policy", failures[0])
+
+    def test_unknown_bootstrap_setting_fails_closed(self):
+        failures = CHECK.eks_dependency_review(eks_plan(bootstrap=OMIT), True)[
+            "gate"
+        ]["failures"]
+
+        self.assertIn(
+            "cannot confirm how EKS networking is installed: "
+            "bootstrap_self_managed_addons is unknown",
+            failures,
+        )
+
+    def test_self_managed_bootstrap_does_not_require_managed_addons(self):
+        plan = eks_plan(
+            addons={name: None for name in PINNED_ADDONS}, bootstrap=True
+        )
+
+        review = CHECK.eks_dependency_review(plan, True)
+
+        self.assertTrue(review["gate"]["passed"], review["gate"]["failures"])
+
+    def test_unchanged_complete_cluster_passes(self):
+        plan = eks_plan()
+        plan["resource_changes"] = [
+            {
+                "address": resource["address"],
+                "type": resource["type"],
+                "change": {"actions": ["no-op"]},
+            }
+            for resource in network_addons()
+        ]
+
+        self.assertTrue(CHECK.eks_dependency_review(plan, True)["gate"]["passed"])
+
+    def test_cheap_tier_is_not_reviewed(self):
+        review = CHECK.eks_dependency_review({"planned_values": {}}, False)
+
+        self.assertFalse(review["required"])
+        self.assertTrue(review["gate"]["passed"])
 
 
 class PlanShapeTest(unittest.TestCase):
@@ -324,6 +485,18 @@ class GuardScriptTest(unittest.TestCase):
                 for kind in ("instance", "volume", "network-interface")
             ]},
         })
+        # The networking prerequisites the fixed EKS topology plans.
+        root_module = plan_json["planned_values"]["root_module"]
+        root_module["resources"][0]["values"]["bootstrap_self_managed_addons"] = False
+        root_module["resources"].extend(network_addons())
+        root_module["child_modules"][0]["address"] = NODE_GROUP_MODULE
+        root_module["child_modules"][0]["resources"].append(cni_policy_attachment())
+        missing_cni_plan_json = json.loads(json.dumps(plan_json))
+        missing_cni_plan_json["planned_values"]["root_module"]["resources"] = [
+            resource
+            for resource in missing_cni_plan_json["planned_values"]["root_module"]["resources"]
+            if resource.get("index") != "vpc-cni"
+        ]
         incomplete_plan_json = {**plan_json, "complete": False}
         cheap_plan_json = {
             **plan_json,
@@ -358,6 +531,8 @@ case " $* " in
   *' show '*)
     if [ "${{MLP_FAKE_INCOMPLETE_PLAN:-}}" = 1 ]; then
       printf '%s\\n' '{json.dumps(incomplete_plan_json)}'
+    elif [ "${{MLP_FAKE_MISSING_CNI:-}}" = 1 ]; then
+      printf '%s\\n' '{json.dumps(missing_cni_plan_json)}'
     elif [ "${{MLP_FAKE_CHEAP:-}}" = 1 ]; then
       printf '%s\\n' '{json.dumps(cheap_plan_json)}'
     else
@@ -705,6 +880,30 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid hourly_enabled", result.stderr)
         self.assertFalse(self.plan.exists())
+
+    def test_plan_without_the_cni_addon_is_rejected_and_recorded(self):
+        environment = self.environment.copy()
+        environment["MLP_FAKE_MISSING_CNI"] = "1"
+
+        result = self._run("plan", environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("EKS add-on vpc-cni is missing", result.stderr)
+        summary = json.loads(self.summary.read_text(encoding="utf-8"))
+        self.assertFalse(summary["gate"]["passed"])
+        self.assertFalse(summary["eks_dependencies"]["gate"]["passed"])
+
+    def test_complete_eks_plan_records_its_dependencies(self):
+        result = self._run("plan")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dependencies = json.loads(self.summary.read_text(encoding="utf-8"))[
+            "eks_dependencies"
+        ]
+        self.assertTrue(dependencies["gate"]["passed"])
+        self.assertEqual(
+            dependencies["addons"]["vpc-cni"]["placement"], "before_compute"
+        )
 
     def test_incomplete_plan_is_rejected(self):
         environment = self.environment.copy()

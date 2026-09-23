@@ -11,7 +11,7 @@ locals {
   eks_node_capacity = "SPOT"
   eks_node_minimum  = 1
   eks_node_maximum  = 3
-  eks_node_desired  = 2
+  eks_node_desired  = 3
 
   rds_engine_version = "17.11"
 

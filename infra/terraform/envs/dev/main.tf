@@ -7,7 +7,7 @@
 #
 #   FLAG-GATED -- billed per hour whether or not you use them. Default false.
 #     enable_rds  ~$15/month   db.t4g.micro, single-AZ
-#     enable_eks  ~$115/month  $73 control plane + 2x t3.medium + NAT gateway
+#     enable_eks  ~$120/month  $73 control plane + 3x t3.medium + NAT gateway
 #     enable_msk  ~$0.77/hour  MSK Serverless + 13 topic partitions
 #
 # `terraform destroy` when you finish a session. See docs/costs.md.

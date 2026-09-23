@@ -41,7 +41,7 @@ stay private.
 
 | Surface | Contract |
 |---|---|
-| EKS | One Kubernetes 1.35 cluster in standard support; one managed Spot node group with two desired `t3.medium` nodes, minimum one and maximum three; default API-data envelope encryption with an AWS-owned key |
+| EKS | One Kubernetes 1.35 cluster in standard support; one managed Spot node group with three desired `t3.medium` nodes, minimum one and maximum three; default API-data envelope encryption with an AWS-owned key |
 | Relay | Two `relay-ingest` replicas and a KEDA-managed `relay-deliver` Deployment with 1 to 12 replicas; both use the same image digest |
 | Sink | One controlled sink behind a `ClusterIP` Service; no ingress or load balancer |
 | Kafka | One MSK Serverless cluster; `mlp.relay.deliveries` has 12 partitions and the DLQ has one |
@@ -66,12 +66,47 @@ The worker type differs from the current Terraform placeholder. M3 measured a
 3.64 GiB peak and could not start the supporting stack under a 3 GiB limit.
 Two `t3.small` nodes provide only 4 GiB before EKS system overhead. Two
 `t3.medium` nodes provide 8 GiB and preserve useful headroom while keeping Spot
-capacity and the three-node ceiling.
+capacity and the three-node ceiling. The
+[worker capacity amendment](#worker-capacity-amendment-accepted-2026-09-22)
+raises the desired count to three for pod capacity.
 
 Kubernetes 1.35 encrypts all Kubernetes API data with an AWS-owned key by
 default. The EKS module's optional customer-managed key is disabled because it
 would outlive this short run in `PendingDeletion`; M4 has no requirement for a
 customer-managed key.
+
+#### Worker capacity amendment, accepted 2026-09-22
+
+The owner chose a third worker after the #97 reviews found that pod count, not
+memory, limits two workers. With the VPC CNI's default networking, each
+`t3.medium` allows 17 pods. After the per-worker DaemonSets and the rendered
+platform stack, two workers leave room for about four delivery pods, while the
+relay contract above lets KEDA run 12. Three workers leave room for all 12
+with five slots spare, and 12 GiB of memory before EKS reservations. This
+amends the desired count from two to three. The instance type, Spot capacity,
+three-node maximum, $1.25/hour limit and 1-to-12 delivery range stay as
+specified.
+
+At the 2026-09-05 rates, the third worker adds $0.0416/hour to the on-demand
+upper bound, raising the modeled rate from $1.0219 to $1.0635/hour. Running at
+the node group's maximum also leaves little room to replace a Spot worker
+before it stops. Capacity Rebalancing can exceed a group's maximum by at most
+10 percent of desired capacity, 0.3 of a worker here, so a reclaimed worker can
+leave two until its replacement joins.
+
+Lowering KEDA's AWS maximum to what two workers fit would cost nothing, but
+the paid run would no longer repeat the local 1-to-12 demonstration. Two
+`t3.large` workers would add twice the third worker's cost for a similar
+result. VPC CNI prefix
+delegation would add a new networking mode to the component that failed on
+2026-09-22, and minikube cannot rehearse it. Removing unused platform pods
+would free only about six slots. Those alternatives were rejected for the next
+run.
+
+Rollback restores two desired workers, with the runtime contract, GO's shape
+and price checks, the Terraform test and the runbook changed together. Revisit
+the count after a passing live run records the actual delivery-pod peak, or if
+the rendered platform stack grows.
 
 ### EKS Pod Identity
 
@@ -230,15 +265,16 @@ deployment makes rotation during pod lifetime a real requirement.
 ### Spend boundary
 
 Rates were checked on 2026-09-05 against AWS's public `us-east-1` price pages
-and price-list file. The fixed shape is approximately $1.02/hour before small
-data-transfer, request, log, and image-storage charges:
+and price-list file. With the third worker added on 2026-09-22, the fixed shape
+is approximately $1.06/hour before small data-transfer, request, log, and
+image-storage charges:
 
 | Item | Checked rate | Contract quantity | Approximate hourly cost |
 |---|---:|---:|---:|
 | MSK Serverless cluster | $0.75/cluster-hour | 1 | $0.750 |
 | MSK partitions | $0.0015/partition-hour | 13 | $0.020 |
 | EKS standard-support control plane | $0.10/cluster-hour | 1 | $0.100 |
-| `t3.medium` on-demand upper bound | $0.0416/instance-hour | 2 | $0.083 |
+| `t3.medium` on-demand upper bound | $0.0416/instance-hour | 3 | $0.125 |
 | NAT gateway | $0.045/hour | 1 | $0.045 |
 | NAT public IPv4 address | $0.005/hour | 1 | $0.005 |
 | RDS `db.t4g.micro` | $0.016/instance-hour | 1 | $0.016 |
@@ -261,10 +297,16 @@ after apply aborts the demonstration and starts destroy.
 `make aws-live-run` creates the timestamp immediately before apply and keeps a
 Go controller in the foreground. Success, failure, `SIGINT`, `SIGTERM`, an
 operator stop, and the 2-hour-30-minute deadline all enter the same cleanup
-path. The controller interrupts an apply that is still running at that
-deadline, waits 30 seconds, escalates to `SIGTERM`, waits 10 seconds, and then
-sends `SIGKILL`; cleanup starts after a final 5-second bound. A second operator
-signal advances that sequence immediately. Hourly apply requires a fresh
+path. Whatever stops an apply that is still running, the controller interrupts
+it with `SIGINT`, waits 30 seconds, escalates to `SIGTERM`, waits 10 seconds,
+and then sends `SIGKILL`. Heartbeats do not reset these periods. Further
+operator signals advance the sequence, but cannot skip the final 5-second
+exit check after `SIGKILL`. Cleanup requires confirmed process-group termination.
+If termination remains unknown, the controller records `cleanup_failed` with
+`cleanup_blocked_reason: process_exit_unconfirmed`, leaves cleanup unverified
+and starts no destroy. The owner must confirm termination before manual recovery.
+The same rule prevents retrying a cleanup command whose process group may still
+be running. Hourly apply requires a fresh
 controller heartbeat bound to the run, commit, and live controller process.
 Cleanup runs state-backed destroy, removes project-prefixed EKS and MSK log
 groups, requires empty dev Terraform state, checks the service-native inventory
@@ -506,6 +548,81 @@ rollback or dev-stack destroy.
 
 ## Verification
 
+On 2026-09-22, the separately approved `make aws-live-run` attempt for source
+`474dca7` created the fixed infrastructure but failed to make its EKS workers
+ready. A read-only node observation found `NetworkPluginNotReady` on both
+workers; the saved plan omitted VPC CNI, CoreDNS and kube-proxy while disabling
+AWS's self-managed add-on bootstrap. `make aws-live-stop` started teardown
+before any application capture. An interrupted node-group create also exposed
+a cleanup gap: the group existed in AWS but was absent from Terraform state.
+The [attempt record](../reviews/m4-97-live-attempt-20260922.md) preserves the
+controller failure, recovery status, local add-on repair and offline test
+results. M4's live application proof remains unverified; #97 stays open.
+
+The same run measured 9m58s for control-plane creation and 23m05s from abort
+to verified recovery, with no successful worker-readiness sample. The
+[timing record](../reviews/m4-97-live-attempt-20260922.md#measured-waiting)
+preserves the commands, intervals and limits. The runbook now requires review
+of the resolved add-ons and their dependencies before GO, readiness checks
+during apply, and reconciliation of partial creates during cleanup. The
+150/180-minute limits are unchanged; these operator checks do not imply a
+new automatic health or orphan-cleanup mechanism.
+
+Second reviews of that attempt, checked on 2026-09-22 without AWS calls, found
+the orphan's mechanism in the controller. `make aws-live-stop` woke it with
+`SIGTERM`, which it forwarded as the first signal to the whole apply process
+group. The AWS provider plugin, which ignores only `SIGINT`, exited during the
+node-group create, and `make` exited before Terraform finished. Every stop of a
+running apply now starts with `SIGINT`, and cleanup waits for the process
+group. `go test -race ./...` in `tools/m4-live-run` passes; restoring the old
+signal choice or removing the wait makes the new tests fail. The plan gate now
+reviews EKS networking prerequisites in the saved plan and rejects the attempt's
+saved plan for its missing CNI, CoreDNS and kube-proxy.
+
+A follow-up local review found that heartbeat ticks recreated the escalation
+timer and that exhausted escalation could still start cleanup without an exit
+result. The repair keeps each timer across heartbeats and carries unconfirmed
+termination through the controller and failed publication. Regression tests
+exercise heartbeat-driven escalation, repeated signals, surviving groups and
+blocked cleanup. These checks make no AWS calls; live behavior remains untested.
+
+A second review found four smaller issues, fixed on 2026-09-22:
+
+- The final-deadline check had no test.
+- An output pipe held open by a group member could delay the group check
+  without bound.
+- Recovery guidance did not name the stuck process group.
+- Summaries described cleanup as unconditional.
+
+Checking those fixes exposed a fifth: macOS reports EPERM for a group whose
+last member awaits reaping, and the group waiter treated EPERM as unconfirmed
+exit. It now keeps polling through EPERM and still fails if the group outlasts
+`SIGKILL`.
+
+`go test -race` passes on macOS, and on Linux in a container with an init
+process. On Linux without an init process, unreaped zombies keep a group alive,
+and the controller blocks cleanup rather than destroying.
+
+The same reviews found a capacity limit that local rehearsal hid. Each
+`t3.medium` worker reported 17 allocatable pods. After host-network DaemonSets
+and the rendered platform stack, two workers left room for about four delivery
+pods. The owner resolved this with the
+[worker capacity amendment](#worker-capacity-amendment-accepted-2026-09-22),
+and the runbook records the arithmetic for three workers. The 1-to-12 delivery
+range remains unverified on EKS until a live run records running and Pending
+replicas beside desired replicas.
+
+The amendment was checked on 2026-09-22 without AWS calls:
+
+- The runtime contract, GO's shape and price checks and the mocked Terraform
+  test require three desired workers.
+- Restoring two workers in a disposable copy fails the Terraform shape test.
+- The price review recomputes $1.063450684931506849315068493/hour from the
+  checked rates.
+- The account check's Spot quota already requires six vCPUs, three workers at
+  the maximum.
+- `make test`, `make lint` and `make terraform-check` passed.
+
 Staging completed on 2026-09-20 UTC for source
 `474dca7e8e121c08f2951b02871cfe4c4b87e2ee`. Local run `20260920T153931Z`
 passed abort, controlled SIGTERM, machine capture, demo and visual practice;
@@ -523,7 +640,7 @@ binds GO and all eight inputs; `execution_authorized` is false. The
 [staging record](../reviews/m4-96-staging-20260920.md) records actual actions,
 private artifact hashes, qualification and scope limits.
 [PR #148](https://github.com/lilabrooks/my-local-platform/pull/148) merged on
-2026-09-20 and closed #96; #97 remains unapproved. These dated observations do
+2026-09-20 and closed #96; #97 was unapproved at that point. These dated observations do
 not claim that the AWS inputs will remain fresh for a later paid session.
 
 Budget amendment checked on 2026-09-20 UTC:
@@ -571,7 +688,8 @@ Checked on 2026-09-05 without AWS credentials or resource creation:
   Kubernetes 1.35 in standard support until 2027-03-27;
 - AWS's public rates were rechecked for MSK Serverless, EKS, NAT gateway,
   public IPv4, RDS compute, and RDS gp3 storage;
-- the arithmetic above totals approximately $1.02/hour before variable usage.
+- the arithmetic above, with the two workers then planned, totaled
+  approximately $1.02/hour before variable usage.
 
 The repository checks run for this proposal are recorded in the closing commit.
 The AWS-specific claims remain predictions until #97 records the live result.

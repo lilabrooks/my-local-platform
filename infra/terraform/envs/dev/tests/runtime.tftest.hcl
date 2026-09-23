@@ -144,6 +144,18 @@ run "live_runtime_matches_the_accepted_shape" {
 
   assert {
     condition = (
+      toset(keys(module.eks[0].cluster_addons)) == toset([
+        "vpc-cni", "kube-proxy", "coredns", "eks-pod-identity-agent",
+      ]) &&
+      alltrue([for addon in values(module.eks[0].cluster_addons) :
+        can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+-eksbuild\\.[0-9]+$", addon.addon_version))
+      ])
+    )
+    error_message = "EKS must plan pinned CNI, DNS, service-routing and Pod Identity add-ons; module 21 does not bootstrap them."
+  }
+
+  assert {
+    condition = (
       length(module.vpc) == 1 &&
       length(module.eks) == 1 &&
       length(aws_db_instance.main) == 1 &&
@@ -219,7 +231,7 @@ run "live_runtime_matches_the_accepted_shape" {
     condition = (
       output.runtime_shape.eks.kubernetes_version == "1.35" &&
       output.runtime_shape.eks.node_capacity_type == "SPOT" &&
-      output.runtime_shape.eks.node_desired == 2 &&
+      output.runtime_shape.eks.node_desired == 3 &&
       output.runtime_shape.eks.node_maximum == 3
     )
     error_message = "The EKS plan does not match ADR 0010's fixed node shape."

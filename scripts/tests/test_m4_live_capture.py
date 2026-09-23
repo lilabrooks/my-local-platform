@@ -345,6 +345,8 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(
                 CAPTURE.signal.getsignal(CAPTURE.signal.SIGINT), CAPTURE.signal.SIG_IGN
             )
+            # A capture failure must not be recorded as evidence_complete.
+            self.assertIn("AWS_STOP_REASON=capture_failed", args[0])
 
         original = CAPTURE.signal.getsignal(CAPTURE.signal.SIGINT)
         with (

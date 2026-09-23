@@ -35,6 +35,10 @@ COST_TAG_RESOURCE_TYPES = HOURLY_RESOURCE_TYPES | {
     "aws_eip", "aws_cloudwatch_log_group", "aws_secretsmanager_secret",
     "aws_instance", "aws_ebs_volume", "aws_ebs_snapshot", "aws_kms_key",
 }
+# EKS module 21 hardcodes bootstrap_self_managed_addons = false, so AWS installs
+# no cluster networking; the plan must declare these managed add-ons.
+EKS_NETWORK_ADDONS = ("coredns", "eks-pod-identity-agent", "kube-proxy", "vpc-cni")
+CNI_POLICY_SUFFIX = ":policy/AmazonEKS_CNI_Policy"
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ROOT = Path(__file__).resolve().parent.parent
@@ -195,6 +199,99 @@ def project_tag_coverage(plan: dict[str, Any], eks_enabled: bool) -> dict[str, A
     }
 
 
+def eks_dependency_review(plan: dict[str, Any], eks_enabled: bool) -> dict[str, Any]:
+    """Check that the saved plan supplies what EKS workers need to become Ready.
+
+    The 2026-09-22 plan disabled self-managed networking, planned only the Pod
+    Identity add-on, and still passed this gate's shape checks; its workers
+    never became Ready. The review reads the planned end state, so no-op and
+    update actions pass when the result is complete.
+
+    The EKS module creates add-ons that must not wait for compute as
+    `aws_eks_addon.before_compute`; its other add-ons depend on the node groups,
+    which cannot become Ready without the VPC CNI. A module change that renames
+    that resource fails this review closed and needs a reviewed gate change.
+    An add-on version left to the module's lookup is unknown at plan time, so
+    the known-version check also rejects unpinned add-ons.
+    """
+    failures: list[str] = []
+    addons: dict[str, dict[str, Any]] = {}
+    bootstrap = None
+    node_groups: list[str] = []
+    cni_policy_modules: set[str] = set()
+    if eks_enabled:
+        clusters = []
+        root = plan.get("planned_values", {}).get("root_module", {})
+        for module in modules(root):
+            address = module.get("address", "")
+            for resource in module.get("resources", []):
+                if resource.get("mode", "managed") != "managed":
+                    continue
+                kind = resource.get("type")
+                values = resource.get("values") or {}
+                if kind == "aws_eks_cluster":
+                    clusters.append(values)
+                elif kind == "aws_eks_node_group":
+                    node_groups.append(address)
+                elif kind == "aws_iam_role_policy_attachment" and str(
+                    values.get("policy_arn", "")
+                ).endswith(CNI_POLICY_SUFFIX):
+                    cni_policy_modules.add(address)
+                elif kind == "aws_eks_addon":
+                    name = str(values.get("addon_name") or resource.get("index"))
+                    version = values.get("addon_version")
+                    if name in addons:
+                        failures.append(f"EKS add-on {name} is planned more than once")
+                    addons[name] = {
+                        "placement": resource.get("name"),
+                        "version": version if isinstance(version, str) and version else None,
+                    }
+        if len(clusters) != 1:
+            failures.append("EKS dependency review expects exactly one planned cluster")
+        else:
+            bootstrap = clusters[0].get("bootstrap_self_managed_addons")
+            if bootstrap is False:
+                for name in EKS_NETWORK_ADDONS:
+                    if name not in addons:
+                        failures.append(
+                            f"EKS add-on {name} is missing while self-managed "
+                            "networking bootstrap is disabled"
+                        )
+                    elif addons[name]["version"] is None:
+                        failures.append(
+                            f"EKS add-on {name} has no known version in the saved plan"
+                        )
+                cni = addons.get("vpc-cni")
+                if cni is not None and cni["placement"] != "before_compute":
+                    failures.append(
+                        "vpc-cni must be a before_compute add-on: other add-ons wait "
+                        "for the node groups, which cannot become Ready without it"
+                    )
+            elif bootstrap is not True:
+                failures.append(
+                    "cannot confirm how EKS networking is installed: "
+                    "bootstrap_self_managed_addons is unknown"
+                )
+        if not node_groups:
+            failures.append("EKS dependency review found no managed node group")
+        for address in node_groups:
+            if address not in cni_policy_modules:
+                failures.append(
+                    f"{address or 'root module'} node group role lacks "
+                    "AmazonEKS_CNI_Policy; another CNI identity needs a reviewed "
+                    "gate change"
+                )
+    return {
+        "required": bool(eks_enabled),
+        "bootstrap_self_managed_addons": bootstrap,
+        "addons": dict(sorted(addons.items())),
+        "cni_policy_node_groups": sorted(
+            address for address in node_groups if address in cni_policy_modules
+        ),
+        "gate": {"passed": not failures, "failures": failures},
+    }
+
+
 def required_output(plan: dict[str, Any], name: str) -> Any:
     output = plan.get("planned_values", {}).get("outputs", {}).get(name)
     if not output or "value" not in output:
@@ -299,6 +396,8 @@ def main() -> int:
     failures = gate_failures(shape, planned, creates, changed_hourly_resources)
     coverage = project_tag_coverage(plan, shape["enable_eks"])
     failures.extend(coverage["gate"]["failures"])
+    dependencies = eks_dependency_review(plan, shape["enable_eks"])
+    failures.extend(dependencies["gate"]["failures"])
 
     summary = {
         "schema_version": 1,
@@ -320,6 +419,7 @@ def main() -> int:
         "hourly_resource_changes": changed_hourly_resources,
         "reviewed_resource_changes": selected_changes(plan, REVIEWED_RESOURCE_TYPES),
         "project_tag_coverage": coverage,
+        "eks_dependencies": dependencies,
         "gate": {"passed": not failures, "failures": failures},
     }
     write_summary(summary_path, summary)

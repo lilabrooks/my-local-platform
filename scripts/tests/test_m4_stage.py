@@ -237,7 +237,7 @@ class ImageStageTest(unittest.TestCase):
                     "eks": {
                         "kubernetes_version": "1.35",
                         "node_capacity_type": "SPOT",
-                        "node_desired": 2,
+                        "node_desired": 3,
                         "node_maximum": 3,
                     },
                     "rds": {"engine_version": "17.11"},
@@ -460,11 +460,11 @@ class ImageStageTest(unittest.TestCase):
 
         self.assertEqual(
             receipt["total_hourly_usd"],
-            "1.021850684931506849315068493",
+            "1.063450684931506849315068493",
         )
         self.assertTrue(receipt["gate"]["passed"])
         markdown = STAGE.price_markdown(receipt)
-        self.assertIn("$1.0219/hour", markdown)
+        self.assertIn("$1.0635/hour", markdown)
         self.assertIn("https://aws.amazon.com/msk/pricing/", markdown)
 
     def test_price_input_requires_an_explicit_fresh_review(self):

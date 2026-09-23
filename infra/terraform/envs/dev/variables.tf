@@ -31,7 +31,7 @@ variable "enable_rds" {
 }
 
 variable "enable_eks" {
-  description = "Create an EKS cluster, node group and NAT gateway. Roughly $115/month. minikube is free."
+  description = "Create an EKS cluster, node group and NAT gateway. Roughly $120/month. minikube is free."
   type        = bool
   default     = false
 }

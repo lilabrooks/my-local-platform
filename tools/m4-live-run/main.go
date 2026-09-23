@@ -40,10 +40,17 @@ const (
 )
 
 var (
-	runIDPattern   = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z$`)
-	commitPattern  = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	accountPattern = regexp.MustCompile(`^[0-9]{12}$`)
-	logPrefixes    = []string{"/aws/eks/mlp-", "/aws/msk/mlp-"}
+	runIDPattern      = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z$`)
+	commitPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	accountPattern    = regexp.MustCompile(`^[0-9]{12}$`)
+	stopReasonPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	logPrefixes       = []string{"/aws/eks/mlp-", "/aws/msk/mlp-"}
+
+	// Variables so tests can shorten the wait for a process group to empty.
+	groupExitGrace            = applyInterruptGrace
+	groupKillGrace            = applyKillGrace
+	groupPollInterval         = 100 * time.Millisecond
+	errProcessExitUnconfirmed = errors.New("process exit could not be confirmed")
 )
 
 type liveRunError struct {
@@ -137,21 +144,36 @@ type stopRequest struct {
 }
 
 type executor interface {
-	Run(arguments []string, environment []string, output io.Writer) int
+	// A non-nil error means the process group may still be running. A normal
+	// command failure returns its exit status with no error, permitting cleanup.
+	Run(arguments []string, environment []string, output io.Writer) (int, error)
 	Signal(os.Signal)
 	ClearPending()
 }
 
-type processExecutor struct {
-	root    string
-	mu      sync.Mutex
-	child   *exec.Cmd
-	pending syscall.Signal
+type executionResult struct {
+	status int
+	err    error
 }
 
-func (e *processExecutor) Run(arguments []string, environment []string, output io.Writer) int {
+type processExecutor struct {
+	root        string
+	mu          sync.Mutex
+	child       *exec.Cmd
+	pending     syscall.Signal
+	groupSignal func(int, syscall.Signal) error
+}
+
+func (e *processExecutor) signalGroup(group int, value syscall.Signal) error {
+	if e.groupSignal != nil {
+		return e.groupSignal(group, value)
+	}
+	return syscall.Kill(-group, value)
+}
+
+func (e *processExecutor) Run(arguments []string, environment []string, output io.Writer) (int, error) {
 	if len(arguments) == 0 {
-		return 127
+		return 127, nil
 	}
 	command := exec.Command(arguments[0], arguments[1:]...)
 	command.Dir = e.root
@@ -167,36 +189,97 @@ func (e *processExecutor) Run(arguments []string, environment []string, output i
 		command.Stdout = output
 		command.Stderr = output
 	}
+	// exec copies a writer that is not a file through a pipe, and Wait also
+	// waits for every holder of that pipe to close it. Bound that wait, so a
+	// member holding the pipe reaches the group check below within the same
+	// grace as one writing to a file.
+	command.WaitDelay = groupExitGrace
+	// Reserve the executor through confirmed group exit, including an unknown
+	// exit. Never replace an unresolved apply with a second Terraform command.
+	e.mu.Lock()
+	if e.child != nil {
+		group := e.child.Process.Pid
+		e.mu.Unlock()
+		return 127, fmt.Errorf(
+			"%w: a previous command (process group %d) still owns the executor",
+			errProcessExitUnconfirmed,
+			group,
+		)
+	}
 	if err := command.Start(); err != nil {
-		e.mu.Lock()
 		e.pending = 0
 		e.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "%s: %v\n", arguments[0], err)
-		return 127
+		return 127, nil
 	}
-	e.mu.Lock()
 	e.child = command
 	pending := e.pending
 	e.pending = 0
 	e.mu.Unlock()
 	if pending != 0 {
-		_ = syscall.Kill(-command.Process.Pid, pending)
+		_ = e.signalGroup(command.Process.Pid, pending)
 	}
 	err := command.Wait()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The command exited 0 but a member kept its output pipe open; the
+		// group check below confirms or kills that member.
+		err = nil
+	}
+	// Keep the child registered while its group drains, so a later stop
+	// signal still reaches any process left behind.
+	if groupErr := waitForGroupExit(command.Process.Pid, e.signalGroup); groupErr != nil {
+		return 127, groupErr
+	}
 	e.mu.Lock()
 	if e.child == command {
 		e.child = nil
 	}
 	e.mu.Unlock()
 	if err == nil {
-		return 0
+		return 0, nil
 	}
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) {
-		return exitError.ExitCode()
+		return exitError.ExitCode(), nil
 	}
 	fmt.Fprintf(os.Stderr, "%s: %v\n", arguments[0], err)
-	return 127
+	return 127, nil
+}
+
+// waitForGroupExit returns nil only when the command's process group is gone.
+// make and its shell can exit on a signal before the Terraform process
+// they started: on 2026-09-22 make reported "Terminated: 15" before
+// Terraform printed its final errors. Cleanup must not start while that
+// Terraform can still hold the state lock or write state. A member that
+// outlives the grace is killed.
+//
+// EPERM means a member may not be signalled; it is not proof of exit. macOS
+// reports it for a group whose last member has exited but awaits reaping, so
+// the wait continues and fails only if the group outlasts SIGKILL.
+func waitForGroupExit(group int, signalGroup func(int, syscall.Signal) error) error {
+	deadline := time.Now().Add(groupExitGrace)
+	killed := false
+	for {
+		if err := signalGroup(group, 0); errors.Is(err, syscall.ESRCH) {
+			return nil
+		} else if err != nil && !errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf("%w: inspect process group %d: %v", errProcessExitUnconfirmed, group, err)
+		}
+		if time.Now().After(deadline) {
+			if killed {
+				return fmt.Errorf("%w: process group %d still has members after SIGKILL", errProcessExitUnconfirmed, group)
+			}
+			fmt.Fprintf(os.Stderr, "process group %d outlived its command; sending SIGKILL\n", group)
+			if err := signalGroup(group, syscall.SIGKILL); errors.Is(err, syscall.ESRCH) {
+				return nil
+			} else if err != nil && !errors.Is(err, syscall.EPERM) {
+				return fmt.Errorf("%w: kill process group %d: %v", errProcessExitUnconfirmed, group, err)
+			}
+			killed = true
+			deadline = time.Now().Add(groupKillGrace)
+		}
+		time.Sleep(groupPollInterval)
+	}
 }
 
 func (e *processExecutor) Signal(value os.Signal) {
@@ -210,13 +293,35 @@ func (e *processExecutor) Signal(value os.Signal) {
 		e.pending = signalValue
 		return
 	}
-	_ = syscall.Kill(-e.child.Process.Pid, signalValue)
+	_ = e.signalGroup(e.child.Process.Pid, signalValue)
 }
 
 func (e *processExecutor) ClearPending() {
 	e.mu.Lock()
 	e.pending = 0
 	e.mu.Unlock()
+}
+
+// ActiveGroup returns the process group of the command that still owns the
+// executor, or 0 when none does.
+func (e *processExecutor) ActiveGroup() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.child == nil || e.child.Process == nil {
+		return 0
+	}
+	return e.child.Process.Pid
+}
+
+// groupDetail names an unresolved command's process group, when the executor
+// knows it, so the owner can check its members before recovery.
+func groupDetail(value executor) string {
+	if reporter, ok := value.(interface{ ActiveGroup() int }); ok {
+		if group := reporter.ActiveGroup(); group > 0 {
+			return fmt.Sprintf(" (process group %d)", group)
+		}
+	}
+	return ""
 }
 
 type awsClient interface {
@@ -598,7 +703,7 @@ func (c *controller) makeArguments(target string, extra ...string) []string {
 
 func (c *controller) createSession() (sessionReceipt, error) {
 	started := utcText(c.now())
-	status := c.executor.Run([]string{
+	status, runErr := c.executor.Run([]string{
 		"python3",
 		filepath.Join(c.root, "scripts", "m4-evidence.py"),
 		"start-session",
@@ -607,6 +712,9 @@ func (c *controller) createSession() (sessionReceipt, error) {
 		"--operator", c.operator,
 		"--region", c.region,
 	}, nil, nil)
+	if runErr != nil {
+		return sessionReceipt{}, runErr
+	}
 	if status != 0 {
 		return sessionReceipt{}, fail("failed to create the live session receipt")
 	}
@@ -764,32 +872,44 @@ func (c *controller) stopRequestReason(fallback string) string {
 }
 
 func (c *controller) stopApply(
-	result <-chan int,
+	result <-chan executionResult,
 	signalChannel <-chan os.Signal,
 	initial syscall.Signal,
-) int {
+) (int, error) {
 	currentSignal := initial
 	c.executor.Signal(currentSignal)
 	heartbeat := time.NewTicker(pollInterval)
 	defer heartbeat.Stop()
+	nextSignal, wait, canEscalate := escalationAfter(currentSignal)
+	escalate := c.afterDelay(wait)
 	for {
-		nextSignal, wait, canEscalate := escalationAfter(currentSignal)
 		select {
-		case status := <-result:
-			return status
-		case <-c.afterDelay(wait):
+		case outcome := <-result:
+			return outcome.status, outcome.err
+		case <-escalate:
 			if !canEscalate {
-				fmt.Fprintln(os.Stderr, "apply process did not exit after SIGKILL; starting cleanup")
-				return 124
+				// Prefer a completed result if it arrived at the final deadline.
+				select {
+				case outcome := <-result:
+					return outcome.status, outcome.err
+				default:
+					return 124, fmt.Errorf(
+						"%w: apply did not exit after SIGKILL%s",
+						errProcessExitUnconfirmed,
+						groupDetail(c.executor),
+					)
+				}
 			}
 			currentSignal = nextSignal
 			c.executor.Signal(currentSignal)
+			nextSignal, wait, canEscalate = escalationAfter(currentSignal)
+			escalate = c.afterDelay(wait)
 		case <-signalChannel:
 			if canEscalate {
 				currentSignal = nextSignal
 				c.executor.Signal(currentSignal)
-			} else {
-				return 124
+				nextSignal, wait, canEscalate = escalationAfter(currentSignal)
+				escalate = c.afterDelay(wait)
 			}
 		case <-heartbeat.C:
 			if err := c.updateState("applying"); err != nil {
@@ -799,18 +919,19 @@ func (c *controller) stopApply(
 	}
 }
 
-func (c *controller) runApply(destroyDeadline time.Time, signalChannel <-chan os.Signal) int {
-	result := make(chan int, 1)
+func (c *controller) runApply(destroyDeadline time.Time, signalChannel <-chan os.Signal) (int, error) {
+	result := make(chan executionResult, 1)
 	environment := append(os.Environ(), "MLP_AWS_LIVE_CONTROLLER_PID="+strconv.Itoa(os.Getpid()))
 	deadlinePoll := time.NewTicker(pollInterval)
 	defer deadlinePoll.Stop()
 	defer c.executor.ClearPending()
 	go func() {
-		result <- c.executor.Run(
+		status, err := c.executor.Run(
 			c.makeArguments("aws-up", "MLP_AWS_LIVE_CONTROLLER_PID="+strconv.Itoa(os.Getpid())),
 			environment,
 			nil,
 		)
+		result <- executionResult{status: status, err: err}
 	}()
 	for {
 		if destroyDeadlineReached(c.now(), destroyDeadline) {
@@ -818,20 +939,22 @@ func (c *controller) runApply(destroyDeadline time.Time, signalChannel <-chan os
 			return c.stopApply(result, signalChannel, syscall.SIGINT)
 		}
 		select {
-		case status := <-result:
-			return status
+		case outcome := <-result:
+			return outcome.status, outcome.err
 		case received := <-signalChannel:
 			c.stopReason = c.stopRequestReason(received.String())
-			initial, ok := received.(syscall.Signal)
-			if !ok {
-				initial = syscall.SIGTERM
-			}
-			return c.stopApply(result, signalChannel, initial)
+			// Every stop starts with SIGINT, whatever woke the controller.
+			// Provider plugins ignore SIGINT and let Terraform stop them and
+			// record partial creates; a plugin that receives SIGTERM exits
+			// mid-request. On 2026-09-22 the stop command's SIGTERM left a
+			// created node group outside state. Another signal still
+			// escalates at once.
+			return c.stopApply(result, signalChannel, syscall.SIGINT)
 		case <-deadlinePoll.C:
 			if err := c.updateState("applying"); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				c.stopReason = "state_write_failed"
-				return c.stopApply(result, signalChannel, syscall.SIGTERM)
+				return c.stopApply(result, signalChannel, syscall.SIGINT)
 			}
 		}
 	}
@@ -886,18 +1009,19 @@ func (c *controller) runWithHeartbeat(
 	environment []string,
 	output io.Writer,
 	phase string,
-) (int, bool) {
-	result := make(chan int, 1)
+) (int, bool, error) {
+	result := make(chan executionResult, 1)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	go func() {
-		result <- c.executor.Run(arguments, environment, output)
+		status, err := c.executor.Run(arguments, environment, output)
+		result <- executionResult{status: status, err: err}
 	}()
 	heartbeatPassed := true
 	for {
 		select {
-		case status := <-result:
-			return status, heartbeatPassed
+		case outcome := <-result:
+			return outcome.status, heartbeatPassed, outcome.err
 		case <-ticker.C:
 			if err := c.updateState(phase); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -905,6 +1029,25 @@ func (c *controller) runWithHeartbeat(
 			}
 		}
 	}
+}
+
+func (c *controller) blockCleanupOnProcess(err error) int {
+	if c.stopReason == "" {
+		c.stopReason = "process_exit_unconfirmed"
+	}
+	c.state.StopReason = c.stopReason
+	c.state.Result = "cleanup_failed"
+	c.state.CleanupVerified = boolPointer(false)
+	c.state.CleanupBlockedReason = "process_exit_unconfirmed"
+	c.state.Error = err.Error()
+	if stateErr := c.updateState("cleanup_failed"); stateErr != nil {
+		fmt.Fprintln(os.Stderr, stateErr)
+	}
+	fmt.Fprintln(os.Stderr, err)
+	fmt.Fprintln(os.Stderr, "cleanup blocked: resources may still be running.")
+	fmt.Fprintln(os.Stderr, "Confirm that no process from this run remains: `pgrep -l -g <group>` must print nothing for each process group named above, and `pgrep -fl 'm4-live-run|terraform'` must list none from this run.")
+	fmt.Fprintln(os.Stderr, "Then follow the AWS runbook's manual recovery procedure. Do not force-unlock or start another Terraform command while any remain.")
+	return 1
 }
 
 func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
@@ -975,12 +1118,16 @@ func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
 			transcriptPassed = false
 		}
 		var heartbeatOK bool
-		destroyStatus, heartbeatOK = c.runWithHeartbeat(
+		destroyStatus, heartbeatOK, err = c.runWithHeartbeat(
 			c.makeArguments("aws-down", "AWS_DESTROY_ARGS=-auto-approve"),
 			nil,
 			transcript,
 			"destroying",
 		)
+		if err != nil {
+			_ = transcript.Close()
+			return c.blockCleanupOnProcess(fmt.Errorf("destroy: %w", err))
+		}
 		heartbeatPassed = heartbeatPassed && heartbeatOK
 		if !writeFormatted(transcript, "destroy exit: %d\n", destroyStatus) {
 			transcriptPassed = false
@@ -994,12 +1141,16 @@ func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
 	}
 	logsPassed, heartbeatOK := c.deleteLogsWithHeartbeat(transcript)
 	heartbeatPassed = heartbeatPassed && heartbeatOK
-	stateStatus, heartbeatOK := c.runWithHeartbeat(
+	stateStatus, heartbeatOK, err := c.runWithHeartbeat(
 		c.makeArguments("aws-state-empty"),
 		nil,
 		transcript,
 		"destroying",
 	)
+	if err != nil {
+		_ = transcript.Close()
+		return c.blockCleanupOnProcess(fmt.Errorf("state check: %w", err))
+	}
 	heartbeatPassed = heartbeatPassed && heartbeatOK
 	if !writeFormatted(transcript, "terraform state check exit: %d\n", stateStatus) {
 		transcriptPassed = false
@@ -1015,7 +1166,7 @@ func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
 
 	inventoryStatus := 1
 	for attempt := 1; attempt <= inventoryAttempts; attempt++ {
-		inventoryStatus, heartbeatOK = c.runWithHeartbeat(
+		inventoryStatus, heartbeatOK, err = c.runWithHeartbeat(
 			c.makeArguments(
 				"aws-inventory-empty",
 				"AWS_INVENTORY_FILE="+filepath.Join(c.raw, "21-inventory-after.json"),
@@ -1024,6 +1175,9 @@ func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
 			nil,
 			"verifying",
 		)
+		if err != nil {
+			return c.blockCleanupOnProcess(fmt.Errorf("inventory: %w", err))
+		}
 		heartbeatPassed = heartbeatPassed && heartbeatOK
 		if inventoryStatus == 0 {
 			break
@@ -1036,12 +1190,16 @@ func (c *controller) cleanup(session sessionReceipt, applyStatus int) int {
 	costOutput, costOpenErr := os.OpenFile(costPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	costStatus := 1
 	if costOpenErr == nil {
-		costStatus, heartbeatOK = c.runWithHeartbeat(
+		costStatus, heartbeatOK, err = c.runWithHeartbeat(
 			c.makeArguments("aws-cost"),
 			nil,
 			costOutput,
 			"verifying",
 		)
+		if err != nil {
+			_ = costOutput.Close()
+			return c.blockCleanupOnProcess(fmt.Errorf("cost observation: %w", err))
+		}
 		heartbeatPassed = heartbeatPassed && heartbeatOK
 		if closeErr := costOutput.Close(); closeErr != nil {
 			costStatus = 1
@@ -1116,13 +1274,16 @@ func (c *controller) run(signalChannel <-chan os.Signal) (exitCode int) {
 
 	// Refuse stale or rewritten staging inputs and a changed operator IP before
 	// creating a spent session or entering the cleanup path that deletes ECR.
-	if status := c.executor.Run([]string{
+	if status, runErr := c.executor.Run([]string{
 		"python3", filepath.Join(c.root, "scripts", "m4-stage.py"), "verify-go-no-go",
 		"--run-id", c.runID, "--commit", c.commit, "--region", c.region,
 		"--plan", filepath.Join(c.root, "infra/terraform/envs/dev/.terraform/mlp-reviewed.tfplan"),
 		"--summary", filepath.Join(c.raw, "03-plan-summary.json"),
 		"--output", filepath.Join(c.raw, "06-go-no-go.json"), "--before-session",
-	}, restrictedAWSEnvironment(c.profile, c.region), os.Stderr); status != 0 {
+	}, restrictedAWSEnvironment(c.profile, c.region), os.Stderr); runErr != nil {
+		fmt.Fprintln(os.Stderr, runErr)
+		return 1
+	} else if status != 0 {
 		return status
 	}
 
@@ -1149,7 +1310,10 @@ func (c *controller) run(signalChannel <-chan os.Signal) (exitCode int) {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	applyStatus := c.runApply(destroyDeadline, signalChannel)
+	applyStatus, applyErr := c.runApply(destroyDeadline, signalChannel)
+	if applyErr != nil {
+		return c.blockCleanupOnProcess(fmt.Errorf("apply: %w", applyErr))
+	}
 	c.state.ApplyExit = intPointer(applyStatus)
 	if applyStatus == 0 {
 		if err := c.updateState("live"); err != nil {
@@ -1202,6 +1366,13 @@ func requestStop(root, runID, reason string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "operator_stop"
+	}
+	if !stopReasonPattern.MatchString(reason) {
+		return "", fail("stop reason must be 1 to 64 lowercase letters, digits or underscores, starting with a letter")
+	}
 	var state controllerState
 	if err := readJSON(filepath.Join(raw, "controller-state.json"), &state, "controller state"); err != nil {
 		return "", err
@@ -1218,10 +1389,6 @@ func requestStop(root, runID, reason string, now time.Time) (string, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "operator_stop"
-	}
 	if err := writeJSONAtomic(path, stopRequest{
 		SchemaVersion: 1,
 		RunID:         runID,
@@ -1230,9 +1397,10 @@ func requestStop(root, runID, reason string, now time.Time) (string, error) {
 	}); err != nil {
 		return "", err
 	}
-	// During apply, wake the controller immediately so it can forward SIGTERM
-	// to Terraform. During the live phase the controller polls this file once a
-	// second; leaving it unsignalled preserves the operator's recorded reason.
+	// During apply, wake the controller immediately. It starts Terraform's
+	// interrupt with SIGINT whatever signal woke it. During the live phase the
+	// controller polls this file once a second; leaving it unsignalled
+	// preserves the operator's recorded reason.
 	if state.Phase == "applying" {
 		_ = signalProcess(state.ControllerPID, syscall.SIGTERM)
 	}
@@ -1264,15 +1432,16 @@ func currentStatus(root, runID string, now time.Time) (map[string]any, error) {
 		seconds = 0
 	}
 	return map[string]any{
-		"run_id":                runID,
-		"phase":                 state.Phase,
-		"result":                state.Result,
-		"controller_running":    controllerStateRunning(state, now),
-		"controller_updated_at": state.UpdatedAt,
-		"destroy_deadline":      utcText(destroy),
-		"hard_deadline":         utcText(hard),
-		"seconds_until_destroy": seconds,
-		"cleanup_verified":      state.CleanupVerified,
+		"run_id":                 runID,
+		"phase":                  state.Phase,
+		"result":                 state.Result,
+		"controller_running":     controllerStateRunning(state, now),
+		"controller_updated_at":  state.UpdatedAt,
+		"destroy_deadline":       utcText(destroy),
+		"hard_deadline":          utcText(hard),
+		"seconds_until_destroy":  seconds,
+		"cleanup_verified":       state.CleanupVerified,
+		"cleanup_blocked_reason": state.CleanupBlockedReason,
 	}, nil
 }
 
