@@ -47,7 +47,7 @@ An earlier approval does not imply a later one.
 
 | Component | Shape |
 |---|---|
-| EKS | Kubernetes 1.35 in standard support, three desired Spot `t3.medium` nodes, range 1 to 3 |
+| EKS | Kubernetes 1.36 in standard support, three desired Spot `t3.medium` nodes, range 1 to 3 |
 | MSK Serverless | one cluster, 12-partition delivery topic, one-partition DLQ |
 | RDS | one private single-AZ `db.t4g.micro`, 20 GB gp3 |
 | Relay | two ingest pods; KEDA scales deliver from 1 to 12, which three workers fit (see [pod capacity](#infrastructure-prerequisites)); one relay image digest |
@@ -69,6 +69,11 @@ The resolved EKS module disables `bootstrap_self_managed_addons`. AWS's
 [CreateCluster API](https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateCluster.html#API_CreateCluster_RequestSyntax)
 documents that this suppresses VPC CNI, CoreDNS and kube-proxy. This topology
 must declare them explicitly alongside the Pod Identity agent.
+
+The [1.36 version amendment](adr/0010-live-aws-relay-contract.md#kubernetes-version-amendment-accepted-2026-09-23)
+records the compatible add-on pins and worker-image availability checked on
+2026-09-23. Refresh these observations for the candidate being staged. The
+historical 1.35 qualification and GO receipts do not qualify this runtime.
 
 The EKS and VPC modules are pinned exactly. `make aws-plan` runs
 `scripts/check-aws-plan.py`, which reviews the saved plan's end state. With
@@ -132,7 +137,7 @@ Do not apply if any of these is false:
 
 - `aws sts get-caller-identity` is the intended account and role;
 - no account id or credential value is present in a tracked or staged file;
-- Kubernetes 1.35 is in EKS standard support in `us-east-1`;
+- Kubernetes 1.36 is in EKS standard support in `us-east-1`;
 - current published inputs keep the modeled shape at or below $1.25/hour;
 - the reviewed plan has no more than one EKS cluster, one MSK cluster, one RDS
   instance, one NAT gateway, three worker nodes, or 13 topic partitions;
@@ -419,6 +424,42 @@ cluster.
 
 ## Before staging
 
+The 1.36 candidate needs a local qualification on a 1.36 control plane and
+1.36 nodes. KEDA 2.20.2's
+[published tested window](https://keda.sh/docs/2.20/operate/cluster/#kubernetes-compatibility)
+ends at 1.35. Before staging, install the pinned KEDA and record successful
+ScaledObject reconciliation, the generated HPA, external-metrics access,
+scale-out above one under the existing demo workload, lag draining and
+scale-in. An echo-only rehearsal cannot satisfy this dependency. Failure ends
+the attempt under the existing bounds; repair and qualify locally before
+requesting staging.
+
+Use the [local version guidance](runbook-local.md#local-kubernetes-version)
+to prepare the intended cluster deliberately. These rehearsal commands require
+profile and context `mlp`; local capture reads `$HOME/.kube/config`.
+Use that same kubeconfig throughout, verify the context points to the selected
+1.36 cluster, and capture the actual versions before loading or testing the
+candidate:
+
+```bash
+export KUBECONFIG="$HOME/.kube/config"
+kubectl config use-context mlp
+local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
+umask 077
+mkdir -p .evidence/m4-local
+kubectl --context mlp version -o json \
+  > ".evidence/m4-local/$local_run_id-kubernetes-before.json"
+kubectl --context mlp get nodes -o json \
+  > ".evidence/m4-local/$local_run_id-nodes-before.json"
+```
+
+Check `serverVersion.gitVersion` and every node's
+`status.nodeInfo.kubeletVersion`: each must be 1.36.x. An absent, mixed or
+different minor does not qualify this candidate. Add the context, capture
+time, observed versions and the files' paths/hashes to the existing candidate
+qualification note. The ordinary rehearsal receipts do not capture these
+versions automatically, so keep the note and raw files with the handoff.
+
 With the local stack and telemetry running, build and load the exact clean
 candidate first. Keep ArgoCD synced to that candidate; a different Git-managed
 image or ConfigMap makes this rehearsal invalid.
@@ -438,13 +479,18 @@ Then run the controlled Kubernetes shutdown rehearsal. Keep its receipt outside
 the live packet:
 
 ```bash
-local_run_id=$(date -u +%Y%m%dT%H%M%SZ)
 make m4-k8s-sigterm M4_LOCAL_RUN_ID="$local_run_id"
 make m4-local-demo M4_LOCAL_RUN_ID="$local_run_id"
 make m4-local-capture M4_LOCAL_RUN_ID="$local_run_id"
 make aws-live-rehearse
 make m4-local-abort M4_LOCAL_RUN_ID="$local_run_id"
 ```
+
+Repeat the two version queries after qualification, writing
+`$local_run_id-kubernetes-after.json` and `$local_run_id-nodes-after.json`
+beside the before files. Require the same 1.36 minor and record both captures
+in the qualification note before accepting it. This is an operator evidence
+check; the existing receipt schema and preflight do not enforce it.
 
 This deliberately terminates one local ingest pod and one local delivery pod.
 It proves that an in-flight ingest is accepted, published, and delivered after
@@ -546,7 +592,7 @@ definitions, a subscriber on each notification, and an `OK` state for each. It a
 requires enough remaining capacity for one EKS cluster, one MSK Serverless
 cluster, one RDS instance, six Standard Spot vCPUs, and one Elastic IP. The Spot
 check reserves six vCPUs for the 3-node maximum and subtracts both running
-instances and unfulfilled requests. It checks Kubernetes 1.35 standard support,
+instances and unfulfilled requests. It checks Kubernetes 1.36 standard support,
 published MSK service presence,
 the two fixed RDS offerings, and `t3.medium` offerings in `us-east-1a` and
 `us-east-1b`. The MSK check combines the account-visible Kafka region with the

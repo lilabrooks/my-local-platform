@@ -135,7 +135,7 @@ from [AWS's own EKS pricing page](https://aws.amazon.com/eks/pricing/).
 
 This is not hypothetical. The first draft of `expensive.tf` pinned `1.31`,
 which is already in extended support and would have quietly billed at the
-higher rate. It is now pinned to `1.35`, in standard support until 2027-03-27
+higher rate. It is now pinned to `1.36`, in standard support until 2027-08-02
 per [AWS's EKS release calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html).
 
 Check before changing the version:

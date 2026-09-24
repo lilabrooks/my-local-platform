@@ -31,7 +31,7 @@ def shape(**overrides):
         "expected_hourly_usd": 0,
         "maximum_hourly_usd": 1.25,
         "eks": {
-            "kubernetes_version": "1.35",
+            "kubernetes_version": "1.36",
             "node_capacity_type": "SPOT",
             "node_desired": 3,
             "node_maximum": 3,
@@ -51,8 +51,8 @@ NODE_GROUP_MODULE = 'module.eks[0].module.eks_managed_node_group["default"]'
 PINNED_ADDONS = {
     "vpc-cni": ("before_compute", "v1.22.4-eksbuild.3"),
     "eks-pod-identity-agent": ("before_compute", "v1.3.10-eksbuild.3"),
-    "coredns": ("this", "v1.13.2-eksbuild.31"),
-    "kube-proxy": ("this", "v1.35.3-eksbuild.29"),
+    "coredns": ("this", "v1.14.3-eksbuild.23"),
+    "kube-proxy": ("this", "v1.36.0-eksbuild.25"),
 }
 OMIT = object()
 
@@ -369,7 +369,7 @@ class PlanShapeTest(unittest.TestCase):
             enable_eks=True,
             expected_hourly_usd=1.26,
             eks={
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "node_capacity_type": "ON_DEMAND",
                 "node_desired": 4,
                 "node_maximum": 4,
@@ -485,7 +485,7 @@ class GuardScriptTest(unittest.TestCase):
             "enable_eks": True,
             "budget_name": "mlp-live-aws-monthly",
             "region": "us-east-1",
-            "eks_version": "1.35",
+            "eks_version": "1.36",
         }
         cheap_runtime = {
             **runtime,
@@ -635,7 +635,7 @@ case "$1 $2" in
     if [ -n "${MLP_FAKE_EKS_RESPONSE:-}" ]; then
       printf '%s\\n' "$MLP_FAKE_EKS_RESPONSE"
     else
-      printf '%s\\n' '{"clusterVersions":[{"clusterVersion":"1.35","versionStatus":"STANDARD_SUPPORT"}]}'
+      printf '%s\\n' '{"clusterVersions":[{"clusterVersion":"1.36","versionStatus":"STANDARD_SUPPORT"}]}'
     fi
     ;;
   *) exit 2 ;;
@@ -787,22 +787,22 @@ esac
 
     def test_support_rejects_nonstandard_or_unproved_versions_before_plan_and_apply(self):
         versions = (
-            {"clusterVersion": "1.35", "versionStatus": "EXTENDED_SUPPORT"},
-            {"clusterVersion": "1.35", "versionStatus": "UNSUPPORTED"},
-            {"clusterVersion": "1.35"},
+            {"clusterVersion": "1.36", "versionStatus": "EXTENDED_SUPPORT"},
+            {"clusterVersion": "1.36", "versionStatus": "UNSUPPORTED"},
+            {"clusterVersion": "1.36"},
             {"clusterVersion": "1.34", "versionStatus": "STANDARD_SUPPORT"},
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": "EXTENDED_SUPPORT",
                 "status": "standard-support",
             },
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": "",
                 "status": "standard-support",
             },
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": None,
                 "status": "standard-support",
             },
@@ -840,9 +840,9 @@ esac
 
     def test_support_accepts_authoritative_status_and_legacy_only_response(self):
         for version in (
-            {"clusterVersion": "1.35", "status": "standard-support"},
+            {"clusterVersion": "1.36", "status": "standard-support"},
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": "STANDARD_SUPPORT",
                 "status": "extended-support",
             },

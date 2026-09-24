@@ -83,7 +83,13 @@ containers and their volumes. Tearing down removes the containers;
 | Remove the containers, keep the volumes | `make down` |
 | Remove the containers and **delete the Compose data volumes** | `make clean` |
 | Pause the local cluster, keeping its state | `make k8s-down` |
-| Resume the cluster | `make k8s-up` |
+| Resume an existing v1.35.1 cluster at that version | `make k8s-up MINIKUBE_K8S_VERSION=v1.35.1` |
+
+`make k8s-up` defaults to v1.36.5 and upgrades an older profile in place.
+For a resume without a version change, set `MINIKUBE_K8S_VERSION` to that
+profile's installed version. See the
+[local version guidance](docs/runbook-local.md#local-kubernetes-version)
+before upgrading or creating a separate profile.
 
 Choose shutdown profiles to cover every service you want stopped. On resume,
 choose only the profiles you want running; the selections can differ. `start`

@@ -45,7 +45,7 @@ variable "enable_msk" {
 variable "eks_kubernetes_version" {
   description = "EKS Kubernetes version. The guarded plan and apply require STANDARD_SUPPORT."
   type        = string
-  default     = "1.35"
+  default     = "1.36"
 }
 
 variable "eks_operator_cidr" {

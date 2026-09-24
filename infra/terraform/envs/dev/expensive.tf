@@ -179,10 +179,10 @@ module "eks" {
   # applied automatically with no approval step. Check before changing:
   #   aws eks describe-cluster-versions \
   #     --query 'clusterVersions[?versionStatus==`STANDARD_SUPPORT`].clusterVersion'
-  # 1.35 is in standard support until 2027-03-27.
+  # 1.36 is in standard support until 2027-08-02.
   kubernetes_version = var.eks_kubernetes_version
 
-  # Kubernetes 1.35 encrypts all API data with an AWS-owned key by default.
+  # Kubernetes 1.36 encrypts all API data with an AWS-owned key by default.
   # Avoid a customer-managed key that would remain pending deletion after the
   # short-lived cluster is destroyed.
   encryption_config = null
@@ -199,17 +199,17 @@ module "eks" {
     # before_compute wait for the node groups. before_compute does not make
     # compute wait for the add-on; the module only delays compute by 30
     # seconds. scripts/check-aws-plan.py rejects a saved plan that lacks these
-    # add-ons, their versions or the CNI placement. Versions checked for 1.35
-    # with describe-addon-versions in us-east-1 on 2026-09-22.
+    # add-ons, their versions or the CNI placement. Versions checked for 1.36
+    # with describe-addon-versions in us-east-1 on 2026-09-23.
     vpc-cni = {
       addon_version  = "v1.22.4-eksbuild.3"
       before_compute = true
     }
     kube-proxy = {
-      addon_version = "v1.35.3-eksbuild.29"
+      addon_version = "v1.36.0-eksbuild.25"
     }
     coredns = {
-      addon_version = "v1.13.2-eksbuild.31"
+      addon_version = "v1.14.3-eksbuild.23"
     }
     eks-pod-identity-agent = {
       addon_version  = "v1.3.10-eksbuild.3"

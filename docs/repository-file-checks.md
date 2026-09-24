@@ -686,8 +686,9 @@ the rendered YAML must parse and contain at least 1 document.
 The schema script separately discovers every Kustomize root under
 `k8s/manifests`, `k8s/aws`, and `k8s/apps/aws`. It renders those roots, the
 generated runtime, replay, and AWS root Application, and the pinned
-kube-prometheus-stack chart. Kubeconform 0.8.0 runs with `-strict`, `-summary`,
-`-ignore-missing-schemas`, and Kubernetes schema version `1.35.0`. Objects
+kube-prometheus-stack chart with Helm's `--kube-version 1.36.0`.
+Kubeconform 0.8.0 runs with `-strict`, `-summary`,
+`-ignore-missing-schemas`, and Kubernetes schema version `1.36.0`. Objects
 without a schema are skipped by kubeconform; focused Go tests cover selected
 custom-resource contracts.
 
@@ -934,7 +935,7 @@ runtime and installation dependencies needed to execute those checks.
 | Terraform format, validate, and mocked tests | Terraform 1.16.3 in CI; provider and module downloads during backend-free initialization. Versions are detailed below. |
 | TFLint | Docker image `ghcr.io/terraform-linters/tflint:v0.64.0`, built-in recommended Terraform rules, and AWS ruleset 0.44.0 downloaded by `tflint --init`. The lint script has no native TFLint path. |
 | Kubernetes rendering and invariants | Go and the YAML libraries below, kubectl's Kustomize renderer, Helm, Docker, Python 3, and `kube-prometheus-stack` chart 88.5.4. |
-| Kubernetes schemas and embedded telemetry configuration | Digest-pinned kubeconform 0.8.0 image, downloaded Kubernetes 1.35.0 schemas, Tempo 3.0.3, and OpenTelemetry Collector Contrib 0.159.0. The schema script runs the service binaries directly in Docker. |
+| Kubernetes schemas and embedded telemetry configuration | Digest-pinned kubeconform 0.8.0 image, downloaded Kubernetes 1.36.0 schemas, Tempo 3.0.3, and OpenTelemetry Collector Contrib 0.159.0. The schema script runs the service binaries directly in Docker. |
 | Dashboard generation and validation | Python standard-library `json` for generation; Go standard-library JSON plus the Kubernetes YAML libraries for the source/ConfigMap contract. |
 | Container builds and smoke suite | Docker Engine, Compose, Buildx/BuildKit, AWS CLI and curl for emulator seeding, service Go modules, pinned Dockerfile build images, and the Compose images below. SQL tests require seeded Postgres in the smoke job. |
 | Security scanning | Trivy vulnerability database and digest-pinned checks bundle; full checkout history for Gitleaks in CI. These data downloads are separate from executable installation. |

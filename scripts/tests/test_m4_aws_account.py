@@ -63,7 +63,7 @@ class FakeRunner:
         ]
         self.msk_service_quota: dict | None = None
         self.eks_version = {
-            "clusterVersion": "1.35",
+            "clusterVersion": "1.36",
             "versionStatus": "STANDARD_SUPPORT",
         }
         self.spot_instances: list[dict] = []
@@ -405,22 +405,22 @@ class AccountEvidenceTest(unittest.TestCase):
 
     def test_eks_support_rejects_versions_outside_standard_support(self):
         for version in (
-            {"clusterVersion": "1.35", "versionStatus": "EXTENDED_SUPPORT"},
-            {"clusterVersion": "1.35", "versionStatus": "UNSUPPORTED"},
-            {"clusterVersion": "1.35"},
-            {"clusterVersion": "1.34", "versionStatus": "STANDARD_SUPPORT"},
+            {"clusterVersion": "1.36", "versionStatus": "EXTENDED_SUPPORT"},
+            {"clusterVersion": "1.36", "versionStatus": "UNSUPPORTED"},
+            {"clusterVersion": "1.36"},
+            {"clusterVersion": "1.35", "versionStatus": "STANDARD_SUPPORT"},
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": "EXTENDED_SUPPORT",
                 "status": "standard-support",
             },
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": "",
                 "status": "standard-support",
             },
             {
-                "clusterVersion": "1.35",
+                "clusterVersion": "1.36",
                 "versionStatus": None,
                 "status": "standard-support",
             },
@@ -438,7 +438,7 @@ class AccountEvidenceTest(unittest.TestCase):
     def test_eks_support_accepts_the_deprecated_lowercase_status(self):
         runner = FakeRunner()
         runner.eks_version = {
-            "clusterVersion": "1.35",
+            "clusterVersion": "1.36",
             "status": "standard-support",
         }
 
@@ -455,7 +455,7 @@ class AccountEvidenceTest(unittest.TestCase):
     def test_eks_support_prefers_current_status_over_deprecated_status(self):
         runner = FakeRunner()
         runner.eks_version = {
-            "clusterVersion": "1.35",
+            "clusterVersion": "1.36",
             "versionStatus": "STANDARD_SUPPORT",
             "status": "extended-support",
         }

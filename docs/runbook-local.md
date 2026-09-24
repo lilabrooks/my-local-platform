@@ -138,6 +138,35 @@ running the cluster workloads; use the profile subset under
 
 `make urls` prints every endpoint.
 
+### Local Kubernetes version
+
+`make k8s-up` defaults to Kubernetes v1.36.5. Passing this newer version to
+an existing 1.35 profile upgrades it in place, including the control plane
+that holds ArgoCD, KEDA and monitoring state. Minikube does not support
+downgrading that cluster. The
+[1.36 rehearsal](adr/0010-live-aws-relay-contract.md#kubernetes-136-update-2026-09-23)
+used a fresh profile and did not test an in-place upgrade.
+
+Check `minikube profile list -o json` for the installed version. To resume the
+existing v1.35.1 `mlp` profile at that version:
+
+```bash
+make k8s-up MINIKUBE_K8S_VERSION=v1.35.1
+```
+
+Separate profiles and kubeconfigs support exploratory checks, as in the
+echo rehearsal. Full M4 qualification currently requires the minikube
+profile and context `mlp`, with that context in `$HOME/.kube/config`.
+The termination verifier inspects images inside Docker container `mlp`,
+and the local capture script explicitly reads the default kubeconfig.
+Renaming a scratch context alone does not meet those requirements.
+
+Preparing a fresh `mlp` on 1.36 therefore requires an explicit decision to
+recreate that profile. `make k8s-delete` deletes its state; starting it again
+requires controller installation and application bootstrap. Preserve any
+state you need before choosing deletion. The complete qualification must
+include the [KEDA and version evidence](runbook-aws-relay.md#before-staging).
+
 ## Endpoints
 
 | Service | Address | Credentials |
@@ -559,11 +588,13 @@ broker before the cluster:
 
 ```bash
 make k8s-down   # minikube stop -p mlp; keeps cluster state
-make k8s-up     # back, with the pinned CPU, memory and version
+make k8s-up MINIKUBE_K8S_VERSION=v1.35.1  # resume the existing 1.35.1 profile
 ```
 
 Full order to pause: `make k8s-down`, then `docker compose ... stop`. To
-resume: `docker compose ... start`, then `make k8s-up`. After `make k8s-up`,
+resume: `docker compose ... start`, then `make k8s-up` with the profile's
+installed `MINIKUBE_K8S_VERSION` (see [version guidance](#local-kubernetes-version)).
+After `make k8s-up`,
 ArgoCD reconciles against `main`, so the revision it reports can advance past
 the one it showed when you paused; that is a comparison revision, not evidence
 about which images the pods are running.
