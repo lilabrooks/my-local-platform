@@ -399,11 +399,49 @@ fi
 
 # --- Secrets ----------------------------------------------------------------
 # Runs last: it is the one whose failure should be impossible to miss.
+#
+# Gitleaks 8.30.1 exits 0 when git cannot read the repository: it logs git's
+# error, then "0 commits scanned" and "no leaks found". The Docker fallback did
+# that in every linked worktree, whose `.git` is a file pointing into the main
+# repository's git directory -- a path the /repo mount did not include. `make
+# lint` passed there while CI, in a full clone, found a leak in the same commits
+# (PR #156).
+#
+# So the container also gets the common git directory, read-only, at its host
+# path, which is where a worktree's pointer leads. In a normal clone that is
+# /repo/.git a second time, which changes nothing, and CI runs the same command
+# a worktree does.
+#
+# The mount fixes the cause that was found; the count check catches the next
+# one, such as a worktree whose pointer is relative. Every checkout of this
+# repository has commits, so a scan that read none did not run, whatever
+# Gitleaks exits with. Gitleaks leaves out commits with no text diff to scan,
+# such as merges, so its count is tested for zero rather than compared with
+# `git rev-list --count`.
+report_gitleaks() {
+  local code="$1" out="$2" scanned commits
+  # The summary line is colored, so match the number rather than the line.
+  scanned=$(printf '%s\n' "$out" | grep -Eo '[0-9]+ commits scanned' | tail -1 | cut -d' ' -f1)
+  if [ "$code" -eq 0 ] && [ "${scanned:-0}" -eq 0 ]; then
+    commits=$(git rev-list --count HEAD 2>&1)
+    code=1
+    # First, because report shows only the first 25 lines.
+    out="Gitleaks exited 0 after scanning ${scanned:-no} commits, but \`git rev-list --count HEAD\` gives $commits. A scan that read no history is not a pass.
+${out}"
+  fi
+  report "gitleaks" "$code" "$out"
+}
+
 if has gitleaks && pinned "$GITLEAKS_VERSION" "$(gitleaks version 2>&1)"; then
-  out=$(gitleaks detect --source=. --no-banner --redact 2>&1); report "gitleaks" $? "$out"
+  out=$(gitleaks detect --source=. --no-banner --redact 2>&1); report_gitleaks $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo "zricethezav/gitleaks:v$GITLEAKS_VERSION" \
-        detect --source=. --no-banner --redact 2>&1); report "gitleaks" $? "$out"
+  if git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>&1); then
+    out=$(docker run --rm -v "$PWD":/repo -v "$git_common":"$git_common":ro -w /repo \
+          "zricethezav/gitleaks:v$GITLEAKS_VERSION" \
+          detect --source=. --no-banner --redact 2>&1); report_gitleaks $? "$out"
+  else
+    report "gitleaks" 1 "cannot find the git directory to scan: $git_common"
+  fi
 else
   skip "gitleaks" "needs docker or gitleaks $GITLEAKS_VERSION"
 fi

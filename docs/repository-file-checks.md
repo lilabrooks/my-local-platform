@@ -499,13 +499,24 @@ gitleaks detect --source=. --no-banner --redact
 
 CI checks out full history before `make lint`, so Gitleaks can detect a secret
 that was committed and later removed. Findings are redacted in command output.
-The local result covers the history available in the local clone. In a git
-worktree, the Docker fallback sees none: the worktree's `.git` file points
-outside the mounted directory, so Gitleaks reports "0 commits scanned" and
-passes without checking anything. Run it from a normal clone instead.
+Gitleaks scans the history of every ref (`git log --all`), including other
+worktrees' `HEAD` commits. The checked-out `.gitleaks.toml` applies to all of
+it.
 
 Gitleaks accepts a local binary only when it reports version 8.30.1. Its Docker
-fallback is `zricethezav/gitleaks:v8.30.1`.
+fallback is `zricethezav/gitleaks:v8.30.1`. In a linked git worktree, `.git` is
+a file that points into the main repository's git directory, outside the
+checkout the container mounts. So the fallback also mounts the common git
+directory, read-only, at its host path, where that pointer leads. In a
+normal clone that directory is already inside the checkout. A worktree created
+with relative paths (`git worktree add --relative-paths`) still cannot be read
+in the container, and the count check below fails it.
+
+Gitleaks 8.30.1 exits 0 when git cannot read the repository: it logs the git
+error, then reports "0 commits scanned" and "no leaks found". The script fails
+the check when Gitleaks exits 0 without scanning a commit. The count leaves out
+commits with no text diff to scan, such as merges, so it doesn't line up with
+`git rev-list --count HEAD`, and the script checks only that it's above zero.
 
 #### Accepted Gitleaks findings
 
