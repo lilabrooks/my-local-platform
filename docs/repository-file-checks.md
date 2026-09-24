@@ -423,6 +423,28 @@ at least one Rego policy below `policy/content` and the pinned digest in
 `policy/metadata.json` before scanning. A refresh failure after all 3 attempts
 fails the Trivy check.
 
+Trivy does not download a cached bundle again while its metadata names the
+pinned digest. For 24 hours after `DownloadedAt` it does not ask the registry.
+After that, the registry digest matches the pin, so Trivy only rewrites
+`DownloadedAt`. A cache that loses its policy files but keeps
+`policy/metadata.json` would fail every later run; this has happened under the
+macOS `$TMPDIR`, from an unproven cause. Before the pull, the script looks for
+that state: metadata naming the pinned digest and no Rego policy below
+`policy/content`. When it finds it, the script deletes only
+`policy/metadata.json` and prints a `NOTE` line, and the pull downloads the
+bundle as it would for a new cache. The verification above still decides
+whether the scan runs, so a failed or unpinned download still fails the Trivy
+check.
+
+Runs that share a cache are not isolated from each other's downloads. A
+download removes `policy/content` and extracts the bundle again file by file.
+The final scan reads that directory without consulting the metadata, and when
+the directory is missing Trivy falls back to its embedded checks, silently
+under `--quiet`. A scan that starts while another run downloads into the same
+cache can therefore load an incomplete or embedded rule set. Under the current
+pins, Trivy 0.74.0 downloads the bundle only into a new cache, after the repair
+above, or when it cannot read the metadata.
+
 The final repository scan runs:
 
 ```bash

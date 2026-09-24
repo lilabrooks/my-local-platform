@@ -307,6 +307,17 @@ TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache-${TRIVY_CHECKS_DIGEST#sha256:}"
 TRIVY_CHECKS_INPUT="$TRIVY_CACHE/checks-prefetch-input"
 mkdir -p "$TRIVY_CACHE" "$TRIVY_CHECKS_INPUT"
 
+# The two halves of a usable checks bundle: at least one downloaded policy, and
+# metadata naming the repository-pinned digest.
+trivy_checks_present() {
+  find "$TRIVY_CACHE/policy/content" -name '*.rego' -type f \
+    -print -quit 2>/dev/null | grep -q .
+}
+trivy_checks_pinned() {
+  grep -Fq "\"Digest\":\"$TRIVY_CHECKS_DIGEST\"" \
+    "$TRIVY_CACHE/policy/metadata.json" 2>/dev/null
+}
+
 # retry_net_until_checks <attempts> <command...>
 # Trivy returns zero when its checks pull fails and it falls back to embedded
 # checks. Require at least one downloaded policy and the repository-pinned
@@ -316,11 +327,7 @@ retry_net_until_checks() {
   local i out code
   for i in $(seq 1 "$attempts"); do
     out=$("$@" 2>&1); code=$?
-    if [ "$code" -eq 0 ] && \
-       find "$TRIVY_CACHE/policy/content" -name '*.rego' -type f \
-         -print -quit 2>/dev/null | grep -q . && \
-       grep -Fq "\"Digest\":\"$TRIVY_CHECKS_DIGEST\"" \
-         "$TRIVY_CACHE/policy/metadata.json" 2>/dev/null; then
+    if [ "$code" -eq 0 ] && trivy_checks_present && trivy_checks_pinned; then
       printf '%s' "$out"
       return 0
     fi
@@ -341,6 +348,20 @@ elif has_docker; then
   TRIVY_MODE=container
 else
   skip "trivy" "needs docker or trivy $TRIVY_VERSION"
+fi
+
+# A cache can lose its policy files and keep its metadata; it happened under the
+# macOS $TMPDIR, cause unproven. Trivy never repairs that on its own. It skips
+# the registry for 24 hours after DownloadedAt, and after that the registry
+# digest equals the pin, so it only rewrites DownloadedAt (0.74.0,
+# pkg/policy/policy.go NeedsUpdate). Every run would fail the check above.
+# Deleting metadata.json alone is enough: the pull then downloads as it would
+# into a new cache, which removes and re-extracts policy/content, and the check
+# above still decides whether the scan runs.
+if [ -n "$TRIVY_MODE" ] && trivy_checks_pinned && ! trivy_checks_present; then
+  rm -f "$TRIVY_CACHE/policy/metadata.json" && \
+    printf '  %s  %s -- %s\n' "$(amber NOTE)" "trivy" \
+      "cached checks bundle had pinned metadata but no policies; downloading it again"
 fi
 
 if [ "$TRIVY_MODE" = native ]; then
