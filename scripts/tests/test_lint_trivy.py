@@ -30,9 +30,32 @@ MASKED_TOOLS = (
 )
 TRIVY_TEST_VARIABLES = (
     "TRIVY_TEST_CONFIG_NONZERO",
+    "TRIVY_TEST_DOWNLOAD_DURING_SCAN",
+    "TRIVY_TEST_DOWNLOAD_RUNNING_AFTER_SCAN",
     "TRIVY_TEST_EMBEDDED_FALLBACK",
     "TRIVY_TEST_EMPTY_CONTENT",
+    "TRIVY_TEST_METADATA_REMOVED_DURING_SCAN",
     "TRIVY_TEST_WRONG_DIGEST",
+)
+# Another run sharing the cache touches the bundle while the scan runs. It
+# finishes a download (the rewritten metadata still names the pinned digest,
+# with a new timestamp), or is still deleting policies when the scan ends and
+# has not written metadata yet, or deletes the metadata to force a download.
+FS_STUB = r"""
+      fs)
+        [ -z "${TRIVY_TEST_DOWNLOAD_DURING_SCAN:-}" ] || \
+          printf '{"Digest":"%s","DownloadedAt":"during the scan"}\n' "$digest" \
+            > "$cache/policy/metadata.json"
+        [ -z "${TRIVY_TEST_DOWNLOAD_RUNNING_AFTER_SCAN:-}" ] || \
+          rm -f "$cache/policy/content/check.rego"
+        [ -z "${TRIVY_TEST_METADATA_REMOVED_DURING_SCAN:-}" ] || \
+          rm -f "$cache/policy/metadata.json"
+        test -d "$cache/policy/content"
+        ;;
+"""
+REPLACED_DURING_SCAN = (
+    "FAIL\x1b[0m  trivy\n"
+    "        checks bundle was replaced during the scan; rerun\n"
 )
 
 NATIVE_TRIVY_STUB = r"""
@@ -82,7 +105,7 @@ NATIVE_TRIVY_STUB = r"""
           printf 'package checks\n' > "$cache/policy/content/check.rego"
         printf '{"Digest":"%s"}\n' "$digest" > "$cache/policy/metadata.json"
         ;;
-      fs) test -d "$cache/policy/content" ;;
+""" + FS_STUB + r"""
       *) exit 2 ;;
     esac
 """
@@ -129,7 +152,7 @@ DOCKER_STUB = r"""
           printf 'package checks\n' > "$cache/policy/content/check.rego"
         printf '{"Digest":"%s"}\n' "$digest" > "$cache/policy/metadata.json"
         ;;
-      fs) test -d "$cache/policy/content" ;;
+""" + FS_STUB + r"""
       *) exit 2 ;;
     esac
 """
@@ -227,6 +250,7 @@ class TrivyLintTest(unittest.TestCase):
         self.assertIn("--ignorefile", lines[2].split())
         self.assertIn(".trivyignore.yaml", lines[2].split())
         self.assertRegex(result.stdout, r"PASS\x1b\[0m  trivy")
+        self.assertEqual(list(self.cache_path.glob("scan-start.*")), [])
 
     def assert_refresh_rejected(
         self,
@@ -241,6 +265,16 @@ class TrivyLintTest(unittest.TestCase):
         self.assertIn("checks bundle refresh failed after 3 attempts", result.stdout)
         self.assertIn(detail, result.stdout)
         self.assertRegex(result.stdout, r"FAIL\x1b\[0m  trivy")
+
+    def assert_scan_rejected_as_replaced(self, result: subprocess.CompletedProcess[str]) -> None:
+        # The scan ran once and passed on its own; only the bundle changed.
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            [line.split()[0] for line in self.log_lines()],
+            ["image", "config", "fs"],
+        )
+        self.assertIn(REPLACED_DURING_SCAN, result.stdout)
+        self.assertEqual(list(self.cache_path.glob("scan-start.*")), [])
 
     def test_native_trivy_uses_the_pinned_bundle_and_keeps_the_cache(self):
         db_marker = self.seed_database_cache()
@@ -345,6 +379,58 @@ class TrivyLintTest(unittest.TestCase):
         self.assert_refresh_then_scan(result)
         self.assertNotRegex(result.stdout, NOTE)
         self.assertEqual(metadata.read_text(), cached)
+
+    def test_native_download_during_scan_is_rejected(self):
+        self.install_native_trivy()
+
+        result = self.run_lint(TRIVY_TEST_DOWNLOAD_DURING_SCAN="1")
+
+        self.assert_scan_rejected_as_replaced(result)
+
+    def test_container_download_during_scan_is_rejected(self):
+        self.install_container_trivy()
+
+        result = self.run_lint(TRIVY_TEST_DOWNLOAD_DURING_SCAN="1")
+
+        self.assert_scan_rejected_as_replaced(result)
+
+    def test_native_download_still_running_after_scan_is_rejected(self):
+        self.install_native_trivy()
+
+        result = self.run_lint(TRIVY_TEST_DOWNLOAD_RUNNING_AFTER_SCAN="1")
+
+        self.assert_scan_rejected_as_replaced(result)
+
+    def test_container_download_still_running_after_scan_is_rejected(self):
+        self.install_container_trivy()
+
+        result = self.run_lint(TRIVY_TEST_DOWNLOAD_RUNNING_AFTER_SCAN="1")
+
+        self.assert_scan_rejected_as_replaced(result)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_scan_without_a_marker_does_not_run(self):
+        self.seed_checks_cache(self.cache_path, CHECKS_DIGEST, policies=True)
+        self.install_native_trivy()
+        # The complete cached bundle needs no writes until the marker.
+        self.cache_path.chmod(0o555)
+        self.addCleanup(self.cache_path.chmod, 0o755)
+
+        result = self.run_lint()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            [line.split()[0] for line in self.log_lines()],
+            ["image", "config"],
+        )
+        self.assertIn("FAIL\x1b[0m  trivy\n        cannot create the scan's marker", result.stdout)
+
+    def test_metadata_removed_during_scan_is_rejected(self):
+        self.install_native_trivy()
+
+        result = self.run_lint(TRIVY_TEST_METADATA_REMOVED_DURING_SCAN="1")
+
+        self.assert_scan_rejected_as_replaced(result)
 
 
 if __name__ == "__main__":

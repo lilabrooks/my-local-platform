@@ -437,13 +437,43 @@ whether the scan runs, so a failed or unpinned download still fails the Trivy
 check.
 
 Runs that share a cache are not isolated from each other's downloads. A
-download removes `policy/content` and extracts the bundle again file by file.
-The final scan reads that directory without consulting the metadata, and when
-the directory is missing Trivy falls back to its embedded checks, silently
-under `--quiet`. A scan that starts while another run downloads into the same
-cache can therefore load an incomplete or embedded rule set. Under the current
-pins, Trivy 0.74.0 downloads the bundle only into a new cache, after the repair
-above, or when it cannot read the metadata.
+download removes `policy/content`, extracts the bundle again file by file, and
+writes `policy/metadata.json` last. The final scan reads that directory without
+consulting the metadata, and when the directory is missing Trivy falls back to
+its embedded checks, silently under `--quiet`. A scan that starts while another
+run downloads into the same cache can therefore load an incomplete or embedded
+rule set. Under the current pins, Trivy 0.74.0 downloads the bundle only into a
+new cache, after the repair above, or when it cannot read the metadata.
+
+So the script checks afterwards. It creates a marker file in the cache just
+before the final scan. When the scan exits, anything under `policy/` modified
+after the marker, or a failure to read `policy/`, fails the Trivy check with
+"checks bundle was replaced during the scan; rerun", whatever the scan itself
+reported.
+
+A download can only change what the scan loads by deleting a policy before
+loading ends, and that first deletion updates the modification time of a
+directory under `policy/`. With real Trivy 0.74.0 downloads, native and in the
+container, the change showed up within 20 ms of the first missing policy.
+
+The first design compared `policy/metadata.json` before and after the scan, and
+it can miss the worst case. A download writes that file last: 110 to 120 ms
+after its first deletion natively, and 320 to 420 ms in the container. A
+container scan that found no checks exited 0 about 0.32 seconds after loading
+them, so it can finish before that write. These timings are from one Mac, on
+2026-09-23 and 2026-09-24.
+
+Two gaps remain:
+
+- Trivy's extractor resets directory times from the archive when it finishes.
+  A download that deleted the old checks before the marker and, when the scan
+  exits, has finished extracting but not yet written its metadata leaves
+  nothing newer. Trivy 0.74.0 makes no network call between those two steps.
+  The check also needs timestamps finer than the gap between the marker and a
+  deletion; APFS, where it was tested, records nanoseconds.
+- Once 24 hours have passed, a pull rewrites `DownloadedAt` and leaves the
+  checks alone. If another run does that during a scan, the check fails a sound
+  scan, and a rerun passes.
 
 The final repository scan runs:
 
@@ -472,7 +502,8 @@ The scanners have separate jobs:
 The severity filter includes `MEDIUM`, `HIGH`, and `CRITICAL`; `LOW` and
 `UNKNOWN` do not fail this command. `--exit-code 1` makes any included finding
 fail `make lint`. The `--skip-db-update` and `--skip-check-update` options make
-the final scan use the inputs fetched immediately before it.
+the final scan use the inputs fetched immediately before it, unless another run
+sharing the cache replaces the checks first, as described above.
 
 The scan skips every `.terraform` directory because those directories contain
 downloaded provider and module files. The scan includes the tracked Terraform

@@ -341,6 +341,45 @@ retry_net_until_checks() {
   return 1
 }
 
+# report_trivy_scan <command...> -- runs the final scan and reports it.
+#
+# Runs that share this cache share each other's downloads. A checks download
+# deletes policy/content, extracts the bundle again file by file, and writes
+# policy/metadata.json last. The scan loads policy/content without reading the
+# metadata, and falls back to embedded checks when the directory is missing,
+# silently under --quiet. So a scan that loads its checks while another run
+# downloads can pass or fail against the wrong rules.
+#
+# A download that could change what the scan loaded has deleted something by
+# the time loading ends, and each deletion bumps the mtime of a directory under
+# policy/. So anything there newer than a marker made just before the scan fails
+# the check, as does a find error such as policy/ vanishing mid-walk. Comparing
+# metadata.json instead missed a container scan that loaded no checks and exited
+# 0.32 s after loading them, before the download wrote its metadata. Not caught:
+# a download that deleted before the marker and, when the scan exits, has
+# finished extracting but not written metadata, because the extractor resets
+# directory times. Another run's 24-hour DownloadedAt refresh also rewrites
+# metadata.json with the same checks in place; that fails a sound scan, and a
+# rerun passes.
+report_trivy_scan() {
+  local marker changed out code
+  if ! marker=$(mktemp "$TRIVY_CACHE/scan-start.XXXXXX" 2>&1); then
+    report "trivy" 1 "cannot create the scan's marker in $TRIVY_CACHE: $marker"
+    return
+  fi
+  out=$("$@" 2>&1); code=$?
+  if ! changed=$(find "$TRIVY_CACHE/policy" -newer "$marker" -print -quit 2>&1) || \
+     [ -n "$changed" ]; then
+    code=1
+    # First, because report shows only the first 25 lines.
+    out="checks bundle was replaced during the scan; rerun
+Another run sharing the cache downloaded or refreshed the checks while Trivy ran, so this scan may have loaded a partial or embedded set. First change: $changed
+${out}"
+  fi
+  rm -f "$marker"
+  report "trivy" "$code" "$out"
+}
+
 TRIVY_MODE=
 if has trivy && pinned "$TRIVY_VERSION" "$(trivy --version 2>&1 | head -1)"; then
   TRIVY_MODE=native
@@ -372,14 +411,13 @@ if [ "$TRIVY_MODE" = native ]; then
         --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
         --exit-code 0 --quiet \
         "$TRIVY_CHECKS_INPUT"); then
-      out=$(trivy fs --scanners vuln,misconfig,secret \
+      report_trivy_scan trivy fs --scanners vuln,misconfig,secret \
             --cache-dir "$TRIVY_CACHE" --skip-db-update --skip-check-update \
             --ignorefile .trivyignore.yaml \
             --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
             --severity MEDIUM,HIGH,CRITICAL \
             --skip-dirs '**/.terraform' \
-            --exit-code 1 --quiet . 2>&1)
-      report "trivy" $? "$out"
+            --exit-code 1 --quiet .
     else
       report "trivy" 1 "checks bundle refresh failed after 3 attempts:
 $checks_out"
@@ -399,15 +437,14 @@ elif [ "$TRIVY_MODE" = container ]; then
         --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
         --exit-code 0 --quiet \
         /trivy-cache/checks-prefetch-input); then
-      out=$(docker run --rm --user "$(id -u):$(id -g)" \
+      report_trivy_scan docker run --rm --user "$(id -u):$(id -g)" \
             -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
             -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
             --skip-db-update --skip-check-update --scanners vuln,misconfig,secret \
             --ignorefile .trivyignore.yaml \
             --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
             --severity MEDIUM,HIGH,CRITICAL --skip-dirs '**/.terraform' \
-            --exit-code 1 --quiet . 2>&1)
-      report "trivy" $? "$out"
+            --exit-code 1 --quiet .
     else
       report "trivy" 1 "checks bundle refresh failed after 3 attempts:
 $checks_out"
