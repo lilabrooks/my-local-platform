@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -66,8 +68,15 @@ NATIVE_TRIVY_STUB = r"""
         }
         # Trivy 0.74.0 returns zero after this fallback and leaves no bundle.
         [ -z "${TRIVY_TEST_EMBEDDED_FALLBACK:-}" ] || exit 0
+        # Nor does it download again while the metadata names the requested
+        # digest, whatever policy/content still holds.
+        if grep -Fq "\"Digest\":\"$digest\"" "$cache/policy/metadata.json" 2>/dev/null; then
+          exit 0
+        fi
         [ -z "${TRIVY_TEST_WRONG_DIGEST:-}" ] || \
           digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        # A download replaces policy/content instead of extracting into it.
+        rm -rf "$cache/policy/content"
         mkdir -p "$cache/policy/content"
         [ -n "${TRIVY_TEST_EMPTY_CONTENT:-}" ] || \
           printf 'package checks\n' > "$cache/policy/content/check.rego"
@@ -109,8 +118,12 @@ DOCKER_STUB = r"""
           exit 1
         }
         [ -z "${TRIVY_TEST_EMBEDDED_FALLBACK:-}" ] || exit 0
+        if grep -Fq "\"Digest\":\"$digest\"" "$cache/policy/metadata.json" 2>/dev/null; then
+          exit 0
+        fi
         [ -z "${TRIVY_TEST_WRONG_DIGEST:-}" ] || \
           digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        rm -rf "$cache/policy/content"
         mkdir -p "$cache/policy/content"
         [ -n "${TRIVY_TEST_EMPTY_CONTENT:-}" ] || \
           printf 'package checks\n' > "$cache/policy/content/check.rego"
@@ -120,6 +133,8 @@ DOCKER_STUB = r"""
       *) exit 2 ;;
     esac
 """
+
+NOTE = r"NOTE\x1b\[0m  trivy -- cached checks bundle had pinned metadata but no policies"
 
 
 class TrivyLintTest(unittest.TestCase):
@@ -168,6 +183,23 @@ class TrivyLintTest(unittest.TestCase):
         db_marker.parent.mkdir(parents=True)
         db_marker.write_text("cached database\n")
         return db_marker
+
+    def seed_checks_cache(self, cache: Path, digest: str, *, policies: bool) -> Path:
+        # Without policies this is the state seen under the macOS $TMPDIR: the
+        # files gone, their directories and Trivy's metadata left behind.
+        content = cache / "policy" / "content" / "kubernetes"
+        content.mkdir(parents=True)
+        if policies:
+            (content / "check.rego").write_text("package checks\n")
+        metadata = cache / "policy" / "metadata.json"
+        metadata.write_text(
+            json.dumps(
+                {"Digest": digest, "DownloadedAt": "2026-09-19T00:00:00Z", "MajorVersion": 2},
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        return metadata
 
     def run_lint(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -262,6 +294,57 @@ class TrivyLintTest(unittest.TestCase):
         result = self.run_lint(TRIVY_TEST_CONFIG_NONZERO="1")
 
         self.assert_refresh_rejected(result, "registry unavailable")
+
+    def test_native_cached_metadata_without_checks_is_downloaded_again(self):
+        db_marker = self.seed_database_cache()
+        self.seed_checks_cache(self.cache_path, CHECKS_DIGEST, policies=False)
+        other = self.seed_checks_cache(
+            self.temp_path / f"mlp-trivy-cache-{'b' * 64}",
+            f"sha256:{'b' * 64}",
+            policies=False,
+        )
+        other_metadata = other.read_text()
+        self.install_native_trivy()
+
+        result = self.run_lint()
+
+        self.assert_refresh_then_scan(result)
+        self.assertEqual(len(re.findall(NOTE, result.stdout)), 1)
+        self.assertTrue(db_marker.exists())
+        # Only the cache named for this pin is repaired.
+        self.assertEqual(other.read_text(), other_metadata)
+
+    def test_container_cached_metadata_without_checks_is_downloaded_again(self):
+        db_marker = self.seed_database_cache()
+        self.seed_checks_cache(self.cache_path, CHECKS_DIGEST, policies=False)
+        self.install_container_trivy()
+
+        result = self.run_lint()
+
+        self.assert_refresh_then_scan(result)
+        self.assertEqual(len(re.findall(NOTE, result.stdout)), 1)
+        self.assertTrue(db_marker.exists())
+
+    def test_download_after_the_repair_is_still_verified(self):
+        self.seed_checks_cache(self.cache_path, CHECKS_DIGEST, policies=False)
+        self.install_native_trivy()
+
+        result = self.run_lint(TRIVY_TEST_EMBEDDED_FALLBACK="1")
+
+        self.assert_refresh_rejected(result, "unverified checks rejected")
+        self.assertEqual(len(re.findall(NOTE, result.stdout)), 1)
+        self.assertFalse((self.cache_path / "policy" / "metadata.json").exists())
+
+    def test_complete_cached_bundle_is_left_alone(self):
+        metadata = self.seed_checks_cache(self.cache_path, CHECKS_DIGEST, policies=True)
+        cached = metadata.read_text()
+        self.install_native_trivy()
+
+        result = self.run_lint()
+
+        self.assert_refresh_then_scan(result)
+        self.assertNotRegex(result.stdout, NOTE)
+        self.assertEqual(metadata.read_text(), cached)
 
 
 if __name__ == "__main__":
