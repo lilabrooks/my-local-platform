@@ -41,7 +41,7 @@ stay private.
 
 | Surface | Contract |
 |---|---|
-| EKS | One Kubernetes 1.35 cluster in standard support; one managed Spot node group with three desired `t3.medium` nodes, minimum one and maximum three; default API-data envelope encryption with an AWS-owned key |
+| EKS | One Kubernetes 1.36 cluster in standard support; one managed Spot node group with three desired `t3.medium` nodes, minimum one and maximum three; default API-data envelope encryption with an AWS-owned key |
 | Relay | Two `relay-ingest` replicas and a KEDA-managed `relay-deliver` Deployment with 1 to 12 replicas; both use the same image digest |
 | Sink | One controlled sink behind a `ClusterIP` Service; no ingress or load balancer |
 | Kafka | One MSK Serverless cluster; `mlp.relay.deliveries` has 12 partitions and the DLQ has one |
@@ -70,10 +70,63 @@ capacity and the three-node ceiling. The
 [worker capacity amendment](#worker-capacity-amendment-accepted-2026-09-22)
 raises the desired count to three for pod capacity.
 
-Kubernetes 1.35 encrypts all Kubernetes API data with an AWS-owned key by
+Kubernetes 1.36 encrypts all Kubernetes API data with an AWS-owned key by
 default. The EKS module's optional customer-managed key is disabled because it
 would outlive this short run in `PendingDeletion`; M4 has no requirement for a
 customer-managed key.
+
+#### Kubernetes version amendment, accepted 2026-09-23
+
+The owner requested the move to EKS 1.36 before the next paid rehearsal.
+AWS lists it in standard support until 2027-08-02, compared with 2027-03-27
+for 1.35. The hourly topology, spend limits and approval boundaries stay the
+same. Terraform's default, account availability checks and GO's fixed shape
+now require 1.36. Local minikube uses upstream v1.36.5; schema validation and
+Helm's validation render target 1.36.0.
+
+The EKS module remains 21.25.3. Its managed node group defaults to
+`AL2023_x86_64_STANDARD`; the read-only SSM lookup found release
+`1.36.4-20260917` in `us-east-1`. This is availability evidence, not a new AMI
+pin or a successful worker boot. Review the resolved worker release in the
+next staging plan and observe its runtime and readiness during provisioning.
+
+The four exact add-on versions were checked with
+`aws eks describe-addon-versions --kubernetes-version 1.36 --addon-name NAME`
+in `us-east-1` on 2026-09-23. Each is listed as compatible with 1.36 on all
+platform versions, for both amd64 and arm64, and as the default build:
+
+| Add-on | Pin | Placement and first readiness evidence |
+|---|---|---|
+| VPC CNI | `v1.22.4-eksbuild.3` | Before compute; worker CNI policy retained; aws-node ready and nodes report Ready |
+| Pod Identity agent | `v1.3.10-eksbuild.3` | Before compute; agent ready, then a workload performs its permitted AWS operation |
+| CoreDNS | `v1.14.3-eksbuild.23` | After compute; deployment ready and workload DNS lookup succeeds |
+| kube-proxy | `v1.36.0-eksbuild.25` | After compute; DaemonSet ready and a workload reaches its Service |
+
+Terraform owns creation and teardown of these components. The existing
+[runbook prerequisites](../runbook-aws-relay.md#infrastructure-prerequisites)
+retain their ordering, IAM, network and pod-capacity checks. The module's
+before-compute delay still does not prove add-on readiness. The mocked plan
+now also rejects a kube-proxy pin from another Kubernetes minor.
+
+KEDA 2.20.2 remains an open dependency for 1.36. Its
+[published test matrix](https://keda.sh/docs/2.20/operate/cluster/#kubernetes-compatibility),
+checked on 2026-09-24, lists Kubernetes 1.33 through 1.35. The echo rehearsal
+did not install KEDA. This does not establish incompatibility, but the next
+local qualification must install the pinned KEDA on 1.36 and prove
+ScaledObject reconciliation, HPA creation, external-metrics access, and
+relay scale-out above one followed by lag draining and scale-in. A failure
+blocks staging; the existing bounded workload and stop conditions still
+apply. Record the control-plane and every node's kubelet version before and
+after that qualification, with the context and raw evidence paths/hashes in
+the candidate's qualification note. See the
+[before-staging procedure](../runbook-aws-relay.md#before-staging).
+
+Historical 1.35 receipts remain evidence for their original source. This
+runtime change needs fresh qualification, staging and GO receipts for the
+new candidate. EKS worker boot, add-on readiness, Pod Identity and the full
+relay demonstration on 1.36 remain deferred to the next separately authorized
+run under [#97](https://github.com/lilabrooks/my-local-platform/issues/97).
+The local version change does not close that issue.
 
 #### Worker capacity amendment, accepted 2026-09-22
 
@@ -548,9 +601,99 @@ rollback or dev-stack destroy.
 - an AWS deployment is intended to persist beyond one owner-attended session;
 - a required resource count or current price would break the $1.25/hour shape
   gate or $5.00 approved maximum;
-- Kubernetes 1.35 leaves EKS standard support before the paid run.
+- Kubernetes 1.36 leaves EKS standard support before the paid run.
 
 ## Verification
+
+### Kubernetes 1.36 update, 2026-09-23
+
+The update was checked against base revision
+`c842e51b974ae97a1d346a06764e923e02d1afd8` with the version changes in the
+working tree. Read-only AWS queries used profile `aws-public-change-feed`
+and region `us-east-1`:
+
+- `aws eks describe-cluster-versions` reported 1.36 in `STANDARD_SUPPORT`,
+  patch 1.36.4, ending standard support at 2027-08-02 00:00 UTC.
+- `aws eks describe-addon-versions --kubernetes-version 1.36 --addon-name NAME`
+  confirmed all four pins in the version amendment above.
+- `aws ssm get-parameter --name
+  /aws/service/eks/optimized-ami/1.36/amazon-linux-2023/x86_64/standard/recommended`
+  returned worker release `1.36.4-20260917`.
+- `curl -fsSL https://dl.k8s.io/release/stable-1.36.txt` returned `v1.36.5`;
+  the arm64 kubelet download and 1.36.0 Kubernetes schema URL returned HTTP 200.
+
+The local rehearsal used a new single-node Docker profile
+`mlp-k136-20260923`, four CPUs, 6 GiB, and a separate temporary kubeconfig.
+Pass conditions were a Ready 1.36 node, two ready echo replicas, an exact
+request-path round trip through the ClusterIP, and graceful termination with
+a ready replacement. The existing `mlp` profile was left stopped and unchanged.
+
+- `make k8s-up MINIKUBE_PROFILE=mlp-k136-20260923` started v1.36.5 with
+  containerd 2.3.4. `kubectl get nodes -o wide` reported Ready; all eight
+  kube-system pods were Running with zero restarts at observation.
+- `make echo-image MINIKUBE_PROFILE=mlp-k136-20260923`, namespace apply,
+  `kubectl apply -k k8s/manifests/echo`, and
+  `kubectl -n mlp rollout status deployment/echo --timeout=120s` produced two
+  ready replicas from the current source.
+- `minikube -p mlp-k136-20260923 ssh -- curl -fsS
+  http://10.106.144.74/kubernetes-1.36-roundtrip` returned `service: echo` and
+  the exact requested path, asserted by a Python JSON check.
+- Deleting one echo pod while following its logs recorded readiness failing
+  on SIGTERM and `stopped` three seconds later. The replacement became ready
+  and the same ClusterIP request passed again.
+- `make k8s-validate` passed the Go invariants. The schema check, repeated
+  with Helm explicitly rendering for 1.36, found 163 resources: 104 valid,
+  zero invalid or errors, and 59 skipped custom resources. Those skipped
+  resources remain subject to the existing focused invariants and live checks.
+- `make terraform-check` passed validation and all eight mocked tests across
+  guardrails and dev. The dev tests passed again after the kube-proxy minor
+  assertion was added; restoring the 1.35 kube-proxy pin in a disposable copy
+  failed that assertion.
+- `make test` passed the Go race tests and all 224 Python tests, including
+  rejection of a previous-minor staging plan. Checks completed across
+  2026-09-23/24 UTC.
+- `make lint` passed its non-Trivy checks after correcting an issue-link
+  formatting error and rerunning the pinned Markdown checker. An incomplete
+  Trivy cache was restored using the same pinned bundle. The full-workspace
+  security scan then reported 11 findings, including 10 in ignored agent
+  worktrees. Repeating the same Trivy scan on a temporary copy of every
+  `git ls-files` path, using its current working-tree contents, returned zero
+  findings across 50 result targets. Full-workspace lint remains failing;
+  its scope and security policy were not changed by this update.
+- `minikube delete -p mlp-k136-20260923` removed the temporary cluster.
+  `minikube profile list -o json` then showed only the original stopped
+  `minikube` and `mlp` profiles, both still on v1.35.1.
+
+This rehearsal exercised local deployment, Service routing and pod shutdown.
+It did not run the complete relay/KEDA/ArgoCD/telemetry demonstration on 1.36
+or create AWS resources. Fresh candidate qualification and the live questions
+listed in the version amendment remain required before claiming M4 support.
+
+### Kubernetes second-review corrections, 2026-09-24
+
+The second review identified the untested in-place minikube upgrade and
+KEDA's published test window ending at 1.35. The runbooks now record both
+limits. `MINIKUBE_K8S_VERSION` allows the existing 1.35.1 profile to resume
+at its installed version. Fresh M4 qualification must prove KEDA scaling
+on 1.36 and retain before/after control-plane and node versions in its
+qualification note; that evidence check is currently manual.
+
+GO now compares the account receipt's EKS version with the planned minor.
+The new regression first reproduced acceptance of a 1.35, empty or absent
+version beside a 1.36 plan; all three cases are rejected after the fix.
+`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests`
+passed all 225 tests. Pinned Ruff 0.16.6 passed for the changed Python files.
+`make -n k8s-up` and its `MINIKUBE_K8S_VERSION=v1.35.1` override rendered
+the intended versions without starting a cluster. The existing M4 code
+requires profile/context `mlp` and the default kubeconfig, so the local
+guidance records that constraint rather than treating a scratch context
+alias as sufficient qualification.
+
+The pre-existing zero-valid-schema success case and full-workspace lint
+scope remain separate follow-ups. No cluster was started, upgraded or
+recreated for these corrections, and no AWS resources were created.
+
+### Earlier verification
 
 On 2026-09-22, the separately approved `make aws-live-run` attempt for source
 `474dca7` created the fixed infrastructure but failed to make its EKS workers

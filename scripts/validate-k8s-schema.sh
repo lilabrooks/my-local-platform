@@ -5,6 +5,7 @@ set -euo pipefail
 # Custom-resource schemas are covered by the focused Go invariants because the
 # ArgoCD, KEDA, and ServiceMonitor CRDs are installed only in a live cluster.
 readonly KUBECONFORM_IMAGE="ghcr.io/yannh/kubeconform:v0.8.0-alpine@sha256:6b90a5f23d846140ce0194fe050b1995e546eba938f3a6bf10c039dd5e24588f"
+readonly KUBERNETES_VERSION="1.36.0"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT
 kps_version="$(awk '$1 == "KPS_VERSION" && $2 == "?=" { print $3 }' "$ROOT/Makefile")"
@@ -57,6 +58,7 @@ done < <(find \
     helm template monitoring kube-prometheus-stack \
     --repo https://prometheus-community.github.io/helm-charts \
     --version "$kps_version" \
+    --kube-version "$KUBERNETES_VERSION" \
     --namespace monitoring \
     --values "$ROOT/k8s/monitoring-values.yaml" \
     --values "$ROOT/k8s/monitoring-values-aws.yaml"
@@ -66,7 +68,7 @@ docker run --rm -i "$KUBECONFORM_IMAGE" \
   -strict \
   -summary \
   -ignore-missing-schemas \
-  -kubernetes-version 1.35.0 \
+  -kubernetes-version "$KUBERNETES_VERSION" \
   - <"$bundle"
 
 # Kubernetes schema validation cannot inspect YAML embedded in ConfigMaps.

@@ -284,6 +284,7 @@ terraform-check: ## Run offline checks with an installed supported Terraform ver
 # ---------------------------------------------------------------------------
 
 MINIKUBE_PROFILE ?= mlp
+MINIKUBE_K8S_VERSION ?= v1.36.5
 
 # Raised from 3g after measuring. At 3g the supporting cast alone -- ArgoCD,
 # KEDA, kube-system and kube-prometheus-stack -- held the node container at
@@ -304,7 +305,7 @@ REPO_URL         ?= https://github.com/lilabrooks/my-local-platform.git
 .PHONY: k8s-up
 k8s-up: ## Start the local Kubernetes cluster (minikube profile 'mlp')
 	minikube start -p $(MINIKUBE_PROFILE) --driver=docker --nodes=1 \
-	  --cpus=4 --memory=$(MINIKUBE_MEMORY) --kubernetes-version=v1.35.1
+	  --cpus=4 --memory=$(MINIKUBE_MEMORY) --kubernetes-version=$(MINIKUBE_K8S_VERSION)
 	kubectl config use-context $(MINIKUBE_PROFILE)
 
 .PHONY: k8s-down

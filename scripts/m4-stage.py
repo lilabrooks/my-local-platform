@@ -1005,12 +1005,14 @@ def build_go_no_go(
     if shape.get("region") != region:
         raise StageError("plan shape uses the wrong region")
     if shape.get("eks") != {
-        "kubernetes_version": "1.35",
+        "kubernetes_version": "1.36",
         "node_capacity_type": "SPOT",
         "node_desired": 3,
         "node_maximum": 3,
     }:
         raise StageError("plan summary has the wrong EKS shape")
+    if eks.get("version") != shape["eks"]["kubernetes_version"]:
+        raise StageError("planned EKS version does not match standard-support evidence")
     rds = availability.get("rds_postgres")
     if (
         not isinstance(rds, dict)

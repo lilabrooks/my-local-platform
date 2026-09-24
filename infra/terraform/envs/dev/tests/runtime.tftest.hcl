@@ -155,6 +155,14 @@ run "live_runtime_matches_the_accepted_shape" {
   }
 
   assert {
+    condition = startswith(
+      module.eks[0].cluster_addons["kube-proxy"].addon_version,
+      "v${var.eks_kubernetes_version}.",
+    )
+    error_message = "The kube-proxy pin must follow the selected EKS minor version."
+  }
+
+  assert {
     condition = (
       length(module.vpc) == 1 &&
       length(module.eks) == 1 &&
@@ -229,7 +237,7 @@ run "live_runtime_matches_the_accepted_shape" {
 
   assert {
     condition = (
-      output.runtime_shape.eks.kubernetes_version == "1.35" &&
+      output.runtime_shape.eks.kubernetes_version == "1.36" &&
       output.runtime_shape.eks.node_capacity_type == "SPOT" &&
       output.runtime_shape.eks.node_desired == 3 &&
       output.runtime_shape.eks.node_maximum == 3

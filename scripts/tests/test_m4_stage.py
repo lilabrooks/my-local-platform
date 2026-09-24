@@ -193,7 +193,7 @@ class ImageStageTest(unittest.TestCase):
                     "encryption": "AES256",
                     "public_access_blocked": True,
                 },
-                "eks": {"standard_support": True},
+                "eks": {"version": "1.36", "standard_support": True},
                 "budget": {
                     "active": True,
                     "limit_usd": "5.00",
@@ -235,7 +235,7 @@ class ImageStageTest(unittest.TestCase):
                     "expected_hourly_usd": price["total_hourly_usd"],
                     "maximum_hourly_usd": 1.25,
                     "eks": {
-                        "kubernetes_version": "1.35",
+                        "kubernetes_version": "1.36",
                         "node_capacity_type": "SPOT",
                         "node_desired": 3,
                         "node_maximum": 3,
@@ -502,6 +502,43 @@ class ImageStageTest(unittest.TestCase):
 
         self.assertEqual(set(value["rates"]), set(REVIEWED_RATES))
         self.assertTrue(all(rate == "" for rate in value["rates"].values()))
+
+    def test_go_packet_rejects_previous_eks_minor(self):
+        run_id = "20260908T040000Z"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = self.write_release_inputs(root, run_id)
+            plan_path = run / "03-plan-summary.json"
+            plan = json.loads(plan_path.read_text())
+            plan["shape"]["eks"]["kubernetes_version"] = "1.35"
+            plan_path.write_text(json.dumps(plan))
+
+            with mock.patch.object(STAGE, "ROOT", root):
+                with self.assertRaisesRegex(STAGE.StageError, "wrong EKS shape"):
+                    STAGE.build_go_no_go(
+                        run_id, COMMIT, "us-east-1", "operator-one", FakeRunner()
+                    )
+
+    def test_go_packet_rejects_eks_version_drift_or_missing_evidence(self):
+        for version in ("1.35", "", None):
+            with self.subTest(version=version):
+                run_id = "20260908T040000Z"
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    run = self.write_release_inputs(root, run_id)
+                    identity_path = run / "01-identity.txt"
+                    identity = json.loads(identity_path.read_text())
+                    if version is None:
+                        del identity["eks"]["version"]
+                    else:
+                        identity["eks"]["version"] = version
+                    identity_path.write_text(json.dumps(identity))
+
+                    with mock.patch.object(STAGE, "ROOT", root):
+                        with self.assertRaisesRegex(STAGE.StageError, "EKS version"):
+                            STAGE.build_go_no_go(
+                                run_id, COMMIT, "us-east-1", "operator-one", FakeRunner()
+                            )
 
     def test_go_packet_rejects_rds_version_drift_or_missing_availability(self):
         cases = (
