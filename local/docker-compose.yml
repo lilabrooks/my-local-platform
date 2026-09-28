@@ -255,7 +255,7 @@ services:
       - ./config/otel:/etc/otel:ro
 
   prometheus:
-    image: prom/prometheus:v3.14.0
+    image: prom/prometheus:v3.15.0
     container_name: mlp-prometheus
     profiles: [obs, all]
     ports:
