@@ -167,7 +167,7 @@ module "eks" {
   # Exact, as for the VPC. The add-on bootstrap and placement below depend on
   # this module's internals. September 20 staging resolved 21.25.1, retained
   # for the September 22 run; the September 22 repair resolved 21.25.3.
-  version = "21.25.3"
+  version = "21.26.0"
 
   name = local.name
   # Provider defaults tag Terraform resources, but not the instances, volumes,
