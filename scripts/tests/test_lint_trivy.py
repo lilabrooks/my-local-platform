@@ -241,11 +241,8 @@ class TrivyLintTest(unittest.TestCase):
         repo = self.temp_path / "checkout"
         (repo / "scripts").mkdir(parents=True)
         shutil.copy2(LINT, repo / "scripts" / "lint.sh")
-        # The Dockerfile is there for lint.sh, not the scan: macOS bash 3.2
-        # aborts on its empty Dockerfile list under `set -u`.
         committed = {
             ".gitignore": ".evidence/\n*.tfvars\n",
-            "Dockerfile": "FROM scratch\n",
             ".trivyignore.yaml": "misconfigurations: []\n",
             "k8s/deployment.yaml": "committed\n",
             "deleted.yaml": "committed\n",
@@ -280,7 +277,6 @@ class TrivyLintTest(unittest.TestCase):
             [
                 ".gitignore",
                 ".trivyignore.yaml",
-                "Dockerfile",
                 "k8s/deployment.yaml",
                 "scripts/lint.sh",
                 "untracked.yaml",

@@ -217,9 +217,6 @@ class GitleaksLintTest(unittest.TestCase):
         (checkout / "scripts").mkdir(parents=True)
         lint = checkout / "scripts" / "lint.sh"
         shutil.copy2(LINT, lint)
-        # lint.sh expands its Dockerfile list, and macOS bash 3.2 aborts on an
-        # empty array under `set -u`.
-        (checkout / "Dockerfile").write_text("FROM scratch\n")
         self.install_container_gitleaks()
 
         result = self.run_lint(
@@ -228,8 +225,11 @@ class GitleaksLintTest(unittest.TestCase):
             GIT_CEILING_DIRECTORIES=str(self.temp_path),
         )
 
-        self.assertRegex(result.stdout, r"FAIL\x1b\[0m  gitleaks")
-        self.assertIn("cannot find the git directory to scan", result.stdout)
+        # Every linter reads its file list from git, so lint.sh stops before
+        # the first one rather than reaching Gitleaks.
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("reads the files to lint from git, which failed", result.stderr)
+        self.assertNotIn("PASS", result.stdout)
         self.assertFalse(self.log_path.exists())
 
 
