@@ -239,7 +239,7 @@ services:
   # DD_API_KEY. Nothing in the app code knows Datadog exists.
   # ---------------------------------------------------------------------------
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.161.0-386
+    image: otel/opentelemetry-collector-contrib:0.161.0
     container_name: mlp-otel-collector
     profiles: [obs, all]
     # Which config file is used decides whether Datadog receives telemetry.
