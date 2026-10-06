@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -35,14 +36,17 @@ TRIVY_TEST_VARIABLES = (
     "TRIVY_TEST_EMBEDDED_FALLBACK",
     "TRIVY_TEST_EMPTY_CONTENT",
     "TRIVY_TEST_METADATA_REMOVED_DURING_SCAN",
+    "TRIVY_TEST_SCANNED_COPY",
     "TRIVY_TEST_WRONG_DIGEST",
 )
 # Another run sharing the cache touches the bundle while the scan runs. It
 # finishes a download (the rewritten metadata still names the pinned digest,
 # with a new timestamp), or is still deleting policies when the scan ends and
 # has not written metadata yet, or deletes the metadata to force a download.
+# Each stub sets $target to the directory it was asked to scan.
 FS_STUB = r"""
       fs)
+        [ -z "${TRIVY_TEST_SCANNED_COPY:-}" ] || cp -R "$target/." "$TRIVY_TEST_SCANNED_COPY"
         [ -z "${TRIVY_TEST_DOWNLOAD_DURING_SCAN:-}" ] || \
           printf '{"Digest":"%s","DownloadedAt":"during the scan"}\n' "$digest" \
             > "$cache/policy/metadata.json"
@@ -71,6 +75,7 @@ NATIVE_TRIVY_STUB = r"""
     for arg in "$@"; do printf ' %s' "$arg" >> "$TRIVY_TEST_LOG"; done
     printf '\n' >> "$TRIVY_TEST_LOG"
 
+    for target; do :; done
     cache=
     digest=
     set -- "$@"
@@ -116,6 +121,7 @@ DOCKER_STUB = r"""
 
     is_trivy=
     cache=
+    target=
     command=
     digest=
     previous=
@@ -123,6 +129,7 @@ DOCKER_STUB = r"""
       [ "$arg" = "aquasec/trivy:0.74.0" ] && is_trivy=1
       case "$arg" in
         *:/trivy-cache) cache=${arg%:/trivy-cache} ;;
+        *:/repo) target=${arg%:/repo} ;;
         image|config|fs) command=$arg ;;
       esac
       [ "$previous" = "--checks-bundle-repository" ] && digest=${arg##*@}
@@ -185,6 +192,9 @@ class TrivyLintTest(unittest.TestCase):
                 "PATH": f"{self.bin_path}:/usr/bin:/bin",
                 "TMPDIR": str(self.temp_path),
                 "TRIVY_TEST_LOG": str(self.log_path),
+                # Keep the host's excludes and signing out of the scratch checkout.
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
             }
         )
 
@@ -224,10 +234,66 @@ class TrivyLintTest(unittest.TestCase):
         )
         return metadata
 
-    def run_lint(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
+    def make_checkout(self) -> Path:
+        # One file of each kind git distinguishes. The worktree path is excluded
+        # through .git/info/exclude, as the agent checkouts are on the host this
+        # was found on, rather than through .gitignore.
+        repo = self.temp_path / "checkout"
+        (repo / "scripts").mkdir(parents=True)
+        shutil.copy2(LINT, repo / "scripts" / "lint.sh")
+        # The Dockerfile is there for lint.sh, not the scan: macOS bash 3.2
+        # aborts on its empty Dockerfile list under `set -u`.
+        committed = {
+            ".gitignore": ".evidence/\n*.tfvars\n",
+            "Dockerfile": "FROM scratch\n",
+            ".trivyignore.yaml": "misconfigurations: []\n",
+            "k8s/deployment.yaml": "committed\n",
+            "deleted.yaml": "committed\n",
+        }
+        for name, text in committed.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text)
+        git = ["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com"]
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "init"]):
+            subprocess.run([*git, *args], env=self.env, check=True)
+
+        (repo / "k8s" / "deployment.yaml").write_text("edited\n")
+        (repo / "deleted.yaml").unlink()
+        (repo / "untracked.yaml").write_text("untracked\n")
+        ignored = (
+            ".evidence/worktree-archives/plan.json",
+            "dev.tfvars",
+            ".claude/worktrees/other/k8s/deployment.yaml",
+        )
+        for name in ignored:
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text("ignored\n")
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write(".claude/worktrees/\n")
+        return repo
+
+    def assert_scanned_commit_view(self, result: subprocess.CompletedProcess[str], copy: Path) -> None:
+        self.assertRegex(result.stdout, r"PASS\x1b\[0m  trivy")
+        scanned = sorted(str(p.relative_to(copy)) for p in copy.rglob("*") if not p.is_dir())
+        self.assertEqual(
+            scanned,
+            [
+                ".gitignore",
+                ".trivyignore.yaml",
+                "Dockerfile",
+                "k8s/deployment.yaml",
+                "scripts/lint.sh",
+                "untracked.yaml",
+            ],
+        )
+        # The working tree, not the index or HEAD.
+        self.assertEqual((copy / "k8s" / "deployment.yaml").read_text(), "edited\n")
+        self.assertEqual(list(self.temp_path.glob("mlp-trivy-tree.*")), [])
+
+    def run_lint(self, lint: Path = LINT, **extra_env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["/bin/bash", str(LINT)],
-            cwd=ROOT,
+            ["/bin/bash", str(lint)],
+            cwd=lint.parents[1],
             env=self.env | extra_env,
             text=True,
             capture_output=True,
@@ -251,6 +317,7 @@ class TrivyLintTest(unittest.TestCase):
         self.assertIn(".trivyignore.yaml", lines[2].split())
         self.assertRegex(result.stdout, r"PASS\x1b\[0m  trivy")
         self.assertEqual(list(self.cache_path.glob("scan-start.*")), [])
+        self.assertEqual(list(self.temp_path.glob("mlp-trivy-tree.*")), [])
 
     def assert_refresh_rejected(
         self,
@@ -284,6 +351,26 @@ class TrivyLintTest(unittest.TestCase):
 
         self.assert_refresh_then_scan(result)
         self.assertTrue(db_marker.exists())
+
+    def test_native_scan_reads_what_a_commit_would_take(self):
+        repo = self.make_checkout()
+        copy = self.temp_path / "scanned"
+        copy.mkdir()
+        self.install_native_trivy()
+
+        result = self.run_lint(repo / "scripts" / "lint.sh", TRIVY_TEST_SCANNED_COPY=str(copy))
+
+        self.assert_scanned_commit_view(result, copy)
+
+    def test_container_scan_reads_what_a_commit_would_take(self):
+        repo = self.make_checkout()
+        copy = self.temp_path / "scanned"
+        copy.mkdir()
+        self.install_container_trivy()
+
+        result = self.run_lint(repo / "scripts" / "lint.sh", TRIVY_TEST_SCANNED_COPY=str(copy))
+
+        self.assert_scanned_commit_view(result, copy)
 
     def test_native_zero_exit_embedded_fallback_is_rejected(self):
         self.install_native_trivy()

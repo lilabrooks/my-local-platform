@@ -475,7 +475,25 @@ Two gaps remain:
   checks alone. If another run does that during a scan, the check fails a sound
   scan, and a rerun passes.
 
-The final repository scan runs:
+The final scan reads a copy of the repository, not the working tree. The lint
+script copies the files a commit would take into a temporary directory: tracked
+files with their working-tree contents, and untracked files that no ignore rule
+covers. It removes the copy when the script exits. In CI that is the checkout.
+On a workstation it leaves out everything gitignored or excluded through
+`.git/info/exclude`, such as Terraform state, `*.tfvars`, `.evidence/`, and
+other agents' checkouts under `.claude/worktrees/`.
+
+Scanning `.` directly failed on a clean `main` workstation checkout, where CI
+passed. Trivy reported `KSV-0125` in the Kubernetes manifests of each agent
+checkout under `.claude/worktrees/`. `.trivyignore.yaml` lists its paths
+relative to the repository root, so it did not cover those copies. It also
+reported `AWS-0132` against an archived Terraform plan JSON under `.evidence/`,
+naming the target `main.tf`. Skipping those two directories by name would have
+fixed that run but would miss the next ignored directory, and ignored files
+too.
+
+The scan then runs, with the copy as its target. The container mounts the copy
+at `/repo` and scans `.`:
 
 ```bash
 trivy fs \
@@ -488,7 +506,7 @@ trivy fs \
   --skip-check-update \
   --exit-code 1 \
   --quiet \
-  .
+  "$TRIVY_TREE"
 ```
 
 The scanners have separate jobs:
@@ -505,10 +523,12 @@ fail `make lint`. The `--skip-db-update` and `--skip-check-update` options make
 the final scan use the inputs fetched immediately before it, unless another run
 sharing the cache replaces the checks first, as described above.
 
-The scan skips every `.terraform` directory because those directories contain
-downloaded provider and module files. The scan includes the tracked Terraform
-stacks, Kubernetes and ArgoCD manifests, Dockerfiles, Compose files, workflows,
-lock files, and remaining repository content.
+`.terraform` directories contain downloaded provider and module files. They are
+gitignored, so the copy never holds one, and `--skip-dirs` keeps one out even if
+it is committed. The scan includes the tracked Terraform stacks, Kubernetes and
+ArgoCD manifests, Dockerfiles, Compose files, workflows, lock files, and
+remaining repository content, plus any new file not yet added that no ignore
+rule covers.
 
 The lint script accepts a local Trivy binary only when it reports version
 0.74.0. It otherwise uses `aquasec/trivy:0.74.0` when Docker is available. The

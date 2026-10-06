@@ -299,8 +299,9 @@ fi
 # --- Infrastructure security ------------------------------------------------
 # tflint checks that Terraform is valid; trivy checks whether it is safe. They
 # overlap not at all -- trivy found six issues tflint passed clean.
-# --skip-dirs matters: .terraform/ holds vendored upstream modules whose
-# example manifests are not ours to fix.
+# .terraform/ holds vendored upstream modules whose example manifests are not
+# ours to fix. It is gitignored, so the copy the scan reads (copy_commit_view)
+# leaves it out; --skip-dirs keeps it out should one ever be committed.
 TRIVY_CHECKS_DIGEST=sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c
 TRIVY_CHECKS_REPOSITORY="mirror.gcr.io/aquasec/trivy-checks@$TRIVY_CHECKS_DIGEST"
 TRIVY_CACHE="${TMPDIR:-/tmp}/mlp-trivy-cache-${TRIVY_CHECKS_DIGEST#sha256:}"
@@ -341,6 +342,27 @@ retry_net_until_checks() {
   return 1
 }
 
+# copy_commit_view <dir> -- copies into <dir> the files a commit would take:
+# tracked files as they are in the working tree, and untracked files that no
+# ignore rule covers.
+#
+# The scan reads that copy rather than the working tree, so it covers what CI's
+# checkout has and nothing a laptop adds. Scanning `.` locally also read other
+# agents' checkouts under .claude/worktrees, whose manifests .trivyignore.yaml
+# does not cover because its paths are relative to the repository root, and
+# archived Terraform plans under .evidence; both failed the check on a clean
+# main. --skip-dirs for those two would miss the next ignored directory, and
+# the ignored files besides: Terraform state, tfvars, local indexes.
+copy_commit_view() {
+  [ -d "$1" ] || { echo "no such directory"; return 1; }
+  git ls-files -z --cached --others --exclude-standard |
+    while IFS= read -r -d '' f; do
+      # A tracked file deleted from the working tree is still listed.
+      if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
+    done |
+    tar --null --no-recursion -T - -cf - | tar -xf - -C "$1"
+}
+
 # report_trivy_scan <command...> -- runs the final scan and reports it.
 #
 # Runs that share this cache share each other's downloads. A checks download
@@ -363,6 +385,10 @@ retry_net_until_checks() {
 # rerun passes.
 report_trivy_scan() {
   local marker changed out code
+  if ! out=$(copy_commit_view "$TRIVY_TREE" 2>&1); then
+    report "trivy" 1 "cannot copy the files to scan into ${TRIVY_TREE:-a temporary directory}: $out"
+    return
+  fi
   if ! marker=$(mktemp "$TRIVY_CACHE/scan-start.XXXXXX" 2>&1); then
     report "trivy" 1 "cannot create the scan's marker in $TRIVY_CACHE: $marker"
     return
@@ -387,6 +413,11 @@ elif has_docker; then
   TRIVY_MODE=container
 else
   skip "trivy" "needs docker or trivy $TRIVY_VERSION"
+fi
+
+if [ -n "$TRIVY_MODE" ]; then
+  TRIVY_TREE=$(mktemp -d "${TMPDIR:-/tmp}/mlp-trivy-tree.XXXXXX")
+  trap 'rm -rf "$TRIVY_TREE"' EXIT
 fi
 
 # A cache can lose its policy files and keep its metadata; it happened under the
@@ -417,7 +448,7 @@ if [ "$TRIVY_MODE" = native ]; then
             --checks-bundle-repository "$TRIVY_CHECKS_REPOSITORY" \
             --severity MEDIUM,HIGH,CRITICAL \
             --skip-dirs '**/.terraform' \
-            --exit-code 1 --quiet .
+            --exit-code 1 --quiet "$TRIVY_TREE"
     else
       report "trivy" 1 "checks bundle refresh failed after 3 attempts:
 $checks_out"
@@ -438,7 +469,7 @@ elif [ "$TRIVY_MODE" = container ]; then
         --exit-code 0 --quiet \
         /trivy-cache/checks-prefetch-input); then
       report_trivy_scan docker run --rm --user "$(id -u):$(id -g)" \
-            -v "$PWD":/repo -v "$TRIVY_CACHE":/trivy-cache \
+            -v "$TRIVY_TREE":/repo -v "$TRIVY_CACHE":/trivy-cache \
             -w /repo "aquasec/trivy:$TRIVY_VERSION" fs --cache-dir /trivy-cache \
             --skip-db-update --skip-check-update --scanners vuln,misconfig,secret \
             --ignorefile .trivyignore.yaml \
