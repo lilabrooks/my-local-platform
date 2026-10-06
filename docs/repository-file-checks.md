@@ -245,12 +245,53 @@ sets `LINT_STRICT=1`, which turns an unexpected skip into a failure. CI permits
 one declared exception: `golangci-lint` runs through its own pinned action in
 the Go job.
 
+### Which files the checks read
+
+Every check that reads repository files reads the files a commit would take:
+tracked files still present in the working tree, with their working-tree
+contents, and untracked files that no ignore rule covers. The script lists them
+with `git ls-files -z --cached --others --exclude-standard`, so git applies
+every ignore rule it knows: `.gitignore` files at any depth,
+`.git/info/exclude`, and `core.excludesFile`. Each linter is handed the files
+of its kind by name, on the native path and the container path alike. Trivy
+scans a temporary copy of the same set, described under Trivy below.
+
+In CI that set is the checkout. A workstation has more. The main checkout holds
+other agents' checkouts under `.claude/worktrees/`, excluded through
+`.git/info/exclude`, and archived plans under `.evidence/`, about 330 MB. Before
+this, the checks walked the working tree and read both. yamllint reported a
+duplicate key in a file under `.evidence/`. golangci-lint discovered a copy of
+`k8s/validate` under `.claude/worktrees/` as a module and failed, because its
+relative `replace` directive pointed at a `services/relay` that did not exist
+there. On 2026-10-06 the old `find` discovery in the main checkout picked up
+114 shell scripts, 18 Dockerfiles and 42 Go modules, of which 95, 15 and 35 sat
+under those two directories.
+
+A tool's own ignore support was not used because none covers what git does.
+yamllint 1.37.1 rejects `ignore-from-file` alongside the `ignore` list
+`.yamllint.yml` already has. It also reads only the files it is given, applying
+each one's patterns as if it sat at the root, and a linked worktree's
+`info/exclude` lies outside the checkout. markdownlint-cli2's `gitignore`
+option skipped `.evidence/` but still linted a file under the excluded
+`.claude/worktrees/`. Ruff respects ignore files, but its container run from a
+linked worktree linted the excluded `.claude/worktrees/`: a worktree's
+`info/exclude` lives in the main repository's git directory, which the
+container mount leaves out.
+
+Paths with a `.terraform` or `node_modules` component are left out of every
+list, as the earlier discovery left them out of most. A linter whose list is empty is
+reported as `SKIP` with the reason, so under `LINT_STRICT` it fails. It is not
+run with no arguments, which for most of these tools means walking the current
+directory. The script stops with exit status 1 before any check when git
+cannot list the files, such as in an exported tree with no `.git`.
+
 ### YAML: yamllint 1.37.1
 
-The YAML check runs:
+The YAML check names every `*.yaml`, `*.yml` and `.yamllint` file a commit would
+take, the patterns of yamllint's default `yaml-files` setting:
 
 ```bash
-yamllint -f parsable .
+yamllint -f parsable ./.github/workflows/ci.yml ./.yamllint.yml ...
 ```
 
 The configuration in [`.yamllint.yml`](../.yamllint.yml) extends yamllint's
@@ -264,7 +305,8 @@ default rules and makes these repository choices:
 - Inline comments need at least 1 space before the comment.
 - Mapping and sequence indentation must be internally consistent.
 
-The check ignores `.terraform` directories and the generated
+The configuration's `ignore` list still applies to a file named on the command
+line, so the check ignores `.terraform` directories and the generated
 `k8s/manifests/monitoring/dashboard-relay.yaml`. The generated file contains a
 Grafana JSON block whose lines should stay byte-for-byte equal to the source
 dashboard. The Kubernetes tests parse the generated YAML and check that
@@ -272,7 +314,11 @@ contract instead.
 
 ### Python: Ruff 0.16.6
 
-`ruff check .` uses [`ruff.toml`](../ruff.toml), which explicitly selects `F`
+`ruff check --force-exclude` runs on the `*.py`, `*.pyi`, `*.ipynb`,
+`pyproject.toml`, `ruff.toml` and `.ruff.toml` files a commit would take, which
+are the files `ruff check --show-files .` lists. `--force-exclude` applies
+Ruff's exclude settings to named files. Ruff uses
+[`ruff.toml`](../ruff.toml), which explicitly selects `F`
 (Pyflakes), `E9` (syntax/runtime-error rules), `B` (flake8-bugbear), and `DTZ`
 (flake8-datetimez). This is a lint gate; the script doesn't run Ruff formatting
 or a Python type checker.
@@ -282,8 +328,8 @@ The script accepts a matching native Ruff binary or runs
 
 ### Shell: ShellCheck 0.11.0
 
-The script discovers every `*.sh` file recursively, excluding `.terraform`
-directories, then runs ShellCheck over the complete list. This includes:
+The script lists every `*.sh` file a commit would take, then runs ShellCheck
+over the complete list. This includes:
 
 - local bootstrap scripts;
 - ArgoCD installation and repository-credential scripts;
@@ -295,9 +341,14 @@ file discovery covers standalone shell scripts.
 
 ### Markdown: markdownlint-cli2 0.23.2
 
-Markdownlint checks every `**/*.md` file, excluding `.terraform` and
-`node_modules`. [`.markdownlint-cli2.jsonc`](../.markdownlint-cli2.jsonc)
-enables the default rule set with these exceptions:
+Markdownlint checks every `*.md` file a commit would take. The script passes
+`--no-globs`, which drops the configuration's `**/*.md` glob, and names each
+file behind a `:` prefix, which makes markdownlint-cli2 read the argument as a
+literal path rather than a glob. The configuration's `ignores` for
+`.terraform` and `node_modules` still apply. The glob stays in the
+configuration for editors and a bare `markdownlint-cli2` run.
+[`.markdownlint-cli2.jsonc`](../.markdownlint-cli2.jsonc) enables the default
+rule set with these exceptions:
 
 - `MD013`, line length, is disabled. Tables, links, and commands can exceed the
   prose wrapping width.
@@ -337,7 +388,10 @@ ADR titles.
 
 ### GitHub Actions: actionlint 1.7.12
 
-Actionlint checks workflow YAML under `.github/workflows`. Its coverage
+Actionlint checks the `*.yml` and `*.yaml` files directly under
+`.github/workflows` that a commit would take, named on the command line. Run
+bare, it read only that directory, so other checkouts and `.evidence/` never
+reached it, but it also read a gitignored workflow file there. Its coverage
 includes workflow structure, expressions, job references, action inputs, and
 shell embedded in `run:` blocks when ShellCheck is available to actionlint.
 The native path relies on the host's auxiliary checker installation.
@@ -346,8 +400,8 @@ Yamllint still checks the same workflow files for general YAML rules.
 
 ### Dockerfiles: Hadolint 2.15.1
 
-The lint script discovers every file named `Dockerfile`, excluding
-`.terraform`, and checks each one with Hadolint. The check covers Dockerfile
+The lint script lists every file named `Dockerfile` that a commit would take
+and checks each one with Hadolint. The check covers Dockerfile
 syntax and Hadolint's default Docker and shell rules.
 
 ### Terraform formatting: Terraform 1.16.3
@@ -355,11 +409,14 @@ syntax and Hadolint's default Docker and shell rules.
 The lint script runs:
 
 ```bash
-terraform fmt -check -recursive infra/terraform
+terraform fmt -check ./infra/terraform/bootstrap/main.tf ...
 ```
 
-This fails when any tracked Terraform file differs from Terraform's canonical
-format.
+The arguments are the `*.tf`, `*.tfvars` and `*.tftest.hcl` files under
+`infra/terraform` that a commit would take, the kinds `fmt` formats. This fails
+when any of them differs from Terraform's canonical format. The earlier
+`-recursive infra/terraform` also checked the gitignored
+`infra/terraform/guardrails/terraform.tfvars` a workstation keeps.
 
 ### Terraform rules: TFLint 0.64.0
 
@@ -387,8 +444,8 @@ allowed skip because it says nothing about the Terraform configuration.
 
 ### Go: golangci-lint 2.13.1
 
-The lint script discovers every directory containing `go.mod`, excluding
-`.terraform` and `node_modules`, and runs:
+The lint script finds every `go.mod` a commit would take and runs, in each
+module's directory:
 
 ```bash
 golangci-lint run --config ../../.golangci.yml --timeout 5m
@@ -476,9 +533,8 @@ Two gaps remain:
   scan, and a rerun passes.
 
 The final scan reads a copy of the repository, not the working tree. The lint
-script copies the files a commit would take into a temporary directory: tracked
-files with their working-tree contents, and untracked files that no ignore rule
-covers. It removes the copy when the script exits. In CI that is the checkout.
+script copies the files a commit would take, the list every other check reads,
+into a temporary directory. It removes the copy when the script exits. In CI that is the checkout.
 On a workstation it leaves out everything gitignored or excluded through
 `.git/info/exclude`, such as Terraform state, `*.tfvars`, `.evidence/`, and
 other agents' checkouts under `.claude/worktrees/`.
@@ -1018,6 +1074,13 @@ The following boundaries are deliberate descriptions of current behavior:
 - There is no repository-wide JSON syntax checker. The shipped Grafana
   dashboard has dedicated JSON checks.
 - There is no Markdown link checker.
+- TFLint reads a whole stack directory, so on a workstation it also loads
+  gitignored files there, such as a `terraform.tfvars` or `override.tf`.
+  Terraform loads those too, so the result describes the local configuration
+  rather than the commit.
+- golangci-lint is handed modules, not files, and lints each module's
+  packages. A gitignored Go source file inside a module directory would still
+  be read. None exists today.
 - The ADR index checks membership, uniqueness, and status. It does not enforce
   consecutive numbering or require README link text to match an ADR title.
 - CI inspects ArgoCD configuration and scripts without installing ArgoCD.

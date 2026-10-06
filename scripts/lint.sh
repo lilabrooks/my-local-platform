@@ -66,6 +66,67 @@ retry_net() {
 has()        { command -v "$1" >/dev/null 2>&1; }
 has_docker() { docker info >/dev/null 2>&1; }
 
+# --- What the linters read --------------------------------------------------
+# Every check reads the files a commit would take, not the working tree. On a
+# workstation the working tree also holds what git ignores and CI never has:
+# other agents' checkouts under .claude/worktrees (excluded through
+# .git/info/exclude), archived plans under .evidence, Terraform state and
+# tfvars. Walking `.` linted all of it. yamllint failed on a duplicate key under
+# .evidence, and golangci-lint on a copied k8s/validate module under
+# .claude/worktrees whose relative replace directive did not resolve there.
+#
+# Git decides what is ignored, so nested .gitignore files, .git/info/exclude
+# and core.excludesFile all count, in a linked worktree and inside a container
+# alike. Each tool's own ignore support covers part of that at most: ruff's
+# container run skipped .gitignore'd files but linted the excluded worktrees,
+# because a linked worktree's info/exclude lives in a git directory the mount
+# leaves out.
+
+# commit_view_files -- prints, NUL-terminated, tracked files still present in
+# the working tree and untracked files that no ignore rule covers.
+commit_view_files() {
+  git ls-files -z --cached --others --exclude-standard |
+    while IFS= read -r -d '' f; do
+      # A tracked file deleted from the working tree is still listed.
+      if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
+    done
+}
+
+# commit_files <pattern>... -- prints, NUL-terminated and prefixed with "./",
+# the commit view's files whose path matches one of the shell patterns. A
+# pattern is matched against the path with "/" in front, and in a case pattern
+# `*` matches "/" too: "*.sh" is a shell script anywhere, "*/Dockerfile" a
+# Dockerfile at any depth including the root, "/.github/workflows/*" one
+# directory. The "./" keeps a name starting with "-" from reading as an option.
+#
+# .terraform and node_modules hold vendored code that is not ours to lint. Both
+# are left out even if committed, as the find-based discovery this replaced
+# left them out.
+commit_files() {
+  local f p
+  commit_view_files | while IFS= read -r -d '' f; do
+    case "/$f" in */.terraform/*|*/node_modules/*) continue ;; esac
+    for p in "$@"; do
+      # $p unquoted: it is the pattern.
+      # shellcheck disable=SC2254
+      case "/$f" in $p) printf './%s\0' "$f"; break ;; esac
+    done
+  done
+}
+
+# A process substitution's exit status is lost, so a git that cannot list the
+# files would leave every list empty. Fail here instead, once.
+if ! git_check=$(git rev-parse --is-inside-work-tree 2>&1); then
+  printf 'scripts/lint.sh reads the files to lint from git, which failed:\n%s\n' "$git_check" >&2
+  exit 1
+fi
+
+# none_to_lint <name> <what> -- a linter whose list came back empty. Not a pass:
+# under LINT_STRICT it fails like any other skip.
+none_to_lint() {
+  skip "$1" "no $2 in the files a commit would take"
+}
+
 echo "linting $(pwd)"
 echo
 
@@ -100,32 +161,56 @@ pinned() {
   printf '%s' "$2" | grep -Eq "(^|[^0-9])${escaped}([^0-9]|$)"
 }
 
-if has yamllint && pinned "$YAMLLINT_VERSION" "$(yamllint --version 2>&1)"; then
-  out=$(yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
+# Named files rather than `.`, which walks ignored directories. The patterns
+# are yamllint's default yaml-files, which .yamllint.yml does not change, and
+# its ignore list still applies to a named file. Its ignore-from-file key was
+# not enough: 1.37.1 rejects it beside that list, it reads only the files it is
+# given as if each sat at the root, and a linked worktree's info/exclude lies
+# outside the checkout.
+YAML_FILES=()
+while IFS= read -r -d '' f; do YAML_FILES+=("$f"); done < <(
+  commit_files '*.yaml' '*.yml' '*/.yamllint'
+)
+if [ "${#YAML_FILES[@]}" -eq 0 ]; then
+  none_to_lint "yamllint" "YAML files"
+elif has yamllint && pinned "$YAMLLINT_VERSION" "$(yamllint --version 2>&1)"; then
+  out=$(yamllint -f parsable "${YAML_FILES[@]}" 2>&1); report "yamllint" $? "$out"
 elif has_docker; then
   out=$(docker run --rm -v "$PWD":/data -w /data "$YAMLLINT_IMAGE" \
-        yamllint -f parsable . 2>&1); report "yamllint" $? "$out"
+        yamllint -f parsable "${YAML_FILES[@]}" 2>&1); report "yamllint" $? "$out"
 else
   skip "yamllint" "install with: pipx install yamllint==$YAMLLINT_VERSION"
 fi
 
 # --- Python -----------------------------------------------------------------
-if has ruff && pinned "$RUFF_VERSION" "$(ruff --version 2>&1)"; then
-  out=$(ruff check . 2>&1); report "ruff" $? "$out"
+# The patterns are the files `ruff check --show-files .` lists: Ruff 0.16.6's
+# default include without "*.md", which `check` does not read. --force-exclude
+# applies its exclude settings to named files as they applied to the walk.
+PYTHON_FILES=()
+while IFS= read -r -d '' f; do PYTHON_FILES+=("$f"); done < <(
+  commit_files '*.py' '*.pyi' '*.ipynb' '*/pyproject.toml' '*/ruff.toml' '*/.ruff.toml'
+)
+if [ "${#PYTHON_FILES[@]}" -eq 0 ]; then
+  none_to_lint "ruff" "Python files"
+elif has ruff && pinned "$RUFF_VERSION" "$(ruff --version 2>&1)"; then
+  out=$(ruff check --force-exclude "${PYTHON_FILES[@]}" 2>&1); report "ruff" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo "$RUFF_IMAGE" check . 2>&1)
+  out=$(docker run --rm -v "$PWD":/repo -w /repo "$RUFF_IMAGE" \
+        check --force-exclude "${PYTHON_FILES[@]}" 2>&1)
   report "ruff" $? "$out"
 else
   skip "ruff" "needs docker or ruff $RUFF_VERSION"
 fi
 
 # --- Shell ------------------------------------------------------------------
-# Not `mapfile`: macOS ships bash 3.2, which does not have it.
+# Not `mapfile`: macOS ships bash 3.2, which does not have it. Nor an empty
+# "${SCRIPTS[@]}": bash 3.2 calls that unbound under `set -u` and aborts, so
+# each linter checks its count first.
 SCRIPTS=()
-while IFS= read -r f; do SCRIPTS+=("$f"); done < <(
-  find . -name '*.sh' -not -path '*/.terraform/*' | sort
-)
-if has shellcheck && pinned "$SHELLCHECK_VERSION" "$(shellcheck --version 2>&1)"; then
+while IFS= read -r -d '' f; do SCRIPTS+=("$f"); done < <(commit_files '*.sh')
+if [ "${#SCRIPTS[@]}" -eq 0 ]; then
+  none_to_lint "shellcheck" "shell scripts"
+elif has shellcheck && pinned "$SHELLCHECK_VERSION" "$(shellcheck --version 2>&1)"; then
   out=$(shellcheck "${SCRIPTS[@]}" 2>&1); report "shellcheck" $? "$out"
 elif has_docker; then
   out=$(docker run --rm -v "$PWD":/mnt -w /mnt "koalaman/shellcheck:v$SHELLCHECK_VERSION" \
@@ -135,20 +220,35 @@ else
 fi
 
 # --- Markdown ---------------------------------------------------------------
-if has markdownlint-cli2 && \
+# The config's "**/*.md" glob walks ignored directories, so --no-globs drops it
+# and the files are named instead, each behind ":", which makes an argument a
+# literal path rather than a glob. The config's "ignores" still apply. The glob
+# stays in the config for editors and a bare `markdownlint-cli2`.
+#
+# Its "Finding:" line echoes every argument, now every file, as one line.
+report_markdownlint() {
+  report "markdownlint" "$1" "$(printf '%s\n' "$2" | grep -v '^Finding: ')"
+}
+MARKDOWN_ARGS=()
+while IFS= read -r -d '' f; do MARKDOWN_ARGS+=(":$f"); done < <(commit_files '*.md')
+if [ "${#MARKDOWN_ARGS[@]}" -eq 0 ]; then
+  none_to_lint "markdownlint" "Markdown files"
+elif has markdownlint-cli2 && \
    pinned "$MARKDOWNLINT_VERSION" "$(markdownlint-cli2 --version 2>&1 | head -1)"; then
-  out=$(markdownlint-cli2 2>&1); report "markdownlint" $? "$out"
+  out=$(markdownlint-cli2 --no-globs "${MARKDOWN_ARGS[@]}" 2>&1); report_markdownlint $? "$out"
 elif has_docker; then
   # Prefer the container to npx. A damaged host npm cache used to fail this
   # path even though the pinned image was already available.
   out=$(retry_net 3 docker run --rm -v "$PWD":/workdir \
-        "davidanson/markdownlint-cli2:v$MARKDOWNLINT_VERSION"); code=$?
-  report "markdownlint" "$code" "$out"
+        "davidanson/markdownlint-cli2:v$MARKDOWNLINT_VERSION" \
+        --no-globs "${MARKDOWN_ARGS[@]}"); code=$?
+  report_markdownlint "$code" "$out"
 elif has npx; then
   # @VERSION, not bare: `npx --yes markdownlint-cli2` fetches whatever is
   # newest, so this gate could change under a repository that did not.
-  out=$(npx --yes "markdownlint-cli2@$MARKDOWNLINT_VERSION" 2>&1 | grep -vE '^npm notice'); code=$?
-  report "markdownlint" "$code" "$out"
+  out=$(npx --yes "markdownlint-cli2@$MARKDOWNLINT_VERSION" \
+        --no-globs "${MARKDOWN_ARGS[@]}" 2>&1 | grep -vE '^npm notice'); code=$?
+  report_markdownlint "$code" "$out"
 else
   skip "markdownlint" "needs docker, npx, or markdownlint-cli2 $MARKDOWNLINT_VERSION"
 fi
@@ -159,10 +259,21 @@ fi
 out=$(./scripts/check-adr-index.sh 2>&1); report "ADR index" $? "$out"
 
 # --- GitHub Actions ---------------------------------------------------------
-if has actionlint && pinned "$ACTIONLINT_VERSION" "$(actionlint -version 2>&1)"; then
-  out=$(actionlint 2>&1); report "actionlint" $? "$out"
+# Run bare, actionlint reads only .github/workflows, so other checkouts and
+# .evidence never reached it, but it did read an ignored file in that
+# directory. These are the files it reads there: not subdirectories.
+WORKFLOWS=()
+while IFS= read -r -d '' f; do
+  case "$f" in ./.github/workflows/*/*) continue ;; esac
+  WORKFLOWS+=("$f")
+done < <(commit_files '/.github/workflows/*.yml' '/.github/workflows/*.yaml')
+if [ "${#WORKFLOWS[@]}" -eq 0 ]; then
+  none_to_lint "actionlint" "workflow files"
+elif has actionlint && pinned "$ACTIONLINT_VERSION" "$(actionlint -version 2>&1)"; then
+  out=$(actionlint "${WORKFLOWS[@]}" 2>&1); report "actionlint" $? "$out"
 elif has_docker; then
-  out=$(docker run --rm -v "$PWD":/repo -w /repo "rhysd/actionlint:$ACTIONLINT_VERSION" 2>&1)
+  out=$(docker run --rm -v "$PWD":/repo -w /repo "rhysd/actionlint:$ACTIONLINT_VERSION" \
+        "${WORKFLOWS[@]}" 2>&1)
   report "actionlint" $? "$out"
 else
   skip "actionlint" "needs docker or actionlint $ACTIONLINT_VERSION"
@@ -170,10 +281,10 @@ fi
 
 # --- Dockerfiles ------------------------------------------------------------
 DOCKERFILES=()
-while IFS= read -r f; do DOCKERFILES+=("$f"); done < <(
-  find . -name Dockerfile -not -path '*/.terraform/*' | sort
-)
-if has hadolint && pinned "$HADOLINT_VERSION" "$(hadolint --version 2>&1)"; then
+while IFS= read -r -d '' f; do DOCKERFILES+=("$f"); done < <(commit_files '*/Dockerfile')
+if [ "${#DOCKERFILES[@]}" -eq 0 ]; then
+  none_to_lint "hadolint" "Dockerfiles"
+elif has hadolint && pinned "$HADOLINT_VERSION" "$(hadolint --version 2>&1)"; then
   out=$(hadolint "${DOCKERFILES[@]}" 2>&1); report "hadolint" $? "$out"
 elif has_docker; then
   docker_fail=0 docker_out=""
@@ -197,16 +308,26 @@ fi
 # script used whatever `terraform` was on PATH, or skipped entirely when there
 # was none. Two versions of `fmt` disagree about formatting, which is the whole
 # check.
+#
+# Named files rather than `-recursive infra/terraform`, which also checked the
+# gitignored terraform.tfvars a workstation keeps beside a stack. The patterns
+# are the files fmt formats.
 TERRAFORM_VERSION=1.16.3
+TF_FILES=()
+while IFS= read -r -d '' f; do TF_FILES+=("$f"); done < <(
+  commit_files '/infra/terraform/*.tf' '/infra/terraform/*.tfvars' '/infra/terraform/*.tftest.hcl'
+)
 tf_fail=0 tf_out=""
-if has terraform && pinned "$TERRAFORM_VERSION" "$(terraform version 2>&1 | head -1)"; then
-  out=$(terraform fmt -check -recursive infra/terraform 2>&1) || {
+if [ "${#TF_FILES[@]}" -eq 0 ]; then
+  none_to_lint "terraform fmt" "Terraform files under infra/terraform"
+elif has terraform && pinned "$TERRAFORM_VERSION" "$(terraform version 2>&1 | head -1)"; then
+  out=$(terraform fmt -check "${TF_FILES[@]}" 2>&1) || {
     tf_fail=1; tf_out="not formatted:\n$out"
   }
   report "terraform fmt" "$tf_fail" "$tf_out"
 elif has_docker; then
   out=$(retry_net 3 docker run --rm -v "$PWD":/data -w /data \
-        "hashicorp/terraform:$TERRAFORM_VERSION" fmt -check -recursive infra/terraform) || {
+        "hashicorp/terraform:$TERRAFORM_VERSION" fmt -check "${TF_FILES[@]}") || {
     tf_fail=1; tf_out="not formatted:\n$out"
   }
   report "terraform fmt" "$tf_fail" "$tf_out"
@@ -263,15 +384,21 @@ fi
 #
 # Modules are discovered rather than listed. A hardcoded list silently skipped
 # services/relay when it was added, and reported PASS -- a lint run that does
-# not lint the new code is worse than one that fails.
+# not lint the new code is worse than one that fails. Discovered from git: a
+# copy of k8s/ under the ignored .claude/worktrees was found as a module, and
+# failed because its relative replace directive led nowhere.
 go_fail=0 go_out=""
-go_mods=$(find . -name go.mod -not -path './*/.terraform/*' -not -path './*/node_modules/*' \
-          -exec dirname {} \; | sed 's|^\./||' | sort)
+GO_MODS=()
+while IFS= read -r -d '' f; do
+  f=$(dirname "${f#./}"); GO_MODS+=("$f")
+done < <(commit_files '*/go.mod')
 if skip_allowed "golangci-lint"; then
   skip "golangci-lint" "covered by the dedicated CI job"
+elif [ "${#GO_MODS[@]}" -eq 0 ]; then
+  none_to_lint "golangci-lint" "Go modules"
 elif has golangci-lint && \
    pinned "$GOLANGCI_VERSION" "$(golangci-lint --version 2>&1)"; then
-  for mod in $go_mods; do
+  for mod in "${GO_MODS[@]}"; do
     out=$(cd "$mod" && golangci-lint run --config ../../.golangci.yml --timeout 5m 2>&1) || {
       go_fail=1
       go_out="${go_out}${mod}:
@@ -281,7 +408,7 @@ ${out}
   done
   report "golangci-lint" "$go_fail" "$go_out"
 elif has_docker; then
-  for mod in $go_mods; do
+  for mod in "${GO_MODS[@]}"; do
     out=$(docker run --rm -v "$PWD":/repo -w "/repo/$mod" \
           "golangci/golangci-lint:v$GOLANGCI_VERSION" \
           golangci-lint run --config /repo/.golangci.yml --timeout 5m 2>&1) || {
@@ -355,12 +482,7 @@ retry_net_until_checks() {
 # the ignored files besides: Terraform state, tfvars, local indexes.
 copy_commit_view() {
   [ -d "$1" ] || { echo "no such directory"; return 1; }
-  git ls-files -z --cached --others --exclude-standard |
-    while IFS= read -r -d '' f; do
-      # A tracked file deleted from the working tree is still listed.
-      if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
-    done |
-    tar --null --no-recursion -T - -cf - | tar -xf - -C "$1"
+  commit_view_files | tar --null --no-recursion -T - -cf - | tar -xf - -C "$1"
 }
 
 # report_trivy_scan <command...> -- runs the final scan and reports it.
