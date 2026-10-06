@@ -239,7 +239,7 @@ services:
   # DD_API_KEY. Nothing in the app code knows Datadog exists.
   # ---------------------------------------------------------------------------
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.161.0
+    image: otel/opentelemetry-collector-contrib:0.161.0-386
     container_name: mlp-otel-collector
     profiles: [obs, all]
     # Which config file is used decides whether Datadog receives telemetry.
@@ -255,7 +255,7 @@ services:
       - ./config/otel:/etc/otel:ro
 
   prometheus:
-    image: prom/prometheus:v3.14.0
+    image: prom/prometheus:v3.15.0
     container_name: mlp-prometheus
     profiles: [obs, all]
     ports:
@@ -265,7 +265,7 @@ services:
       - prom-data:/prometheus
 
   tempo:
-    image: grafana/tempo:3.0.3
+    image: grafana/tempo:3.1.0
     container_name: mlp-tempo
     profiles: [obs, all]
     command: ["-config.file=/etc/tempo/tempo.yaml"]
@@ -276,7 +276,7 @@ services:
       - tempo-data:/var/tempo
 
   grafana:
-    image: grafana/grafana:13.2.2
+    image: grafana/grafana:13.2.3
     container_name: mlp-grafana
     profiles: [obs, all]
     ports:
