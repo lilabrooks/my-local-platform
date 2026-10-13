@@ -62,7 +62,7 @@ services:
       - floci-data:/data
 
   floci:
-    image: floci/floci:2.1.0
+    image: floci/floci:2.2.0
     container_name: mlp-floci
     profiles: [core, all]
     ports:
@@ -239,7 +239,7 @@ services:
   # DD_API_KEY. Nothing in the app code knows Datadog exists.
   # ---------------------------------------------------------------------------
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.161.0
+    image: otel/opentelemetry-collector-contrib:0.162.0
     container_name: mlp-otel-collector
     profiles: [obs, all]
     # Which config file is used decides whether Datadog receives telemetry.
