@@ -62,7 +62,7 @@ services:
       - floci-data:/data
 
   floci:
-    image: floci/floci:2.1.0
+    image: floci/floci:2.3.0
     container_name: mlp-floci
     profiles: [core, all]
     ports:
@@ -215,7 +215,7 @@ services:
         condition: service_healthy
 
   rabbitmq:
-    image: rabbitmq:4.3-management
+    image: rabbitmq:4.4-management
     container_name: mlp-rabbitmq
     profiles: [messaging, all]
     ports:
@@ -239,7 +239,7 @@ services:
   # DD_API_KEY. Nothing in the app code knows Datadog exists.
   # ---------------------------------------------------------------------------
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.161.0
+    image: otel/opentelemetry-collector-contrib:0.163.2
     container_name: mlp-otel-collector
     profiles: [obs, all]
     # Which config file is used decides whether Datadog receives telemetry.
@@ -255,7 +255,7 @@ services:
       - ./config/otel:/etc/otel:ro
 
   prometheus:
-    image: prom/prometheus:v3.15.0
+    image: prom/prometheus:v3.15.1
     container_name: mlp-prometheus
     profiles: [obs, all]
     ports:
@@ -265,7 +265,7 @@ services:
       - prom-data:/prometheus
 
   tempo:
-    image: grafana/tempo:3.1.0
+    image: grafana/tempo:3.1.1
     container_name: mlp-tempo
     profiles: [obs, all]
     command: ["-config.file=/etc/tempo/tempo.yaml"]
@@ -276,7 +276,7 @@ services:
       - tempo-data:/var/tempo
 
   grafana:
-    image: grafana/grafana:13.2.3
+    image: grafana/grafana:13.2.4
     container_name: mlp-grafana
     profiles: [obs, all]
     ports:
