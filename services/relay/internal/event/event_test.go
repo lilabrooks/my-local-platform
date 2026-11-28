@@ -152,7 +152,7 @@ func TestRecordRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if got.ID != want.ID || got.TenantID != want.TenantID || got.Type != want.Type {
+	if got.ID != want.ID || got.TenantID != want.TenantID || got.Type != want.Type || got.IdempotencyKey != want.IdempotencyKey {
 		t.Errorf("round trip changed identity: %+v", got)
 	}
 	if string(got.Data) != string(want.Data) {
@@ -163,6 +163,28 @@ func TestRecordRoundTrip(t *testing.T) {
 	}
 	if !got.OccurredAt.Equal(want.OccurredAt) {
 		t.Errorf("occurred_at = %s, want %s", got.OccurredAt, want.OccurredAt)
+	}
+	want.IdempotencyKey = ""
+	encoded, err = EncodeRecord(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(encoded) || bytes.Contains(encoded, []byte(`"idempotency_key"`)) {
+		t.Errorf("record with empty idempotency key = %s", encoded)
+	}
+}
+
+func TestJoinJSONChecksCombinedSize(t *testing.T) {
+	t.Parallel()
+
+	parts := [][]byte{[]byte(`{"a":`), []byte("1"), []byte("}")}
+	const want = `{"a":1}`
+	got, err := joinJSON(len(want), parts...)
+	if err != nil || string(got) != want {
+		t.Fatalf("join at size limit = %q, %v", got, err)
+	}
+	if _, err := joinJSON(len(want)-1, parts...); err == nil {
+		t.Fatal("encoded JSON exceeded the size limit")
 	}
 }
 
