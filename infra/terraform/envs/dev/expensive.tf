@@ -11,7 +11,7 @@ module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
   # Exact: the lock file pins providers, not registry modules. Dependabot
   # proposes updates.
-  version = "6.8.0"
+  version = "6.9.0"
 
   name = local.name
   cidr = "10.42.0.0/16"
