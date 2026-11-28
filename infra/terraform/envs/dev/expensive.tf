@@ -11,7 +11,7 @@ module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
   # Exact: the lock file pins providers, not registry modules. Dependabot
   # proposes updates.
-  version = "6.7.3"
+  version = "6.8.0"
 
   name = local.name
   cidr = "10.42.0.0/16"
@@ -167,7 +167,7 @@ module "eks" {
   # Exact, as for the VPC. The add-on bootstrap and placement below depend on
   # this module's internals. September 20 staging resolved 21.25.1, retained
   # for the September 22 run; the September 22 repair resolved 21.25.3.
-  version = "21.26.0"
+  version = "21.30.2"
 
   name = local.name
   # Provider defaults tag Terraform resources, but not the instances, volumes,
