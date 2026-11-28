@@ -88,14 +88,23 @@ Tool argument names are exact. For example, `mongo_count` with `filters`
 returns `refused` before querying the database. SQL comparisons accept
 integers and decimals either inline or as numeric parameters. PostgreSQL
 folds unquoted identifiers to lowercase and preserves the case of quoted
-names. MySQL refuses exact numeric inputs that its `DECIMAL` type would
-round or clip.
+names. MySQL matches column names and ordering aliases case-insensitively.
+Use the configured spelling for MySQL database and view names.
+
+For a MySQL comparison, the reader fetches the types of the approved
+predicate columns with a zero-row query on the same view and transaction.
+Pass JSON numbers for numeric fields and strings for text fields. For
+example, both `station = 0` and `watts = '10'` return `refused`.
+MySQL also refuses unsupported comparison types and exact numeric inputs
+that its `DECIMAL` type would round or clip.
 
 SQL refuses a null comparison parameter. For MongoDB, a filter such as
 `{"state": null}` matches both null and missing fields, and
 `{"state": {"$ne": null}}` matches existing, non-null values.
 MongoDB filter values written as JSON integers use BSON int64. Fractional
-and scientific notation use BSON double precision.
+and scientific notation use BSON doubles. The server compares the input
+with the shortest decimal spelling of that double. It accepts `0.1` and
+`0.1000`, and refuses `640.00000000000000000001`, which rounds to `640`.
 [MongoDB null comparisons](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/)
 
 Put data suitable for the client into the approved view. Selected scalar
@@ -108,7 +117,8 @@ Client transcripts and the database's own logging have their own retention
 settings.
 
 The client and audit use the same outcome code. A malformed tool request or
-catalog refusal returns `refused`. Recognized database type and grouping errors
+catalog refusal returns `refused`. A native permission denial on the configured
+reader returns `denied`. Recognized database type and grouping errors
 return `invalid_query`. Deadline errors return `timeout`, including PostgreSQL's
 server-side query cancellation signal. A client cancellation is recorded as
 `canceled`. Other database errors return `unavailable`. Driver messages can
@@ -144,23 +154,28 @@ certificate and rejected a hostname mismatch against a local HTTPS test server.
 `make db-mcp-demo` exercised the compiled Go binary against PostgreSQL 18.7,
 MySQL 8.4.13 and MongoDB 8.0.38. All 11 tools ran. Each engine counted 32 ready
 readings, counted 63 readings above 10.5 watts and capped a 64-row result at
-50. All 56 requests matched individual audit records. Separate owner queries
-confirmed the excluded objects existed.
+50. All 69 calls matched audit records, including their resolved target or
+its absence. A second catalog deliberately named an existing object outside
+each reader's grants. All three requests returned and logged `denied`
+without exposing driver messages. Separate owner queries confirmed the
+excluded objects existed.
 All three native readers were denied a base-data read and a write. MySQL
 also denied the reader access to an existing table in another database.
 The SQL drivers masked a PostgreSQL composite and MySQL geometry value
 while preserving exact decimals and dates.
 Both SQL engines rejected a zero-row update through the MCP transaction even
 with a fixture owner login. Each stopped a slow query on its 15-second server
-timer and honored client cancellation in a separate query. The PostgreSQL
-driver refused to fall back to plaintext when the fixture declined TLS.
+timer. Canceling a separate query returned promptly on both clients. The
+fixture observer saw the PostgreSQL statement disappear in about 0.1 seconds.
+The MySQL statement continued until about 15 seconds after cancellation.
+The PostgreSQL driver refused to fall back to plaintext when the fixture declined TLS.
 The MongoDB driver sent a server-side deadline for both aggregate and explain.
 An authenticated query over verified TLS to each actual deployment remains
 a pilot prerequisite.
 
 At revision `a1d2743` a separate client passed a 32-request rehearsal against
-the Go binary. This revision tightens all 11 published input schemas to reject
-unknown arguments.
+the Go binary. The tests now check each of the 11 published input schemas
+against the arguments its handler consumes.
 
 ## Personal AWS pilot and adoption
 

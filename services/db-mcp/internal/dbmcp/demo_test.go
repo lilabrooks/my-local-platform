@@ -4,6 +4,7 @@ package dbmcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -41,24 +42,25 @@ func TestDemoStdio(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := connectTestClient(t, exec.Command(filepath.Join(root, "bin", "mlp-db-mcp"), "--catalog", filepath.Join(root, "services", "db-mcp", "demo.toml")))
-	targets := c.call(t, "list_targets", document{}, true)["targets"].([]any)
+	targets := c.call(t, "", "list_targets", document{}, true)["targets"].([]any)
 	cat := demoCatalog(t)
 	if len(targets) != len(cat.Targets) {
 		t.Fatal(targets)
 	}
-	checkJSON(t, c.call(t, "whoami", document{}, true)["transport"], `"stdio"`)
+	checkJSON(t, c.call(t, "", "whoami", document{}, true)["transport"], `"stdio"`)
+	c.call(t, "", "list_tables", document{"target": "demo-mysql", "database": "unlisted"}, false)
 	var knownObjects, excludedObjects []string
 	for _, target := range cat.Targets {
 		args := document{"target": target.Name, "database": target.Database}
-		checkJSON(t, c.call(t, "list_databases", document{"target": target.Name}, true)["databases"], `["meter_demo"]`)
-		checkJSON(t, c.call(t, "list_tables", args, true)["objects"], `["readings"]`)
-		checkJSON(t, c.call(t, "describe_table", with(args, document{"table": "readings"}), true)["fields"], `["sequence_no","station","state","watts"]`)
-		c.call(t, "describe_table", with(args, document{"table": "meter_events"}), false)
+		checkJSON(t, c.call(t, target.Name, "list_databases", document{"target": target.Name}, true)["databases"], `["meter_demo"]`)
+		checkJSON(t, c.call(t, target.Name, "list_tables", args, true)["objects"], `["readings"]`)
+		checkJSON(t, c.call(t, target.Name, "describe_table", with(args, document{"table": "readings"}), true)["fields"], `["sequence_no","station","state","watts"]`)
+		c.call(t, target.Name, "describe_table", with(args, document{"table": "meter_events"}), false)
 		if target.Engine == "mongodb" {
 			continue
 		}
 		callSQL := func(query string, params []any, ok bool) document {
-			return c.call(t, "run_sql", with(args, document{"sql": query, "params": params}), ok)
+			return c.call(t, target.Name, "run_sql", with(args, document{"sql": query, "params": params}), ok)
 		}
 		counts := callSQL("SELECT state, COUNT(*) AS total FROM readings WHERE state=? GROUP BY state", []any{"ready"}, true)
 		checkJSON(t, counts["rows"], `[["ready",32]]`)
@@ -78,65 +80,84 @@ func TestDemoStdio(t *testing.T) {
 				{"sql": "SELECT COUNT(*) FROM readings WHERE watts > 10.5"},
 				{"sql": "SELECT COUNT(*) FROM readings WHERE watts > ?", "params": []any{json.Number("1.05e1")}},
 			} {
-				count := c.call(t, "run_sql", with(args, input), true)
+				count := c.call(t, target.Name, "run_sql", with(args, input), true)
 				checkJSON(t, count["rows"], `[[63]]`)
 			}
-			exact := c.call(t, "run_sql", with(args, document{"sql": "SELECT COUNT(*) FROM readings WHERE watts < ?", "params": []any{json.Number("10.00000000000000000001")}}), true)
+			exact := c.call(t, target.Name, "run_sql", with(args, document{"sql": "SELECT COUNT(*) FROM readings WHERE watts < ?", "params": []any{json.Number("10.00000000000000000001")}}), true)
 			checkJSON(t, exact["rows"], `[[1]]`)
-			signed := c.call(t, "run_sql", with(args, document{"sql": "SELECT COUNT(*) FROM readings WHERE watts > -10.5"}), true)
+			signed := c.call(t, target.Name, "run_sql", with(args, document{"sql": "SELECT COUNT(*) FROM readings WHERE watts > -10.5"}), true)
 			checkJSON(t, signed["rows"], `[[64]]`)
 		})
 		badGroup := with(args, document{"sql": "SELECT state, COUNT(*) FROM readings"})
-		c.callOutcome(t, "run_sql", badGroup, "invalid_query")
-		c.call(t, "run_sql", with(args, document{"sql": "SELECT watts FROM readings", "maxRows": 1}), false)
+		c.callOutcome(t, target.Name, "run_sql", badGroup, "invalid_query")
+		c.call(t, "", "run_sql", with(args, document{"sql": "SELECT watts FROM readings", "maxRows": 1}), false)
 		callSQL("SELECT state FROM readings WHERE state=?", []any{nil}, false)
 		if target.Engine == "postgres" {
 			badValue := with(args, document{"sql": "SELECT watts FROM readings WHERE watts=?", "params": []any{"sentinel-private-value"}})
-			failed := c.callOutcome(t, "run_sql", badValue, "invalid_query")
+			failed := c.callOutcome(t, target.Name, "run_sql", badValue, "invalid_query")
 			if strings.Contains(failed["message"].(string), "sentinel-private-value") {
 				t.Fatal("driver value appeared in response")
 			}
+		} else {
+			for _, number := range []string{"0", "0.0"} {
+				callSQL("SELECT COUNT(*) FROM readings WHERE station = "+number, nil, false)
+				callSQL("SELECT COUNT(*) FROM readings WHERE station = ?", []any{json.Number(number)}, false)
+			}
+			for _, value := range []string{"abc", "10"} {
+				callSQL("SELECT watts FROM readings WHERE watts > ?", []any{value}, false)
+			}
+			callSQL("SELECT watts FROM readings WHERE watts > '10'", nil, false)
+			badPlan := c.call(t, target.Name, "explain_query", with(args, document{"sql": "SELECT watts FROM readings WHERE station = 0"}), false)
+			checkJSON(t, badPlan["message"], `"Use a value compatible with the MySQL column type."`)
+			res := callSQL("SELECT STATE AS Sample, COUNT(*) AS Total FROM readings WHERE STATE = ? GROUP BY StAtE ORDER BY sAMPLE", []any{"ready"}, true)
+			checkJSON(t, res["rows"], `[["ready",32]]`)
 		}
-		plan := c.call(t, "explain_query", with(args, document{"sql": "SELECT watts FROM readings"}), target.Engine == "postgres")
+		plan := c.call(t, target.Name, "explain_query", with(args, document{"sql": "SELECT watts FROM readings"}), target.Engine == "postgres")
 		if target.Engine == "postgres" && len(plan["operators"].([]any)) == 0 {
 			t.Fatal(plan)
 		}
-		c.call(t, "explain_query", with(args, document{"sql": "SELECT watts FROM readings", "pipeline": []any{}}), false)
+		c.call(t, target.Name, "explain_query", with(args, document{"sql": "SELECT watts FROM readings", "pipeline": []any{}}), false)
 		callSQL("UPDATE readings SET watts=0", nil, false)
 		excluded := callSQL("SELECT * FROM meter_events", nil, false)
 		excludedObjects = append(excludedObjects, excluded["request_id"].(string))
 		t.Log(target.Name, "returned 32 ready readings and capped the 64-row view at 50")
 	}
-	args := document{"target": "demo-mongo", "database": "meter_demo", "collection": "readings"}
-	page := c.call(t, "mongo_find", with(args, document{"projection": document{"sequence_no": 1}, "sort": document{"sequence_no": 1}}), true)
+	const mongoTarget = "demo-mongo"
+	args := document{"target": mongoTarget, "database": "meter_demo", "collection": "readings"}
+	page := c.call(t, mongoTarget, "mongo_find", with(args, document{"projection": document{"sequence_no": 1}, "sort": document{"sequence_no": 1}}), true)
 	seq := page["rows"].([]any)
 	if len(seq) != RowLimit || page["truncated"] != true {
 		t.Fatal(page)
 	}
 	checkJSON(t, seq[49], `{"sequence_no":50}`)
 	query := document{"filter": document{"sequence_no": 1}, "projection": document{"watts": 1}}
-	checkJSON(t, c.call(t, "mongo_find", with(args, query), true)["rows"], `[{"watts":10}]`)
+	checkJSON(t, c.call(t, mongoTarget, "mongo_find", with(args, query), true)["rows"], `[{"watts":10}]`)
 	t.Run("misspelled optional filter", func(t *testing.T) {
-		c.call(t, "mongo_count", with(args, document{"filters": document{"state": "ready"}}), false)
+		c.call(t, "", "mongo_count", with(args, document{"filters": document{"state": "ready"}}), false)
 	})
-	checkJSON(t, c.call(t, "mongo_count", with(args, document{"filter": document{"watts": document{"$gt": 10.5}}}), true)["count"], "63")
+	c.call(t, "", "mongo_aggregate", with(args, document{"pipeline": []any{}, "filter": document{"state": "ready"}}), false)
+	rounded := c.call(t, mongoTarget, "mongo_count", with(args, document{"filter": document{"watts": document{"$gte": json.Number("640.00000000000000000001")}}}), false)
+	checkJSON(t, rounded["message"], `"The number would change at BSON double precision."`)
+	ordinary := c.call(t, mongoTarget, "mongo_count", with(args, document{"filter": document{"watts": document{"$gt": 0.1}}}), true)
+	checkJSON(t, ordinary["count"], "64")
+	checkJSON(t, c.call(t, mongoTarget, "mongo_count", with(args, document{"filter": document{"watts": document{"$gt": 10.5}}}), true)["count"], "63")
 	// Alphabetizing these keys would return 1 before 2.
 	order := document{"sort": json.RawMessage(`{"state":-1,"sequence_no":1}`), "limit": 2, "projection": document{"sequence_no": 1}}
-	checkJSON(t, c.call(t, "mongo_find", with(args, order), true)["rows"], `[{"sequence_no":2},{"sequence_no":4}]`)
-	count := c.call(t, "mongo_count", with(args, document{"filter": document{"state": "ready"}}), true)
+	checkJSON(t, c.call(t, mongoTarget, "mongo_find", with(args, order), true)["rows"], `[{"sequence_no":2},{"sequence_no":4}]`)
+	count := c.call(t, mongoTarget, "mongo_count", with(args, document{"filter": document{"state": "ready"}}), true)
 	checkJSON(t, count["count"], "32")
-	zero := c.call(t, "mongo_count", with(args, document{"filter": document{"watts": -1}}), true)
+	zero := c.call(t, mongoTarget, "mongo_count", with(args, document{"filter": document{"watts": -1}}), true)
 	checkJSON(t, zero["count"], "0")
 	knownObjects = append(knownObjects, count["request_id"].(string), zero["request_id"].(string))
-	checkJSON(t, c.call(t, "mongo_distinct", with(args, document{"field": "state"}), true)["rows"], `[{"value":"charging"},{"value":"ready"}]`)
+	checkJSON(t, c.call(t, mongoTarget, "mongo_distinct", with(args, document{"field": "state"}), true)["rows"], `[{"value":"charging"},{"value":"ready"}]`)
 	stages := json.RawMessage(`[{"$group":{"_id":"$state","n":{"$sum":1}}},{"$sort":{"_id":1}}]`)
-	checkJSON(t, c.call(t, "mongo_aggregate", with(args, document{"pipeline": stages}), true)["rows"], `[{"_id":"charging","n":32},{"_id":"ready","n":32}]`)
-	if p := c.call(t, "explain_query", with(args, document{"pipeline": []any{}}), true); len(p["operators"].([]any)) == 0 {
+	checkJSON(t, c.call(t, mongoTarget, "mongo_aggregate", with(args, document{"pipeline": stages}), true)["rows"], `[{"_id":"charging","n":32},{"_id":"ready","n":32}]`)
+	if p := c.call(t, mongoTarget, "explain_query", with(args, document{"pipeline": []any{}}), true); len(p["operators"].([]any)) == 0 {
 		t.Fatal(p)
 	}
-	c.call(t, "explain_query", with(args, document{"params": []any{"unused"}}), false)
-	c.call(t, "mongo_aggregate", with(args, document{"pipeline": json.RawMessage(`[{"$out":"archive"}]`)}), false)
-	excluded := c.call(t, "mongo_find", with(args, document{"collection": "meter_events"}), false)
+	c.call(t, mongoTarget, "explain_query", with(args, document{"params": []any{"unused"}}), false)
+	c.call(t, mongoTarget, "mongo_aggregate", with(args, document{"pipeline": json.RawMessage(`[{"$out":"archive"}]`)}), false)
+	excluded := c.call(t, mongoTarget, "mongo_find", with(args, document{"collection": "meter_events"}), false)
 	excludedObjects = append(excludedObjects, excluded["request_id"].(string))
 	records := c.checkAudit(t)
 	for _, id := range knownObjects {
@@ -236,6 +257,45 @@ func TestDemoSQLScalarTypes(t *testing.T) {
 	}
 }
 
+func TestDemoDeniedOverStdio(t *testing.T) {
+	root, err := filepath.Abs("../../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template, err := os.ReadFile(filepath.Join(root, "services", "db-mcp", "demo.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a catalog/grant mismatch on the existing base data, keeping the
+	// native readers unchanged. Passwords still belong to this checkout.
+	catalog := strings.ReplaceAll(string(template), "../../local/tmp/db-mcp/", filepath.Join(root, "local", "tmp", "db-mcp")+"/")
+	catalog = strings.ReplaceAll(catalog, "[targets.objects]", "[targets.objects]\nmeter_events = [\"watts\"]")
+	path := filepath.Join(t.TempDir(), "misconfigured.toml")
+	if err := os.WriteFile(path, []byte(catalog), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := connectTestClient(t, exec.Command(filepath.Join(root, "bin", "mlp-db-mcp"), "--catalog", path))
+	for _, target := range []string{"demo-postgres", "demo-mysql", "demo-mongo"} {
+		args := document{"target": target, "database": "meter_demo"}
+		var result document
+		if target == "demo-mongo" {
+			result = c.callOutcome(t, target, "mongo_count", with(args, document{"collection": "meter_events", "filter": document{"watts": 3731731}}), "denied")
+		} else {
+			result = c.callOutcome(t, target, "run_sql", with(args, document{"sql": "SELECT watts FROM meter_events WHERE watts=?", "params": []any{3731731}}), "denied")
+		}
+		checkJSON(t, result["message"], `"The configured database reader lacks permission for this operation."`)
+	}
+	for _, rec := range c.checkAudit(t) {
+		if rec.Object != "meter_events" || rec.Rows != nil {
+			t.Fatalf("expected a denied operation on the catalogued object: %+v", rec)
+		}
+	}
+	log, err := os.ReadFile(c.logs.Name())
+	if err != nil || strings.Contains(string(log), "3731731") || strings.Contains(string(log), "meter_reader") {
+		t.Fatal("native denial was not redacted", err)
+	}
+}
+
 func TestDemoPostgresRequiresTLS(t *testing.T) {
 	pg := *demoCatalog(t).byName["demo-postgres"]
 	query := statement{text: "SELECT COUNT(*) FROM readings"}
@@ -294,16 +354,63 @@ func TestDemoSQLTransactionGuards(t *testing.T) {
 			if code, _ := publicError(ctx, err); code != "timeout" {
 				t.Fatalf("native timeout was reported as %s", code)
 			}
-			client, stop := context.WithCancel(t.Context())
-			timer := time.AfterFunc(250*time.Millisecond, stop)
-			defer timer.Stop()
-			defer stop()
-			_, err = readSQL(client, cat.byName[name], "cancel-proof", statement{text: slow}, false)
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("client cancellation did not stop the query: %v", err)
-			}
+			checkSQLCancellation(t, db, cat.byName[name], slow)
 		})
 	}
+}
+
+func checkSQLCancellation(t *testing.T, observer *sql.DB, target *Target, slow string) {
+	t.Helper()
+	slow += " /* fixture cancellation check */"
+	lookup := "SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = 'meter-mcp/cancel-proof' AND state = 'active'"
+	var params []any
+	if target.Engine == "mysql" {
+		lookup = "SELECT COUNT(*) FROM information_schema.processlist WHERE id <> CONNECTION_ID() AND info = ?"
+		params = []any{slow}
+	}
+	waitFor := func(want int, bound time.Duration) {
+		t.Helper()
+		deadline, cancel := context.WithTimeout(t.Context(), bound)
+		defer cancel()
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var active int
+			if err := observer.QueryRowContext(deadline, lookup, params...).Scan(&active); err != nil {
+				t.Fatal("observe fixture query", err)
+			}
+			if active == want {
+				return
+			}
+			select {
+			case <-deadline.Done():
+				t.Fatalf("expected %d active fixture queries within %s; saw %d", want, bound, active)
+			case <-tick.C:
+			}
+		}
+	}
+	client, stop := context.WithCancel(t.Context())
+	defer stop()
+	done := make(chan error, 1)
+	go func() {
+		_, err := readSQL(client, target, "cancel-proof", statement{text: slow}, false)
+		done <- err
+	}()
+	waitFor(1, 5*time.Second)
+	start := time.Now()
+	stop()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("unexpected client cancellation result", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not return after cancellation")
+	}
+	// The server can stop immediately or on its native timer. Allow for
+	// polling and CI scheduling after the 15-second database limit.
+	waitFor(0, time.Until(start.Add(queryTimeout+2*time.Second)))
+	t.Logf("canceled client returned; server query gone after %s", time.Since(start).Round(time.Millisecond))
 }
 
 func TestDemoMongoNullFilters(t *testing.T) {
@@ -342,6 +449,21 @@ func TestDemoMongoNullFilters(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDemoMongoDoubleFilter(t *testing.T) {
+	target := demoCatalog(t).byName["demo-mongo"]
+	count, err := mongoPipeline("mongo_count", []string{"watts"}, arguments{Filter: json.RawMessage(`{"watts":0.1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A Decimal128 0.1 would not equal this native BSON double.
+	one := mongo.Pipeline{stage("$limit", 1), stage("$project", stage("watts", stage("$literal", 0.1)))}
+	result, err := readMongo(t.Context(), target, "double-proof", "readings", append(one, count...), 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkJSON(t, result["rows"], `[{"total":1}]`)
 }
 
 func TestDemoMongoServerDeadline(t *testing.T) {

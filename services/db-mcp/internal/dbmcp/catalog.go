@@ -113,10 +113,14 @@ func (t *Target) configure(directory string) error {
 		}
 		seen := make(map[string]bool)
 		for _, f := range fields {
-			if !identifier.MatchString(f) || seen[f] {
+			key := f
+			if t.Engine == "mysql" {
+				key = strings.ToLower(f)
+			}
+			if !identifier.MatchString(f) || seen[key] {
 				return errors.New("invalid or repeated catalog field")
 			}
-			seen[f] = true
+			seen[key] = true
 		}
 	}
 	if t.TLS == "" {

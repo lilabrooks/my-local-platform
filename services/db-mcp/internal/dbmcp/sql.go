@@ -63,6 +63,9 @@ type statement struct {
 	text   string
 	args   []any
 	object string // Resolved catalog object for the audit record.
+	// A zero-row projection on the same MySQL transaction supplies one type per predicate.
+	mysqlTypeQuery string
+	mysqlNumeric   []bool
 }
 
 const badSQL = refusal("Use a single catalog view, approved columns, comparisons, COUNT(*), grouping, ordering or LIMIT.")
@@ -71,6 +74,8 @@ type compiler struct {
 	target        *Target
 	fields        []string
 	params, bound []any
+	mysqlFields   []string
+	mysqlNumeric  []bool
 }
 
 func (c *compiler) name(raw string) (string, error) {
@@ -95,10 +100,15 @@ func (c *compiler) quote(name string) string {
 }
 func (c *compiler) field(raw string, allowed []string) (string, error) {
 	name, err := c.name(raw)
-	if err != nil || !slices.Contains(allowed, name) {
+	if err != nil {
 		return "", badSQL
 	}
-	return c.quote(name), nil
+	for _, candidate := range allowed {
+		if name == candidate || c.target.Engine == "mysql" && strings.EqualFold(name, candidate) {
+			return c.quote(candidate), nil
+		}
+	}
+	return "", badSQL
 }
 func compileSQL(t *Target, source string, params []any, cap int) (statement, error) {
 	if len(source) == 0 || len(source) > 8000 || len(params) > 100 || cap < 1 || cap > RowLimit {
@@ -172,7 +182,8 @@ func compileSQL(t *Target, source string, params []any, cap int) (statement, err
 		}
 		columns = append(columns, expr)
 	}
-	query := "SELECT " + strings.Join(columns, ", ") + " FROM " + c.quote(t.Schema) + "." + c.quote(object)
+	from := " FROM " + c.quote(t.Schema) + "." + c.quote(object)
+	query := "SELECT " + strings.Join(columns, ", ") + from
 	if q.Where != nil {
 		where, err := c.where(q.Where)
 		if err != nil {
@@ -229,7 +240,12 @@ func compileSQL(t *Target, source string, params []any, cap int) (statement, err
 		}
 		limit = min(limit, n)
 	}
-	return statement{text: query + " LIMIT " + strconv.FormatUint(limit, 10), args: c.bound, object: object}, nil
+	stmt := statement{text: query + " LIMIT " + strconv.FormatUint(limit, 10), args: c.bound, object: object}
+	if len(c.mysqlFields) > 0 {
+		stmt.mysqlTypeQuery = "SELECT " + strings.Join(c.mysqlFields, ", ") + from + " LIMIT 0"
+		stmt.mysqlNumeric = c.mysqlNumeric
+	}
+	return stmt, nil
 }
 func (c *compiler) where(expr *disjunction) (string, error) {
 	var groups []string
@@ -248,7 +264,7 @@ func (c *compiler) where(expr *disjunction) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			bind, err := c.bind(p.Value)
+			bind, err := c.bind(f, p.Value)
 			if err != nil {
 				return "", err
 			}
@@ -263,7 +279,7 @@ func (c *compiler) where(expr *disjunction) (string, error) {
 	return strings.Join(groups, " OR "), nil
 }
 
-func (c *compiler) bind(token string) (string, error) {
+func (c *compiler) bind(field, token string) (string, error) {
 	value, err := c.value(token)
 	if err != nil {
 		return "", err
@@ -271,6 +287,12 @@ func (c *compiler) bind(token string) (string, error) {
 	bind := "?"
 	if c.target.Engine == "postgres" {
 		bind = "$" + strconv.Itoa(len(c.bound)+1)
+	} else {
+		// Preserve the caller's type before exact decimals become wire strings.
+		// MySQL booleans are numeric (TRUE and FALSE are 1 and 0).
+		_, isText := value.(string)
+		c.mysqlFields = append(c.mysqlFields, field)
+		c.mysqlNumeric = append(c.mysqlNumeric, !isText)
 	}
 	if n, numeric := value.(json.Number); numeric {
 		if whole, err := n.Int64(); err == nil {
@@ -300,22 +322,10 @@ func (c *compiler) bind(token string) (string, error) {
 // Choose the exact scale and refuse values DECIMAL(65,s) would round or clip.
 func mysqlDecimalScale(number string) (int64, error) {
 	const outOfRange = refusal("The number exceeds MySQL's exact decimal range.")
-	mantissa, exp, hasExp := strings.Cut(strings.ToLower(number), "e")
-	var power int64
-	if hasExp {
-		var err error
-		power, err = strconv.ParseInt(exp, 10, 32)
-		if err != nil {
-			return 0, outOfRange
-		}
+	significant, scale, err := decimalMagnitude(number)
+	if err != nil {
+		return 0, outOfRange
 	}
-	whole, fraction, _ := strings.Cut(strings.TrimPrefix(mantissa, "-"), ".")
-	digits := strings.TrimLeft(whole+fraction, "0")
-	if digits == "" {
-		return 0, nil
-	}
-	significant := strings.TrimRight(digits, "0")
-	scale := int64(len(fraction)-(len(digits)-len(significant))) - power
 	integerDigits := max(int64(len(significant))-scale, 0)
 	scale = max(scale, 0)
 	if scale > 30 || integerDigits+scale > 65 {

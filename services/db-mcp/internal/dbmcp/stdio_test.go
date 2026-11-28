@@ -17,8 +17,8 @@ import (
 )
 
 type observed struct {
-	Operation, Outcome string
-	Bytes              int
+	Operation, Outcome, Target string
+	Bytes                      int
 }
 type stdioClient struct {
 	session *mcp.ClientSession
@@ -43,15 +43,15 @@ func connectTestClient(t *testing.T, cmd *exec.Cmd) *stdioClient {
 	t.Cleanup(func() { _ = session.Close() })
 	return &stdioClient{session: session, logs: file, calls: map[string]observed{}}
 }
-func (c *stdioClient) call(t *testing.T, tool string, args any, ok bool) document {
+func (c *stdioClient) call(t *testing.T, target, tool string, args any, ok bool) document {
 	t.Helper()
 	outcome := "ok"
 	if !ok {
 		outcome = "refused"
 	}
-	return c.callOutcome(t, tool, args, outcome)
+	return c.callOutcome(t, target, tool, args, outcome)
 }
-func (c *stdioClient) callOutcome(t *testing.T, tool string, args any, outcome string) document {
+func (c *stdioClient) callOutcome(t *testing.T, target, tool string, args any, outcome string) document {
 	t.Helper()
 	result, err := c.session.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil || result.IsError || len(result.Content) != 1 {
@@ -72,7 +72,7 @@ func (c *stdioClient) callOutcome(t *testing.T, tool string, args any, outcome s
 	if _, seen := c.calls[id]; id == "" || seen {
 		t.Fatal("missing or repeated request ID")
 	}
-	c.calls[id] = observed{tool, outcome, len(text.Text)}
+	c.calls[id] = observed{Operation: tool, Outcome: outcome, Target: target, Bytes: len(text.Text)}
 	return payload
 }
 func (c *stdioClient) checkAudit(t *testing.T) map[string]auditRecord {
@@ -100,7 +100,8 @@ func (c *stdioClient) checkAudit(t *testing.T) map[string]auditRecord {
 			}
 		}
 		call, ok := c.calls[e.ID]
-		if !ok || seen[e.ID].ID != "" || call.Operation != e.Operation || call.Outcome != e.Outcome || call.Bytes != e.Bytes || e.Caller == "" {
+		if !ok || seen[e.ID].ID != "" || call.Operation != e.Operation || call.Outcome != e.Outcome ||
+			call.Target != e.Target || call.Bytes != e.Bytes || e.Caller == "" {
 			t.Errorf("uncorrelated record: %+v", e)
 		}
 		seen[e.ID] = e
@@ -163,12 +164,12 @@ func TestEmptyCatalogOverStdio(t *testing.T) {
 	if !slices.Equal(slices.Sorted(maps.Keys(names)), want) {
 		t.Fatal(names)
 	}
-	targets := c.call(t, "list_targets", document{}, true)["targets"].([]any)
+	targets := c.call(t, "", "list_targets", document{}, true)["targets"].([]any)
 	if targets == nil || len(targets) != 0 {
 		t.Fatal(targets)
 	}
-	c.call(t, "list_databases", document{"target": "sentinel-excluded"}, false)
-	c.call(t, "run_sql", document{"target": "x"}, false)
+	c.call(t, "", "list_databases", document{"target": "sentinel-excluded"}, false)
+	c.call(t, "", "run_sql", document{"target": "x"}, false)
 	c.checkAudit(t)
 	data, _ := os.ReadFile(c.logs.Name())
 	if strings.Contains(string(data), "sentinel-excluded") {

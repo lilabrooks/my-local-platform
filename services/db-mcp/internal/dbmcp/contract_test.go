@@ -8,12 +8,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +48,7 @@ func TestCatalogBoundaries(t *testing.T) {
 		{"redirected mysql schema", `engine = "mysql"`, "engine = \"mysql\"\nschema = \"private\""},
 		{"duplicate target", "demo-mongo", "demo-mysql"},
 		{"repeated field", `"watts"]`, `"state"]`},
+		{"case-equivalent MySQL fields", `"watts"]`, `"watts", "Watts"]`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "catalog.toml")
@@ -132,6 +135,17 @@ func TestDialectIdentifiersAndValues(t *testing.T) {
 	if _, err := compileSQL(pg, `SELECT watts FROM "READINGS"`, nil, 2); err == nil {
 		t.Fatal("quoted object lost case sensitivity")
 	}
+	my := cat.byName["demo-mysql"]
+	s, err = compileSQL(my, "SELECT STATE AS Sample FROM readings WHERE WATTS > ? ORDER BY sAMPLE", []any{int64(10)}, 2)
+	if err != nil || !strings.Contains(s.text, "`state` AS `Sample`") ||
+		!strings.Contains(s.text, "ORDER BY `Sample`") || s.mysqlTypeQuery != "SELECT `watts` FROM `meter_demo`.`readings` LIMIT 0" {
+		t.Fatal(s, err)
+	}
+	for _, source := range []string{"SELECT watts FROM READINGS", "SELECT watts FROM METER_DEMO.readings"} {
+		if _, err := compileSQL(my, source, nil, 2); err == nil {
+			t.Fatalf("unexpected MySQL object or database match: %s", source)
+		}
+	}
 }
 
 func TestArgumentsHonorExactSchemaKeys(t *testing.T) {
@@ -139,8 +153,21 @@ func TestArgumentsHonorExactSchemaKeys(t *testing.T) {
 	if err := json.Unmarshal(toolContract, &defs); err != nil {
 		t.Fatal(err)
 	}
-	// Every advertised property must have an explicit decoder field, and every
-	// decoder field must be reachable through at least one tool.
+	// Include arguments consumed by dispatch (target, database and row caps)
+	// as well as those consumed by each query builder.
+	consumed := map[string][]string{
+		"whoami": {}, "list_targets": {}, "list_databases": {"target"},
+		"list_tables": {"database", "target"}, "describe_table": {"database", "table", "target"},
+		"run_sql":         {"database", "max_rows", "params", "sql", "target"},
+		"explain_query":   {"collection", "database", "params", "pipeline", "sql", "target"},
+		"mongo_find":      {"collection", "database", "filter", "limit", "projection", "sort", "target"},
+		"mongo_count":     {"collection", "database", "filter", "target"},
+		"mongo_distinct":  {"collection", "database", "field", "filter", "limit", "target"},
+		"mongo_aggregate": {"collection", "database", "limit", "pipeline", "target"},
+	}
+	if !slices.Equal(slices.Sorted(maps.Keys(consumed)), slices.Sorted(maps.Keys(defs))) {
+		t.Fatal("tool names differ from the handler contracts")
+	}
 	advertised := map[string]bool{}
 	for name, def := range defs {
 		var spec struct {
@@ -149,6 +176,9 @@ func TestArgumentsHonorExactSchemaKeys(t *testing.T) {
 		}
 		if err := json.Unmarshal(def.InputSchema, &spec); err != nil || spec.AdditionalProperties == nil || *spec.AdditionalProperties {
 			t.Fatalf("%s must advertise a closed input object: %v", name, err)
+		}
+		if keys := slices.Sorted(maps.Keys(spec.Properties)); !slices.Equal(keys, consumed[name]) {
+			t.Fatalf("%s advertises %v, handler consumes %v", name, keys, consumed[name])
 		}
 		for key := range spec.Properties {
 			advertised[key] = true
@@ -217,6 +247,21 @@ func TestOrderedMongoAndProjection(t *testing.T) {
 		}
 	}
 }
+
+func TestMongoDoublePrecision(t *testing.T) {
+	for _, input := range []string{"0.1", "0.100000", "1e-1", "1.2300e2", "-1.05e1", "-0.00", "5e-324"} {
+		got, err := mongoDouble(input)
+		want, parseErr := strconv.ParseFloat(input, 64)
+		if err != nil || parseErr != nil || math.Float64bits(got) != math.Float64bits(want) {
+			t.Errorf("%s: got %g (%v), want %g", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"640.00000000000000000001", "9007199254740993.0", "1e-325", "1e99999999999"} {
+		if _, err := mongoDouble(input); err == nil {
+			t.Errorf("accepted rounded value %s", input)
+		}
+	}
+}
 func TestWholeResponseBudget(t *testing.T) {
 	for _, test := range []struct {
 		input     []any
@@ -260,12 +305,17 @@ func TestSafeErrorCodes(t *testing.T) {
 		want string
 	}{
 		{&pgconn.PgError{Code: "22P02", Message: secret}, "invalid_query"},
-		{&pgconn.PgError{Code: "42501", Message: secret}, "unavailable"},
+		{&pgconn.PgError{Code: "42501", Message: secret}, "denied"},
+		{&pgconn.PgError{Code: "28P01", Message: secret}, "unavailable"},
 		{&mysql.MySQLError{Number: 1140, Message: secret}, "invalid_query"},
 		{&mysql.MySQLError{Number: 1045, Message: secret}, "unavailable"},
+		{&mysql.MySQLError{Number: 1044, Message: secret}, "denied"},
+		{&mysql.MySQLError{Number: 1142, Message: secret}, "denied"},
+		{&mysql.MySQLError{Number: 1143, Message: secret}, "denied"},
 		{mongo.CommandError{Code: 14, Message: secret}, "invalid_query"},
 		{mongo.CommandError{Code: 50, Message: secret}, "timeout"},
-		{mongo.CommandError{Code: 13, Message: secret}, "unavailable"},
+		{mongo.CommandError{Code: 13, Message: secret}, "denied"},
+		{mongo.CommandError{Code: 18, Message: secret}, "unavailable"},
 		{context.DeadlineExceeded, "timeout"}, {context.Canceled, "canceled"},
 		{errors.New(secret), "unavailable"},
 	} {

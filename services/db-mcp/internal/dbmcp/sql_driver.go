@@ -109,6 +109,10 @@ func readSQL(ctx context.Context, t *Target, rid string, stmt statement, explain
 		if err != nil {
 			return nil, err
 		}
+	} else if stmt.mysqlTypeQuery != "" {
+		if err = checkMySQLComparisons(ctx, tx, stmt); err != nil {
+			return nil, err
+		}
 	}
 	if explain {
 		prefix := "EXPLAIN FORMAT=JSON "
@@ -165,6 +169,40 @@ func readSQL(ctx context.Context, t *Target, rid string, stmt statement, explain
 }
 
 const nonScalar = "[non-scalar]"
+
+// Resolve only approved predicate columns, using the same reader, view and
+// transaction as the result query. No additional metadata grants are needed.
+func checkMySQLComparisons(ctx context.Context, tx *sql.Tx, stmt statement) error {
+	rows, err := tx.QueryContext(ctx, stmt.mysqlTypeQuery)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	columns, err := rows.ColumnTypes()
+	if err != nil {
+		return err
+	}
+	const incompatible = refusal("Use a value compatible with the MySQL column type.")
+	if len(columns) != len(stmt.mysqlNumeric) {
+		return incompatible
+	}
+	for i, column := range columns {
+		var numeric bool
+		switch strings.TrimPrefix(column.DatabaseTypeName(), "UNSIGNED ") {
+		case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE", "BIT", "YEAR":
+			numeric = true
+		case "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET",
+			"BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "DATE", "TIME", "DATETIME", "TIMESTAMP":
+			numeric = false
+		default:
+			return incompatible
+		}
+		if numeric != stmt.mysqlNumeric[i] {
+			return incompatible
+		}
+	}
+	return rows.Close()
+}
 
 func isoTimestamp(t time.Time, withZone bool) string {
 	layout := "2006-01-02T15:04:05"

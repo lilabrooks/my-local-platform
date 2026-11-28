@@ -21,6 +21,9 @@ func ordered(raw json.RawMessage) (bson.D, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	value, err := readMongoValue(d, 0)
+	if safe, ok := err.(refusal); ok {
+		return nil, safe
+	}
 	doc, ok := value.(bson.D)
 	if err != nil || !ok {
 		return nil, refusal("Expected an object with scalar values or operators.")
@@ -62,12 +65,28 @@ func readMongoValue(d *json.Decoder, depth int) (any, error) {
 		return doc, err
 	case json.Number:
 		if strings.ContainsAny(v.String(), ".eE") {
-			return strconv.ParseFloat(v.String(), 64)
+			return mongoDouble(v.String())
 		}
 		return v.Int64()
 	default:
 		return v, nil
 	}
+}
+
+// Compare decimal spellings after the normal BSON double conversion. Ordinary
+// values such as 0.1 keep double equality; a rounded threshold is refused.
+func mongoDouble(number string) (float64, error) {
+	const rounded = refusal("The number would change at BSON double precision.")
+	value, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		return 0, rounded
+	}
+	digits, scale, err := decimalMagnitude(number)
+	shortDigits, shortScale, shortErr := decimalMagnitude(strconv.FormatFloat(value, 'g', -1, 64))
+	if err != nil || shortErr != nil || digits != shortDigits || scale != shortScale {
+		return 0, rounded
+	}
+	return value, nil
 }
 
 func stage(name string, value any) bson.D { return bson.D{{Key: name, Value: value}} }
@@ -176,7 +195,10 @@ func aggregate(fields []string, stages []json.RawMessage) (mongo.Pipeline, error
 	result := mongo.Pipeline{stage("$project", initial)}
 	for _, raw := range stages {
 		doc, err := ordered(raw)
-		if err != nil || len(doc) != 1 {
+		if err != nil {
+			return nil, err
+		}
+		if len(doc) != 1 {
 			return nil, refusal("Each aggregation stage needs one operator.")
 		}
 		op := doc[0]

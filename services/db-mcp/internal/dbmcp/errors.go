@@ -20,6 +20,7 @@ func publicError(ctx context.Context, err error) (code, message string) {
 	const canceled = "The database operation was canceled."
 	const timeout = "The database operation timed out or was interrupted."
 	const invalid = "The database rejected the query. Check field types and grouping."
+	const permission = "The configured database reader lacks permission for this operation."
 	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
 		return "canceled", canceled
 	}
@@ -32,6 +33,8 @@ func publicError(ctx context.Context, err error) (code, message string) {
 			return "invalid_query", invalid
 		}
 		switch pg.Code {
+		case "42501":
+			return "denied", permission
 		case "42601", "42702", "42703", "42803", "42804", "42883", "42P10", "42P18":
 			return "invalid_query", invalid
 		case "57014": // Includes a server-side statement timeout.
@@ -41,6 +44,8 @@ func publicError(ctx context.Context, err error) (code, message string) {
 	var my *mysql.MySQLError
 	if errors.As(err, &my) {
 		switch my.Number {
+		case 1044, 1142, 1143:
+			return "denied", permission
 		case 1052, 1054, 1055, 1064, 1111, 1140, 1264, 1292, 1366, 1690:
 			return "invalid_query", invalid
 		case 3024:
@@ -50,8 +55,13 @@ func publicError(ctx context.Context, err error) (code, message string) {
 		}
 	}
 	var mg mongo.ServerError
-	if errors.As(err, &mg) && (mg.HasErrorCode(2) || mg.HasErrorCode(9) || mg.HasErrorCode(14)) {
-		return "invalid_query", invalid
+	if errors.As(err, &mg) {
+		if mg.HasErrorCode(13) {
+			return "denied", permission
+		}
+		if mg.HasErrorCode(2) || mg.HasErrorCode(9) || mg.HasErrorCode(14) {
+			return "invalid_query", invalid
+		}
 	}
 	return "unavailable", "The database operation could not complete."
 }
