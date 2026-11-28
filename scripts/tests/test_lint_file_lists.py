@@ -11,6 +11,11 @@ import unittest
 
 ROOT = Path(__file__).parents[2]
 LINT = ROOT / "scripts" / "lint.sh"
+GO_LINT_PIN = Path("tools/golangci-lint/compose.yaml")
+GO_LINT_IMAGE = next(
+    line.split()[1] for line in (ROOT / GO_LINT_PIN).read_text().splitlines()
+    if line.strip().startswith("image:")
+)
 
 # Each native stub reports the version lint.sh pins, so lint.sh takes the native
 # path, and otherwise logs its working directory and arguments.
@@ -22,7 +27,7 @@ NATIVE_VERSIONS = {
     "actionlint": "1.7.12",
     "hadolint": "Haskell Dockerfile Linter 2.15.1",
     "terraform": "Terraform v1.16.3",
-    "golangci-lint": "golangci-lint has version 2.13.1",
+    "golangci-lint": "golangci-lint has version " + GO_LINT_IMAGE.split(":v")[1].split("@")[0],
 }
 # Not under test here; masked so they skip rather than reach the network.
 OTHER_TOOLS = ("gitleaks", "go", "gofmt", "tflint", "trivy", "npx")
@@ -59,7 +64,7 @@ DOCKER_STUB = r"""
         rhysd/actionlint:1.7.12) name=actionlint ;;
         hadolint/hadolint:v2.15.1-alpine) name=hadolint ;;
         hashicorp/terraform:1.16.3) name=terraform ;;
-        golangci/golangci-lint:v2.13.1) name=golangci-lint ;;
+        golangci/golangci-lint:v*@sha256:*) name=golangci-lint ;;
       esac
     done
     [ -n "$name" ] || exit 0
@@ -130,6 +135,7 @@ EXPECTED = {
         "./a.yaml",
         "./k8s/b.yml",
         "./new.yaml",
+        f"./{GO_LINT_PIN}",
     ],
     "ruff": ["./ruff.toml", "./tool.py"],
     "shellcheck": ["./new.sh", "./scripts/lint.sh", "./scripts/run.sh"],
@@ -205,6 +211,9 @@ class LintFileListTest(unittest.TestCase):
         shutil.copy2(LINT, repo / "scripts" / "lint.sh")
         (repo / ".gitignore").write_text(".evidence/\n*.tfvars\n/.github/workflows/local-*\n")
         self.write_files(repo, committed)
+        if "services/x/go.mod" in committed:
+            (repo / GO_LINT_PIN).parent.mkdir(parents=True)
+            shutil.copy2(ROOT / GO_LINT_PIN, repo / GO_LINT_PIN)
         for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "init"]):
             self.git(repo, *args)
         return repo
@@ -278,6 +287,7 @@ class LintFileListTest(unittest.TestCase):
         result = self.run_lint(repo)
 
         self.assert_handed_commit_view(repo)
+        self.assertIn(GO_LINT_IMAGE, (self.log_path / "golangci-lint").read_text().splitlines())
         self.assertIn("--no-globs", (self.log_path / "markdownlint-cli2").read_text().splitlines())
         self.assertIn("--force-exclude", (self.log_path / "ruff").read_text().splitlines())
         for name in ("yamllint", "ruff", "shellcheck", "markdownlint", "actionlint", "hadolint", "terraform fmt", "golangci-lint"):

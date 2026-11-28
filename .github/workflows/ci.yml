@@ -72,16 +72,14 @@ jobs:
             exit 1
           fi
 
-      # go vet is a thin net; this adds errcheck, staticcheck, unused and
-      # ineffassign. Config lives at the repo root.
-      # action v9, not v6: v6 rejects golangci-lint v2 outright. The linter
-      # version matches the one pinned locally so CI and `make lint` agree.
+      # The linter binary needs a compatible Go export format. Keep its
+      # toolchain with it, as in the Docker fallback used by make lint.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.13.1
-          working-directory: ${{ matrix.module }}
-          args: --config=${{ github.workspace }}/.golangci.yml --timeout 5m
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          docker compose -f "$GITHUB_WORKSPACE/tools/golangci-lint/compose.yaml" \
+            run --rm --no-deps -w "/repo/$MODULE" lint
       # -count=1: k8s/validate reads manifests the test cache does not track.
       - run: go test -race -count=1 ./...
         env:

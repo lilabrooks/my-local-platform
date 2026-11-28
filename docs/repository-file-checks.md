@@ -210,7 +210,7 @@ LINT_SKIP_OK=golangci-lint
 ```
 
 Strict mode fails an unavailable checker. The declared golangci-lint exception
-exists because every Go matrix job already runs the pinned linter action.
+exists because every Go matrix job already runs the pinned linter image.
 
 The repository-owned ADR index runs inside this job after markdownlint. It
 discovers the ADR files and their `Status:` values, then compares them with the
@@ -242,7 +242,7 @@ version.
 
 On a developer machine, a checker that cannot run is reported as `SKIP`. CI
 sets `LINT_STRICT=1`, which turns an unexpected skip into a failure. CI permits
-one declared exception: `golangci-lint` runs through its own pinned action in
+one declared exception: `golangci-lint` runs in its own pinned image in
 the Go job.
 
 ### Which files the checks read
@@ -452,8 +452,11 @@ golangci-lint run --config ../../.golangci.yml --timeout 5m
 ```
 
 The repository configuration includes errcheck, staticcheck, unused, and
-ineffassign. CI runs the same linter version once per Go module through
-`golangci/golangci-lint-action`.
+ineffassign. CI runs the same linter version once per Go module in the
+publisher's image. The local Docker fallback and the CI matrix both read the
+image tag and digest from `tools/golangci-lint/compose.yaml`, which Dependabot
+tracks. The image includes the linter's Go toolchain. Both commands mount the
+repository read-only.
 
 ### Security: Trivy 0.74.0
 

@@ -148,7 +148,11 @@ MARKDOWNLINT_VERSION=0.23.2
 SHELLCHECK_VERSION=0.11.0
 ACTIONLINT_VERSION=1.7.12
 HADOLINT_VERSION=2.15.1
-GOLANGCI_VERSION=2.13.1
+# Check the pin when a Go module needs linting. A source tree without Go can
+# still run the other checks.
+GOLANGCI_IMAGE=$(awk '$1 == "image:" {print $2}' tools/golangci-lint/compose.yaml 2>/dev/null)
+GOLANGCI_VERSION=${GOLANGCI_IMAGE#*:v}
+GOLANGCI_VERSION=${GOLANGCI_VERSION%@*}
 TRIVY_VERSION=0.74.0
 GITLEAKS_VERSION=8.30.1
 
@@ -396,6 +400,8 @@ if skip_allowed "golangci-lint"; then
   skip "golangci-lint" "covered by the dedicated CI job"
 elif [ "${#GO_MODS[@]}" -eq 0 ]; then
   none_to_lint "golangci-lint" "Go modules"
+elif [[ "$GOLANGCI_IMAGE" != golangci/golangci-lint:v*@sha256:* ]]; then
+  report "golangci-lint" 1 "expected a pinned image in tools/golangci-lint/compose.yaml"
 elif has golangci-lint && \
    pinned "$GOLANGCI_VERSION" "$(golangci-lint --version 2>&1)"; then
   for mod in "${GO_MODS[@]}"; do
@@ -409,8 +415,8 @@ ${out}
   report "golangci-lint" "$go_fail" "$go_out"
 elif has_docker; then
   for mod in "${GO_MODS[@]}"; do
-    out=$(docker run --rm -v "$PWD":/repo -w "/repo/$mod" \
-          "golangci/golangci-lint:v$GOLANGCI_VERSION" \
+    out=$(docker run --rm -v "$PWD":/repo:ro -w "/repo/$mod" \
+          "$GOLANGCI_IMAGE" \
           golangci-lint run --config /repo/.golangci.yml --timeout 5m 2>&1) || {
       go_fail=1
       go_out="${go_out}${mod}:

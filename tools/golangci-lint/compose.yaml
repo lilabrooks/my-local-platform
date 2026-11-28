@@ -1,0 +1,8 @@
+name: mlp-go-lint
+services:
+  lint:
+    image: golangci/golangci-lint:v2.13.1@sha256:d371321370bf2907bd13a8f6f8baff0e0ca7438d76fdf636b281eadf7e2305e3
+    network_mode: bridge
+    volumes:
+      - ../..:/repo:ro
+    command: ["golangci-lint", "run", "--config", "/repo/.golangci.yml", "--timeout", "5m"]
