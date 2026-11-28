@@ -228,6 +228,10 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 UNCACHED_MODULES := k8s/validate
 
 .PHONY: db-mcp-build db-mcp-up db-mcp-test db-mcp-demo db-mcp-down
+.PHONY: db-mcp-pilot-test
+db-mcp-pilot-test: ## Rehearse the signed MCP pilot against its packaged, TLS-verified MySQL fixture
+	bash services/db-mcp/pilot/rehearse.sh
+
 db-mcp-build: ## Build the database MCP stdio executable in bin/
 	mkdir -p bin
 	CGO_ENABLED=0 go -C services/db-mcp build -trimpath -o ../../bin/mlp-db-mcp ./cmd/mlp-db-mcp
@@ -281,7 +285,7 @@ vet: ## go vet every module
 	  ( cd "$$m" && go vet ./... ) || exit 1; \
 	done
 
-TERRAFORM_STACKS := infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev
+TERRAFORM_STACKS := infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev infra/terraform/envs/db-mcp-pilot
 
 .PHONY: terraform-check
 terraform-check: ## Run offline checks with an installed supported Terraform version

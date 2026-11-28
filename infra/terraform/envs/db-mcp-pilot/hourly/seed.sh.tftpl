@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+# The ECS-optimized AMI can order Docker after cloud-final. Enqueue the
+# entire seed job and let cloud-init finish before waiting for the daemon.
+cat >/usr/local/sbin/mlp-db-mcp-seed <<'SEED'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+trap 'echo "db-mcp fixture failed at line $LINENO" >/dev/console' ERR
+export AWS_DEFAULT_REGION=us-east-1 AWS_PAGER=''
+command -v aws docker openssl tar sha256sum >/dev/null
+mkdir -m 700 /var/lib/db-mcp-fixture
+cd /var/lib/db-mcp-fixture
+version=$(printf '%s' '${version_b64}' | base64 -d)
+aws s3api get-object --bucket '${bucket}' --key '${key}' --version-id "$version" fixture.tar >/dev/null
+printf '%s  fixture.tar\n' '${bundle_sha256}' | sha256sum -c -
+tar -xf fixture.tar
+docker image load --input mysql.tar >/dev/null
+image=$(cat image-tag)
+[[ $image =~ ^mlp-db-mcp-fixture:[a-f0-9]{32}$ ]]
+[[ $(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image") == linux/amd64 ]]
+bash mysql-container.sh "$image" mlp-db-mcp-mysql '${ip}:3306:3306' /run/db-mcp-fixture
+aws secretsmanager put-secret-value --secret-id '${secret}' --secret-string file:///run/db-mcp-fixture/reader >/dev/null
+echo "db-mcp fixture ready: verified TLS, count and native grants; reader published" >/dev/console
+SEED
+chmod 0700 /usr/local/sbin/mlp-db-mcp-seed
+cat >/etc/systemd/system/mlp-db-mcp-seed.service <<'UNIT'
+[Unit]
+Description=Initialize private database MCP fixture
+Requires=docker.service
+After=cloud-final.service docker.service network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mlp-db-mcp-seed
+TimeoutStartSec=8min
+StandardOutput=journal+console
+StandardError=journal+console
+UNIT
+systemctl daemon-reload
+systemctl start --no-block mlp-db-mcp-seed.service
