@@ -2,7 +2,7 @@
 name: mlp-db-mcp
 services:
   postgres:
-    image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+    image: postgres:19-alpine@sha256:cac45fb483caee3668946088a1c0532db89d5285c28dbfeac889b4068296e06f
     ports: ["127.0.0.1:58432:5432"]
     environment:
       POSTGRES_DB: meter_demo
@@ -21,7 +21,7 @@ services:
       timeout: 5s
       retries: 60
   mysql:
-    image: mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00
+    image: mysql:26.10@sha256:9092489f49fb59c4ba6c1425c6a59f71f864f24bf4339a5a26b718adc7a8b343
     ports: ["127.0.0.1:58306:3306"]
     environment:
       MYSQL_DATABASE: meter_demo
@@ -42,7 +42,7 @@ services:
       timeout: 5s
       retries: 60
   mongo:
-    image: mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01
+    image: mongo:9.0@sha256:b0c835c26e5997413e985000f1013c275377cd9607761c1784d486f6dd620b7f
     ports: ["127.0.0.1:58017:27017"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: fixture_admin
