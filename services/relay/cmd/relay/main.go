@@ -432,30 +432,26 @@ func serveUntilShutdown(
 	served := make(chan error, 1)
 	go func() { served <- srv.ListenAndServe() }()
 
+	var serveErr error
 	select {
-	case err := <-served:
-		// The listener failed on its own -- a taken port, most likely. There
-		// is nothing to drain.
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("server: %w", err)
-		}
-		return nil
+	case serveErr = <-served:
+		// The listener stopped on its own. There is nothing to drain.
 	case <-ctx.Done():
+		drain()
+		time.Sleep(readinessGrace)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// A handler outlived the budget. The caller's deferred closes are
+			// about to run because the pod's grace period ends shortly after this.
+			log.Error("graceful shutdown did not finish; in-flight requests may be cut off",
+				"error", err, "budget", shutdownTimeout)
+		}
+		serveErr = <-served
 	}
-
-	drain()
-	time.Sleep(readinessGrace)
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		// A handler outlived the budget. Log it rather than swallow it: the
-		// caller's deferred closes are about to run regardless, because the
-		// pod's grace period ends shortly after this and waiting longer only
-		// trades a cut-off request for a SIGKILL.
-		log.Error("graceful shutdown did not finish; in-flight requests may be cut off",
-			"error", err, "budget", shutdownTimeout)
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("server: %w", serveErr)
 	}
-	<-served // ErrServerClosed, already sent when the listener closed
 	return nil
 }
 

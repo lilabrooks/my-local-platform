@@ -1,7 +1,7 @@
 name: mlp-go-lint
 services:
   lint:
-    image: golangci/golangci-lint:v2.13.1@sha256:d371321370bf2907bd13a8f6f8baff0e0ca7438d76fdf636b281eadf7e2305e3
+    image: golangci/golangci-lint:v2.15.0@sha256:fbfcfd12a6f8d7f1b97b3362ca80fc2a244d46863148c73cb88e7793af96c481
     network_mode: bridge
     volumes:
       - ../..:/repo:ro
