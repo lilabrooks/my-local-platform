@@ -19,19 +19,6 @@ import (
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-// listenLocal returns a server bound to a free port, and its base URL.
-func listenLocal(t *testing.T, handler http.Handler) (*http.Server, string) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: time.Second}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	return srv, "http://" + ln.Addr().String()
-}
-
 func TestDeliverHealthStaysIndependentFromReadiness(t *testing.T) {
 	consumer := &delivery.Consumer{}
 	handler := healthServer(":0", consumer).Handler
@@ -76,16 +63,41 @@ func TestServeUntilShutdownWaitsForHandlersBeforeReturning(t *testing.T) {
 		closedTooEarly bool
 	)
 	release := make(chan struct{})
+	releaseHandler := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseHandler)
 	inHandler := make(chan struct{})
-
-	srv, base := listenLocal(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(inHandler)
-		<-release
-		mu.Lock()
-		handlerDone = true
-		mu.Unlock()
-		w.WriteHeader(http.StatusAccepted)
-	}))
+	listening := make(chan net.Addr, 1)
+	srv := &http.Server{
+		Addr:              "127.0.0.1:0",
+		ReadHeaderTimeout: time.Second,
+		BaseContext: func(listener net.Listener) context.Context {
+			listening <- listener.Addr()
+			return context.Background()
+		},
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(inHandler)
+			<-release
+			mu.Lock()
+			handlerDone = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+		}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	returned := make(chan error, 1)
+	go func() {
+		returned <- serveUntilShutdown(ctx, discardLogger(), srv, 0, config.IngestServerShutdownTimeout, func() {})
+	}()
+	var base string
+	select {
+	case addr := <-listening:
+		base = "http://" + addr.String()
+	case err := <-returned:
+		t.Fatalf("server returned before listening: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not start listening")
+	}
 
 	// Stands in for closeBounded: the caller's deferred closes, which run the
 	// moment serveUntilShutdown returns.
@@ -112,15 +124,13 @@ func TestServeUntilShutdownWaitsForHandlersBeforeReturning(t *testing.T) {
 		}
 		requestDone <- nil
 	}()
-	<-inHandler
-
-	ctx, cancel := context.WithCancel(context.Background())
-	returned := make(chan error, 1)
-	go func() {
-		returned <- serveUntilShutdown(
-			ctx, discardLogger(), srv, 0, config.IngestServerShutdownTimeout, func() {},
-		)
-	}()
+	select {
+	case <-inHandler:
+	case err := <-requestDone:
+		t.Fatalf("request ended before entering the handler: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not reach the handler")
+	}
 
 	cancel() // SIGTERM
 
@@ -134,7 +144,7 @@ func TestServeUntilShutdownWaitsForHandlersBeforeReturning(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	close(release)
+	releaseHandler()
 	if err := <-requestDone; err != nil {
 		t.Fatalf("in-flight request did not complete across shutdown: %v", err)
 	}
