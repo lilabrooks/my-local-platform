@@ -314,20 +314,21 @@ func fit(doc document, cap int) ([]byte, int, error) {
 		}
 		return encoded, 0, err
 	}
-	kept := make([]json.RawMessage, 0, min(cap, len(rows)))
+	kept := []json.RawMessage{}
+	limit := min(len(rows), RowLimit, max(0, cap))
 	size := 2
-	for _, row := range rows[:min(len(rows), cap)] {
+	for _, row := range rows[:limit] {
 		encoded, err := json.Marshal(row)
 		if err != nil {
 			return nil, 0, err
 		}
-		size += len(encoded)
 		if len(kept) > 0 {
 			size++
 		}
-		if size > ByteLimit {
+		if len(encoded) > ByteLimit-size {
 			break
 		}
+		size += len(encoded)
 		kept = append(kept, encoded)
 	}
 	for {

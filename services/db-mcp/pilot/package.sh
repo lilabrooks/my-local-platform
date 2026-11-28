@@ -32,9 +32,9 @@ if [[ $mode == hourly ]]; then
   docker pull --platform linux/amd64 "$compose_image" >/dev/null
   # Classic Docker and containerd can report different IDs for the same
   # image. A tag in the archive survives import on either image store.
-  source_id=$(docker image inspect --platform linux/amd64 --format '{{.Id}}' "$compose_image")
-  stage_tag="mlp-db-mcp-fixture:$(openssl rand -hex 16)"
-  docker image tag "$source_id" "$stage_tag"
+  tag="mlp-db-mcp-fixture:$(openssl rand -hex 16)"
+  docker image tag "$compose_image" "$tag"
+  stage_tag=$tag
   printf '%s\n' "$stage_tag" >image-tag
   docker image save --platform linux/amd64 -o mysql.tar "$stage_tag"
   tar -xOf mysql.tar manifest.json | jq -e --arg tag "$stage_tag" 'length == 1 and .[0].RepoTags == [$tag]' >/dev/null
