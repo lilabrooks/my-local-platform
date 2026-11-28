@@ -97,7 +97,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        stack: [infra/terraform/bootstrap, infra/terraform/guardrails, infra/terraform/envs/dev]
+        stack: [infra/terraform/bootstrap, infra/terraform/guardrails, infra/terraform/envs/dev, infra/terraform/envs/db-mcp-pilot]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -162,6 +162,7 @@ jobs:
           cache-dependency-path: services/db-mcp/go.sum
       - run: make db-mcp-test
       - run: make db-mcp-demo
+      - run: make db-mcp-pilot-test
       - if: always()
         run: make db-mcp-down
 

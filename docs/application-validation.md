@@ -184,6 +184,14 @@ apps in that scope requires a separately reviewed ownership, cleanup, and
 verification change before execution. Preserve project tagging and budget
 coverage; changing tags or names to evade the gate does not resolve the conflict.
 
+The database MCP's identity-only stage creates the router log group
+`/aws/lambda/mlp-db-mcp-router`, which counts as M4 runtime inventory.
+Capture the signed-call audit evidence and destroy the stage by default.
+An owner may retain it until a scheduled hourly pilot with a named cleanup
+owner and expiry. Complete teardown and reconcile pilot state and inventory
+before any Relay M4 session.
+[Pilot identity-stage exit](../services/db-mcp/pilot/README.md#stage-and-check-identity)
+
 An interrupted create can leave a resource in AWS before Terraform records it.
 Stop Terraform with `SIGINT` so it can stop providers and record partial
 creates; a provider plugin that receives `SIGTERM` exits mid-request, which is

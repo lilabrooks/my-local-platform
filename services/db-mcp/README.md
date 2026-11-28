@@ -184,30 +184,19 @@ calls and three native permission denials all matched their audit records.
 
 ## Personal AWS pilot and adoption
 
-**Status.** The local stdio path has passed the rehearsal above. AWS deployment
-and multi-user authorization are planned. The local user label provides
-diagnostics on the machine that launches the server.
+**Status.** The Go client, IAM router and private MySQL executor have passed
+a local two-role rehearsal. Live AWS identity, permissions, routing and
+teardown still need a personal-account run.
 
-The first AWS question is whether two authenticated callers get different
-access to one private synthetic view. Add a signed client transport and
-a router that takes caller identity from AWS, authorizes discovery and
-queries against the same target policy, and dispatches to a private
-executor. Only that executor should obtain the database reader credential.
-Prove caller identity and denial first. Then run the pinned MySQL image on
-a short-lived private EC2 instance to check the known result, TLS, native
-grants and metadata-only audit correlation. Include image delivery, secret
-access and the private CA in the network plan. Capture a second caller's
-denial on the same target.
-The three-engine compatibility proof can run locally.
+Use `make db-mcp-pilot-test` to repeat the signed client and verified-TLS MySQL
+check on a random loopback port. The entitled role counted 32 ready readings.
+The observer discovered zero targets and received a denial on the same query
+before the executor obtained a credential. A different CA caused the entitled
+reader's connection to fail. The local `--catalog` showcase still uses the
+user label of the machine that launches the process.
 
-Before staging, record the candidate revision, image and driver pins, secret
-and CA delivery, private network access, and who owns initialization and
-cleanup. Price the selected region and check remaining room in the shared
-$5 monthly allowance. Staging and the hourly run have separate owner
-approvals. Set a spend cap, a destroy deadline and a cleanup reserve, and
-verify the pilot's resources in both state and service inventories. Relay's
-M4 runner and receipts cover its own deployment.
-[Application validation](../../docs/application-validation.md)
+The [personal pilot runbook](pilot/README.md) covers the cheap identity stage,
+the separately approved hourly MySQL session, cost assumptions and cleanup.
 
 The intended work deployment has AWS-hosted PostgreSQL, MySQL and
 self-hosted MongoDB in different environments. Place an executor within

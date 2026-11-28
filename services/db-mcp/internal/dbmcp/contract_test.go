@@ -270,6 +270,8 @@ func TestWholeResponseBudget(t *testing.T) {
 		{[]any{strings.Repeat("界", 12000)}, 50, 0},
 		{[]any{strings.Repeat("界", 4000), strings.Repeat("界", 4000), strings.Repeat("界", 4000)}, 50, 2},
 		{[]any{1, 2, 3}, 2, 2},
+		{make([]any, RowLimit+1), RowLimit + 10, RowLimit},
+		{[]any{1}, -1, 0},
 	} {
 		out, n, err := fit(document{"ok": true, "request_id": "id", "rows": test.input}, test.cap)
 		if err != nil || n != test.want || len(out) > ByteLimit || !bytes.Contains(out, []byte(`"truncated":true`)) {

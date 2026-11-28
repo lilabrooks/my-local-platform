@@ -46,6 +46,7 @@ type Target struct {
 	ReadPreference string `toml:"read_preference"`
 	AuthDatabase   string `toml:"auth_database"`
 	Objects        map[string][]string
+	passwordValue  string
 }
 
 type Catalog struct {
@@ -66,8 +67,23 @@ func LoadCatalog(path string) (*Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	catalog := &Catalog{Targets: config.Targets, byName: make(map[string]*Target)}
-	for _, t := range config.Targets {
+	return newCatalog(config.Targets, directory)
+}
+
+// NewMySQLReader uses an executor-owned credential in memory. The configured
+// target always verifies the server certificate and its hostname.
+func NewMySQLReader(name, host string, port int, caFile, password string) (*Catalog, error) {
+	if caFile == "" || password == "" {
+		return nil, errors.New("the pilot needs a private CA and reader credential")
+	}
+	return newCatalog([]*Target{{Name: name, Engine: "mysql", Environment: "test", Host: host,
+		Port: port, Database: "meter_demo", Username: "meter_reader", TLS: "verify", CAFile: caFile,
+		passwordValue: password, Objects: map[string][]string{"readings": {"sequence_no", "station", "state", "watts"}}}}, "")
+}
+
+func newCatalog(targets []*Target, directory string) (*Catalog, error) {
+	catalog := &Catalog{Targets: targets, byName: make(map[string]*Target)}
+	for _, t := range targets {
 		if t == nil || !targetName.MatchString(t.Name) || catalog.byName[t.Name] != nil {
 			return nil, errors.New("each target needs a unique lowercase name")
 		}
@@ -91,7 +107,7 @@ func (t *Target) configure(directory string) error {
 		!slices.Contains([]string{"postgres", "mysql", "mongodb"}, t.Engine) {
 		return errors.New("unknown engine or non-production environment")
 	}
-	if t.Host == "" || t.Port < 1 || t.Port > 65535 || t.Username == "" || t.PasswordFile == "" {
+	if t.Host == "" || t.Port < 1 || t.Port > 65535 || t.Username == "" || (t.PasswordFile == "" && t.passwordValue == "") {
 		return errors.New("supply host, port, username and password_file")
 	}
 	if t.Schema == "" {
@@ -148,6 +164,9 @@ func (t *Target) configure(directory string) error {
 }
 
 func (t *Target) password() (string, error) {
+	if t.passwordValue != "" {
+		return t.passwordValue, nil
+	}
 	data, err := os.ReadFile(t.PasswordFile)
 	return strings.TrimRight(string(data), "\r\n"), err
 }

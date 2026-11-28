@@ -10,14 +10,28 @@ import (
 	"syscall"
 
 	"github.com/lilabrooks/my-local-platform/db-mcp/internal/dbmcp"
+	"github.com/lilabrooks/my-local-platform/db-mcp/internal/pilot"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func run() error {
 	catalogPath := flag.String("catalog", "", "operator-owned TOML catalog")
+	awsURL := flag.String("aws-url", "", "IAM-authenticated Lambda function URL")
 	flag.Parse()
-	if *catalogPath == "" || flag.NArg() != 0 {
-		return fmt.Errorf("usage: mlp-db-mcp --catalog path/to/catalog.toml")
+	if (*catalogPath == "") == (*awsURL == "") || flag.NArg() != 0 {
+		return fmt.Errorf("choose --catalog path/to/catalog.toml or --aws-url https://<id>.lambda-url.<region>.on.aws")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if *awsURL != "" {
+		if os.Getenv("MLP_USE_REAL_AWS") != "1" {
+			return fmt.Errorf("the signed pilot requires MLP_USE_REAL_AWS=1")
+		}
+		server, err := pilot.Bridge(ctx, *awsURL)
+		if err != nil {
+			return err
+		}
+		return server.Run(ctx, &mcp.StdioTransport{})
 	}
 	catalog, err := dbmcp.LoadCatalog(*catalogPath)
 	if err != nil {
@@ -31,8 +45,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 

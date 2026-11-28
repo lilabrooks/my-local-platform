@@ -228,6 +228,22 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 UNCACHED_MODULES := k8s/validate
 
 .PHONY: db-mcp-build db-mcp-up db-mcp-test db-mcp-demo db-mcp-down
+.PHONY: db-mcp-pilot-test
+db-mcp-pilot-test: ## Rehearse the signed MCP pilot against its packaged, TLS-verified MySQL fixture
+	bash services/db-mcp/pilot/rehearse.sh
+
+.PHONY: db-mcp-pilot-init
+db-mcp-pilot-init: ## Initialize and verify the dedicated personal AWS database MCP backend
+	@set -e; \
+	  mlp_pilot_dir=infra/terraform/envs/db-mcp-pilot; \
+	  mlp_account_id="$$( $(AWS_REAL_ENV) aws sts get-caller-identity --query Account --output text )"; \
+	  [[ "$$mlp_account_id" =~ ^[0-9]{12}$$ ]] || { echo "Could not resolve the pilot account" >&2; exit 1; }; \
+	  mlp_bucket="mlp-tfstate-$$mlp_account_id"; \
+	  $(AWS_REAL_ENV) terraform -chdir="$$mlp_pilot_dir" init -input=false -reconfigure -backend-config="bucket=$$mlp_bucket"; \
+	  jq -e --arg bucket "$$mlp_bucket" '.backend.type == "s3" and .backend.config.bucket == $$bucket and .backend.config.key == "envs/db-mcp-pilot/terraform.tfstate"' \
+	    "$$mlp_pilot_dir/.terraform/terraform.tfstate" >/dev/null || { echo "Unexpected pilot state backend" >&2; exit 1; }; \
+	  [[ "$$( $(AWS_REAL_ENV) terraform -chdir="$$mlp_pilot_dir" workspace show )" == default ]] || { echo "Pilot requires the default workspace" >&2; exit 1; }
+
 db-mcp-build: ## Build the database MCP stdio executable in bin/
 	mkdir -p bin
 	CGO_ENABLED=0 go -C services/db-mcp build -trimpath -o ../../bin/mlp-db-mcp ./cmd/mlp-db-mcp
@@ -237,6 +253,7 @@ db-mcp-up: ## Start isolated synthetic PostgreSQL, MySQL and MongoDB fixtures
 
 db-mcp-test: ## Test the database MCP catalog, query boundaries and response limits
 	go -C services/db-mcp test -race -count=1 ./...
+	go -C services/db-mcp test -race -count=1 -tags=awspilot -run '^TestCloudWatchPilotAudit$$' ./internal/pilot
 
 db-mcp-demo: db-mcp-build db-mcp-up ## Read synthetic meters over MCP and verify the native grants
 	go -C services/db-mcp test -tags=integration -count=1 -v -run '^TestDemo' ./internal/dbmcp
@@ -281,7 +298,7 @@ vet: ## go vet every module
 	  ( cd "$$m" && go vet ./... ) || exit 1; \
 	done
 
-TERRAFORM_STACKS := infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev
+TERRAFORM_STACKS := infra/terraform/bootstrap infra/terraform/guardrails infra/terraform/envs/dev infra/terraform/envs/db-mcp-pilot
 
 .PHONY: terraform-check
 terraform-check: ## Run offline checks with an installed supported Terraform version
