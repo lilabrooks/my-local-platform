@@ -6,7 +6,12 @@ terraform {
       version = "~> 6.0"
     }
   }
-  backend "s3" {}
+  backend "s3" {
+    key          = "envs/db-mcp-pilot/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
 }
 
 variable "operator_arn" {
@@ -32,11 +37,18 @@ variable "fixture_bundle" {
 }
 variable "hourly" {
   description = "Separately approved private database session. Null runs only the signed identity stage."
-  type        = object({ ami_id = string, executor_zip = string })
+  type        = object({ ami_id = string, availability_zone_id = string, executor_zip = string })
   default     = null
   validation {
     condition     = var.hourly == null ? true : can(regex("^ami-[a-f0-9]{17}$", var.hourly.ami_id))
     error_message = "Pin a regional ECS-optimized AL2023 x86_64 AMI."
+  }
+  validation {
+    condition = var.hourly == null ? true : (
+      can(regex("^use1-az[1-9][0-9]*$", var.hourly.availability_zone_id)) &&
+      var.hourly.availability_zone_id != "use1-az3"
+    )
+    error_message = "Select a verified us-east-1 Availability Zone ID other than the limited-capacity use1-az3."
   }
   validation {
     condition     = var.hourly == null || var.fixture_bundle != null

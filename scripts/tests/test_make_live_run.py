@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,49 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class LiveRunMakeTargetTest(unittest.TestCase):
+    def test_db_mcp_pilot_init_selects_and_checks_its_own_state(self):
+        stack = Path("infra/terraform/envs/db-mcp-pilot")
+        key = "envs/db-mcp-pilot/terraform.tfstate"
+        self.assertRegex(
+            (ROOT / stack / "main.tf").read_text(),
+            r'backend\s+"s3"\s*\{[^}]*?\bkey\s*=\s*"envs/db-mcp-pilot/terraform\.tfstate"',
+        )
+        account = "0" * 12
+        bucket = f"mlp-tfstate-{account}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / stack / ".terraform"
+            cache.mkdir(parents=True)
+            aws = root / "aws"
+            aws.write_text(f"#!/bin/sh\necho {account}\n")
+            terraform = root / "terraform"
+            terraform.write_text(
+                "#!/bin/sh\n"
+                f'[ "$1" = "-chdir={stack}" ] || exit 2\n'
+                'shift\n'
+                f'if [ "$*" = "init -input=false -reconfigure -backend-config=bucket={bucket}" ]; then exit 0; fi\n'
+                '[ "$*" = "workspace show" ] && cat workspace\n'
+            )
+            for executable in (aws, terraform):
+                executable.chmod(0o700)
+            for state_key, workspace, success in (
+                (key, "default", True),
+                ("envs/dev/terraform.tfstate", "default", False),
+                (key, "other", False),
+            ):
+                with self.subTest(key=state_key, workspace=workspace):
+                    (root / "workspace").write_text(workspace)
+                    (cache / "terraform.tfstate").write_text(json.dumps({
+                        "backend": {"type": "s3", "config": {"key": state_key, "bucket": bucket}}
+                    }))
+                    result = subprocess.run(
+                        ["make", "-f", str(ROOT / "Makefile"), "db-mcp-pilot-init",
+                         "AWS_INIT_ARGS=-backend-config=key=envs/dev/terraform.tfstate"],
+                        cwd=root, env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}"},
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+
     def test_runtime_bootstrap_target_reaches_the_nested_go_module_without_running(self):
         result = subprocess.run(
             [

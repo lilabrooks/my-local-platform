@@ -10,6 +10,7 @@ terraform {
 variable "account" { type = string }
 variable "reader_role" { type = string }
 variable "ami_id" { type = string }
+variable "availability_zone_id" { type = string }
 variable "executor_zip" { type = string }
 variable "bucket" { type = string }
 variable "object_key" { type = string }
@@ -46,15 +47,16 @@ resource "aws_vpc" "pilot" {
   tags                 = { Name = local.name }
 }
 resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.pilot.id
-  cidr_block        = "10.73.0.64/26"
-  availability_zone = aws_subnet.database.availability_zone
-  tags              = { Name = "${local.name}-private" }
+  vpc_id               = aws_vpc.pilot.id
+  cidr_block           = "10.73.0.64/26"
+  availability_zone_id = var.availability_zone_id
+  tags                 = { Name = "${local.name}-private" }
 }
 resource "aws_subnet" "database" {
-  vpc_id     = aws_vpc.pilot.id
-  cidr_block = "10.73.0.0/27"
-  tags       = { Name = "${local.name}-mysql" }
+  availability_zone_id = var.availability_zone_id
+  vpc_id               = aws_vpc.pilot.id
+  cidr_block           = "10.73.0.0/27"
+  tags                 = { Name = "${local.name}-mysql" }
 }
 resource "aws_security_group" "role" {
   for_each    = toset(["executor", "mysql", "secret-endpoint"])

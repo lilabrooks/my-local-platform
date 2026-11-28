@@ -14,9 +14,6 @@ mock_provider "aws" {
   mock_resource "aws_cloudwatch_log_group" {
     defaults = { arn = "arn:aws:logs:us-east-1:${join("", ["0000", "0000", "0001"])}:log-group:/aws/lambda/test" }
   }
-  mock_resource "aws_subnet" {
-    defaults = { availability_zone = "us-east-1a" }
-  }
   mock_resource "aws_s3_bucket" {
     defaults = { arn = "arn:aws:s3:::fixture-test", id = "fixture-test" }
   }
@@ -64,7 +61,7 @@ run "staging_without_hourly" {
 run "hourly_wiring" {
   command = plan
   variables {
-    hourly         = { ami_id = "ami-0123456789abcdef0", executor_zip = "main.tf" }
+    hourly         = { ami_id = "ami-0123456789abcdef0", availability_zone_id = "use1-az2", executor_zip = "main.tf" }
     fixture_bundle = { path = "main.tf", sha256 = filesha256("main.tf") }
   }
   assert {
@@ -73,6 +70,22 @@ run "hourly_wiring" {
     aws_lambda_function.router.environment[0].variables.EXECUTOR_ARN == local.executor_arn)
     error_message = "The router must invoke only the selected private executor."
   }
+}
+run "refuse_limited_capacity_zone" {
+  command = plan
+  variables {
+    hourly         = { ami_id = "ami-0123456789abcdef0", availability_zone_id = "use1-az3", executor_zip = "main.tf" }
+    fixture_bundle = { path = "main.tf", sha256 = filesha256("main.tf") }
+  }
+  expect_failures = [var.hourly]
+}
+run "refuse_account_relative_zone_name" {
+  command = plan
+  variables {
+    hourly         = { ami_id = "ami-0123456789abcdef0", availability_zone_id = "us-east-1a", executor_zip = "main.tf" }
+    fixture_bundle = { path = "main.tf", sha256 = filesha256("main.tf") }
+  }
+  expect_failures = [var.hourly]
 }
 run "private_dependency_contract" {
   command = plan
@@ -88,18 +101,21 @@ run "private_dependency_contract" {
     values          = { id = "sg-1123456789abcdef0" }
   }
   variables {
-    account       = join("", ["0000", "0000", "0001"])
-    reader_role   = "AROAEXAMPLE"
-    ami_id        = "ami-0123456789abcdef0"
-    executor_zip  = "main.tf"
-    bucket        = "fixture-test"
-    object_key    = "fixture/test.tar"
-    version_id    = "immutable-test-version"
-    bundle_sha256 = filesha256("main.tf")
+    account              = join("", ["0000", "0000", "0001"])
+    reader_role          = "AROAEXAMPLE"
+    ami_id               = "ami-0123456789abcdef0"
+    availability_zone_id = "use1-az4"
+    executor_zip         = "main.tf"
+    bucket               = "fixture-test"
+    object_key           = "fixture/test.tar"
+    version_id           = "immutable-test-version"
+    bundle_sha256        = filesha256("main.tf")
   }
   assert {
     condition = (
       !aws_instance.fixture.associate_public_ip_address && aws_instance.fixture.private_ip == "10.73.0.10" &&
+      aws_subnet.database.availability_zone_id == var.availability_zone_id &&
+      aws_subnet.private.availability_zone_id == var.availability_zone_id &&
       aws_instance.fixture.root_block_device[0].encrypted && aws_instance.fixture.root_block_device[0].delete_on_termination &&
       aws_instance.fixture.metadata_options[0].http_tokens == "required" &&
       aws_vpc_endpoint.secret.private_dns_enabled && aws_vpc_endpoint.s3.vpc_endpoint_type == "Gateway" &&

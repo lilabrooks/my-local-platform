@@ -19,10 +19,11 @@ reader access to the base table and a zero-row update. An unrelated CA
 failed the same allowed query. The local HTTP test verifies SigV4 signatures
 with fixture keys and supplies the corresponding AWS event shape.
 
-`make db-mcp-test` covers role/session handling and all target-scoped tools.
-The Terraform mock plans cover identity only, package staging, hourly dispatch
-and private dependencies. Run `make terraform-check` for those and the
-existing platform stacks.
+`make db-mcp-test` covers role/session handling, target-scoped tools and the
+audit verifier with delayed, missing and unexpected log records. Terraform
+mock plans check identity only, package staging, hourly dispatch, private
+dependencies and the selected Availability Zone. Run `make terraform-check`
+for those and the existing platform stacks.
 
 ## What the two roles can do
 
@@ -80,10 +81,14 @@ and [ECS service startup ordering](https://docs.aws.amazon.com/AmazonECS/latest/
 
 1. Obtain approval for staging mutations. Check the personal AWS identity in
    `us-east-1`, current shared budget notifications, exact remaining allowance
-   and M4 state/inventory. Use the repository's existing encrypted state
-   bucket with a **separate backend key** such as
-   `envs/db-mcp-pilot/terraform.tfstate`. Keep its versioning, encryption and
-   locking settings. Capture the empty pilot inventory before creating anything.
+   and M4 state/inventory. Export `PILOT_OPERATOR_PROFILE` for the approved
+   operator profile. From the repository root initialize the pilot backend
+   with `make db-mcp-pilot-init AWS_PROFILE_NAME="$PILOT_OPERATOR_PROFILE"`.
+   It verifies the account's existing state bucket, the fixed
+   `envs/db-mcp-pilot/terraform.tfstate` key and the default workspace. The
+   backend enables encryption and locking.
+   Use this entry point before reviewing a plan or starting teardown. Capture
+   the empty pilot inventory before creating anything.
 2. In [the pilot Terraform root](../../../infra/terraform/envs/db-mcp-pilot),
    supply the operator's account-local **IAM role or user ARN** and
    `router_zip`. Record the resolved region, state key and package hash in
@@ -93,22 +98,37 @@ and [ECS service startup ordering](https://docs.aws.amazon.com/AmazonECS/latest/
    Apply only the reviewed plan under the staging approval.
 3. Use the two returned role ARNs in separate named AWS profiles with the
    approved source profile. Set a distinct, fixed `role_session_name` in
-   each so the CLI and Go SDK report the same session ARN. Set
+   each so the CLI and Go SDK report the same session ARN. Export
    `PILOT_READER_PROFILE`, `PILOT_OBSERVER_PROFILE` and `PILOT_URL` from
-   this deployment. Run the bounded check below. The live verifier requires
+   this deployment. The operator needs `logs:FilterLogEvents` on the router
+   log group and, in the hourly phase, the executor log group. The two caller
+   profiles keep their existing permissions. Run the bounded check below.
+   The live verifier requires
    actual AWS access denial on direct invocation, both signed identities,
    the reader's granted target, empty observer discovery and denial on a
    known target. In the cheap stage the entitled query reports `unavailable`.
 
 ```sh
 MLP_USE_REAL_AWS=1 PILOT_PHASE=identity go -C services/db-mcp test \
-  -tags=awspilot -count=1 -timeout=2m -v -run '^TestLivePilot$' ./internal/pilot
+  -tags=awspilot -count=1 -timeout=3m -v -run '^TestLivePilot$' ./internal/pilot
 ```
 
-If AWS returns different assumed-role context from the locally modeled
-event, stop here. An identity failure has no dependency on paid compute.
-Store request IDs and outcomes with the run. Avoid saving raw AWS events,
-signed headers, result rows and credential payloads.
+The verifier queries CloudWatch with the operator profile and the six
+returned request IDs. Allow up to 75 seconds for delivery. Each router
+record must match its caller, operation and outcome. Keep the IDs, phase
+and verdict with the run. Missing delivery, an unreadable group or a
+different assumed-role identity leaves the proof incomplete. If a check
+fails, collect available metadata by ID within the cleanup deadline.
+Avoid saving raw AWS events, signed headers, result rows or credentials.
+
+**End identity staging here by default.** After the evidence check, destroy
+from the pilot backend and reconcile the router, URL, caller/runtime roles
+and policies, log group and any staged bucket, object versions and delete
+markers with empty pilot state. Retain the stage only if the owner has
+scheduled an hourly session and recorded a cleanup owner and expiry.
+Destroy if the slot slips past that expiry. Complete cleanup before any
+Relay M4 session. Its inventory counts `/aws/lambda/mlp-db-mcp-router` even
+when no hourly infrastructure exists.
 
 ## Hourly run and cost
 
@@ -126,9 +146,30 @@ and partial endpoint hours. With up to 100 short calls and prompt teardown,
 [Lambda](https://aws.amazon.com/lambda/pricing/) and
 [S3 gateway endpoints](https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints-s3.html)
 
+Before selecting the hourly subnets, record the AZ IDs that list a
+`t3.small` offering and advertise the Secrets Manager interface endpoint.
+Use the same operator profile and region for both read-only lookups.
+
+```sh
+aws ec2 describe-instance-type-offerings --profile "$PILOT_OPERATOR_PROFILE" \
+  --region us-east-1 --location-type availability-zone-id \
+  --filters Name=instance-type,Values=t3.small --query 'InstanceTypeOfferings[].Location'
+aws ec2 describe-vpc-endpoint-services --profile "$PILOT_OPERATOR_PROFILE" \
+  --region us-east-1 --service-names com.amazonaws.us-east-1.secretsmanager \
+  --query 'ServiceDetails[0].{ids:AvailabilityZoneIds,names:AvailabilityZones}'
+```
+
+If the endpoint lookup returns zone names only, map them in the same account
+with `aws ec2 describe-availability-zones` and its `ZoneName` and `ZoneId`
+fields. Select a common ID excluding Lambda's limited-capacity `use1-az3`.
+Record the time and selected ID. A missing common zone ends the hourly
+preflight. [Lambda AZ guidance](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc-endpoints.html)
+
 Review a saved hourly plan using the same stage inputs and
-`hourly = { ami_id = ..., executor_zip = ... }`. Confirm its private subnets,
-AMI, SG references, exact artifact version, CA hash, role permissions,
+`hourly = { ami_id = ..., availability_zone_id = ..., executor_zip = ... }`.
+Both the EC2 database subnet and the Lambda/Secrets Manager endpoint subnet
+must show the chosen AZ ID in the plan. Confirm the AMI, SG references,
+exact artifact version, CA hash, role permissions,
 resource tags and cleanup coverage. Download that S3 object version as the
 operator and compare its SHA-256 to the qualified archive. Propose a **$0.25 ceiling**, a
 25-minute destroy deadline from the start of provisioning and a further
@@ -141,9 +182,11 @@ soon as each exists. Check the EC2 console for the fixture-ready or failed
 line. This job has an eight-minute startup deadline. Start proof by minute
 20 or begin cleanup. Run the same command with `PILOT_PHASE=hourly`.
 Require the signed count of 32 and direct denial on *both* functions for
-*both* roles. Match each printed request ID in the router log and the
-permitted query in the executor log. The observer's request must have no
-executor record. Stop on a confirmed missing prerequisite, wrong identity,
+*both* roles. The verifier also queries the executor group with all six IDs.
+It requires the reader's query and checks again five seconds after both
+groups show complete delivery. An executor record for the observer or a
+discovery call fails the check. Record this bounded observation before
+destroying the one-day log groups. Stop on a confirmed missing prerequisite, wrong identity,
 wrong result, unexpected grant, or a missed deadline.
 
 Interrupt an active Terraform apply with SIGINT and allow it to exit before

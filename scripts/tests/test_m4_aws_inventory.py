@@ -159,6 +159,16 @@ class InventoryTest(unittest.TestCase):
         )
         self.assertNotIn("ecr", result["runtime_resources_present"])
 
+    def test_identity_only_pilot_log_group_blocks_runtime_empty(self):
+        group = {"logGroupName": "/aws/lambda/mlp-db-mcp-router"}
+        responses = {("logs", "describe-log-groups"): {"logGroups": [group]}}
+        result = INVENTORY.collect(
+            "us-east-1", lambda arguments: responses.get(tuple(arguments[:2]), {})
+        )
+        self.assertFalse(result["runtime_empty"])
+        self.assertEqual(result["runtime_resources_present"], {"logs": 1})
+        self.assertEqual(result["resources"]["logs"], [group])
+
     def test_empty_runtime_passes_with_cheap_ecr_repositories(self):
         responses = self.responses()
         responses[("eks", "list-clusters")] = {"clusters": []}
