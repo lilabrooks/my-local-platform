@@ -43,6 +43,8 @@ __pycache__/
 # One line per module, because a gitignore pattern cannot match "the directory
 # name repeated"; add a line when a service is added.
 /services/echo/echo
+/services/db-mcp/mlp-db-mcp
+/services/db-mcp/db-mcp-fixtures
 /services/relay/relay
 /services/sink/sink
 /services/smoke/smoke

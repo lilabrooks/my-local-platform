@@ -65,6 +65,7 @@ updates:
   # arrives.
   - package-ecosystem: gomod
     directories:
+      - "/services/db-mcp"
       - "/services/smoke"
       - "/services/echo"
       - "/services/relay"

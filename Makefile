@@ -227,6 +227,23 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 # services/relay/internal/bootstrap/topics.txt file.
 UNCACHED_MODULES := k8s/validate
 
+.PHONY: db-mcp-build db-mcp-up db-mcp-test db-mcp-demo db-mcp-down
+db-mcp-build: ## Build the database MCP stdio executable in bin/
+	mkdir -p bin
+	CGO_ENABLED=0 go -C services/db-mcp build -trimpath -o ../../bin/mlp-db-mcp ./cmd/mlp-db-mcp
+
+db-mcp-up: ## Start isolated synthetic PostgreSQL, MySQL and MongoDB fixtures
+	go -C services/db-mcp run ./cmd/db-mcp-fixtures -root ../.. up
+
+db-mcp-test: ## Test the database MCP catalog, query boundaries and response limits
+	go -C services/db-mcp test -race -count=1 ./...
+
+db-mcp-demo: db-mcp-build db-mcp-up ## Read synthetic meters over MCP and verify the native grants
+	go -C services/db-mcp test -tags=integration -count=1 -v -run '^TestDemo' ./internal/dbmcp
+
+db-mcp-down: ## Remove this checkout's database MCP fixtures, volumes and generated logins
+	go -C services/db-mcp run ./cmd/db-mcp-fixtures -root ../.. down
+
 .PHONY: test
 test: ## Run Go module and infrastructure guard tests
 	@for m in $(GO_MODULES); do \

@@ -50,7 +50,7 @@ The workflow applies these controls to every job:
 
 ### CI topology
 
-A flowchart is useful here because the workflow fans out into 8 prerequisite
+A flowchart is useful here because the workflow fans out into 9 prerequisite
 job groups and then folds their results into 1 branch-protection result. GitHub
 [renders Mermaid diagrams in Markdown files](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-diagrams),
 so the diagram stays editable beside the workflow it describes.
@@ -58,9 +58,10 @@ so the diagram stays editable beside the workflow it describes.
 ```mermaid
 flowchart TD
     event[Pull request or manual dispatch]
-    event --> go[Go: 7-module matrix]
+    event --> go[Go: 8-module matrix]
     event --> terraform[Terraform: 3-stack matrix]
     event --> python[Python tests and M4 repository preflight]
+    event --> database[Database MCP: three-engine rehearsal]
     event --> smoke[Smoke: ordered runtime suite]
     event --> image[Images: 3-service matrix]
     event --> modules[Go-module coverage]
@@ -70,6 +71,7 @@ flowchart TD
     go --> required[Required checks aggregate]
     terraform --> required
     python --> required
+    database --> required
     smoke --> required
     image --> required
     modules --> required
@@ -80,8 +82,8 @@ flowchart TD
     push[Push to protected branch] -. documented GitHub setup .-> codeql[CodeQL default setup]
 ```
 
-The 3 matrices expand the 9 tracked job definitions into 19 job instances on a
-pull request: 7 Go jobs, 3 Terraform jobs, Python, smoke, 3 image jobs, module
+The 3 matrices expand the 10 tracked job definitions into 21 job instances on a
+pull request: 8 Go jobs, 3 Terraform jobs, Python, database MCP, smoke, 3 image jobs, module
 coverage, lint, dependency review, and the aggregate. A manual run has the same
 shape with dependency review skipped.
 
@@ -89,9 +91,10 @@ shape with dependency review skipped.
 
 | Job | Expansion | Timeout | Work performed |
 |---|---:|---:|---|
-| `go` | 7 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
+| `go` | 8 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
 | `terraform` | 3 stacks | 15 minutes | Format, backend-free initialization, configuration validation, and stack tests where present. |
 | `python` | 1 | 5 minutes | Python tests, the Go-backed live-run Make entry-point check, and the account-independent M4 repository preflight. |
+| `database-mcp` | 1 | 15 minutes | Exercise the catalog, stdio client, synthetic databases and native grants. |
 | `smoke` | 1 | 30 minutes | Start the local platform and run smoke, trace, replay, ordering, drain, and crash checks. |
 | `image` | 3 services | 20 minutes | Pull each pinned build base, build the service image, and verify its commit label. |
 | `go-modules-covered` | 1 | 5 minutes | Compare discovered `go.mod` files with the Go matrix. |
@@ -107,6 +110,7 @@ The Go matrix covers:
 - `services/echo`
 - `services/relay`
 - `services/sink`
+- `services/db-mcp`
 - `k8s/validate`
 - `tools/m4-bootstrap`
 - `tools/m4-live-run`
@@ -224,7 +228,7 @@ Dependency review runs only for pull requests. It uses the pinned
 ### Aggregate result
 
 The `required` job uses `if: always()` and waits for Go, Terraform, Python,
-smoke, images, Go-module coverage, lint, and dependency review. It accepts `success`
+database MCP, smoke, images, Go-module coverage, lint, and dependency review. It accepts `success`
 or `skipped` from each prerequisite and fails on every other result. The
 expected skip is dependency review during a manual dispatch.
 
@@ -984,7 +988,7 @@ updates for:
 - Compose images;
 - the `echo`, `relay`, and `sink` Dockerfiles;
 - all 3 Terraform stacks;
-- all 7 Go modules.
+- all 8 Go modules.
 
 Dependabot creates update proposals and reports no pass/fail result. Proposed
 updates still pass through the pull-request gates described in this document.
@@ -1009,7 +1013,7 @@ runtime and installation dependencies needed to execute those checks.
 | Markdown lint | `markdownlint-cli2` 0.23.2 with Node.js and its npm dependency tree; Docker image `davidanson/markdownlint-cli2:v0.23.2`; or `npx --yes markdownlint-cli2@0.23.2`. |
 | ADR index | Bash and standard shell utilities, through `scripts/check-adr-index.sh`; no package library. |
 | ShellCheck, actionlint, Hadolint, golangci-lint, Trivy, Gitleaks | Matching native binaries or the pinned container fallbacks in `scripts/lint.sh`. Actionlint's embedded-shell analysis uses ShellCheck when available. Go analysis also needs the module dependency graph. |
-| Go formatting, build, vet, tidy, and tests | Go 1.27 as declared by each `go.mod` (1.27.0 in 6 modules and 1.27 in `tools/m4-bootstrap`), module downloads, and a race-detector-capable host with cgo/C compiler support for `-race`. |
+| Go formatting, build, vet, tidy, and tests | Go 1.27 as declared by each `go.mod` (1.27.0 in 7 modules and 1.27 in `tools/m4-bootstrap`), module downloads, and a race-detector-capable host with cgo/C compiler support for `-race`. |
 | Python tests and repository preflight | Python 3.14 in CI; standard-library `unittest`, JSON, hashing, subprocess, and filesystem libraries. Git history, Make, and Go are needed by the preflight and Make-entry-point tests. CI installs no third-party Python requirements for this job. |
 | Terraform format, validate, and mocked tests | Terraform 1.16.3 in CI; provider and module downloads during backend-free initialization. Versions are detailed below. |
 | TFLint | Docker image `ghcr.io/terraform-linters/tflint:v0.64.0`, built-in recommended Terraform rules, and AWS ruleset 0.44.0 downloaded by `tflint --init`. The lint script has no native TFLint path. |
@@ -1034,7 +1038,8 @@ are:
 | Library | Recorded version | Check or runtime exercised |
 |---|---|---|
 | `sigs.k8s.io/yaml` | 1.6.0 | Kubernetes YAML decoding; depends on `go.yaml.in/yaml/v2` 2.4.2. `k8s/validate` also replaces its relay-module dependency with the local source. |
-| `github.com/jackc/pgx/v5` | 5.10.0 | Postgres round trips and relay store integration tests. |
+| `github.com/jackc/pgx/v5` | 5.11.0 (relay and smoke), 5.13.0 (database MCP) | Postgres round trips, relay store tests, and database MCP reads. |
+| `github.com/modelcontextprotocol/go-sdk`, `github.com/go-sql-driver/mysql`, `go.mongodb.org/mongo-driver/v2` | 1.8.0, 1.11.0, 2.10.1 | The database MCP's stdio transport and MySQL and MongoDB fixtures. |
 | `github.com/segmentio/kafka-go` | 0.4.51 | Kafka round trips, replay, ordering, and consumer checks. |
 | `github.com/rabbitmq/amqp091-go` | 1.14.0 | RabbitMQ round trips in the smoke program. |
 | `github.com/aws/aws-sdk-go-v2` | 1.46.0 | Emulator API checks, with config 1.33.3, credentials 1.20.3, S3 1.111.0, SES 1.41.0, SNS 1.46.0, and SQS 1.51.0 modules. |
