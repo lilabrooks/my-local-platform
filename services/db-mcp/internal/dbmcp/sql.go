@@ -20,7 +20,7 @@ var sqlLexer = lexer.MustSimple([]lexer.SimpleRule{
 	{Name: "Ident", Pattern: `[A-Za-z_][A-Za-z0-9_]*`},
 	{Name: "Quoted", Pattern: "\"(?:[^\"]|\"\")*\"|\x60(?:[^\x60]|\x60\x60)*\x60"},
 	{Name: "String", Pattern: `'(?:''|[^'])*'`},
-	{Name: "Number", Pattern: `[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?`},
+	{Name: "Number", Pattern: `-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?`},
 	{Name: "Op", Pattern: `<>|!=|<=|>=|[=<>]`},
 	{Name: "Punct", Pattern: `[?*.,();]`},
 })
@@ -60,8 +60,9 @@ type predicate struct {
 }
 
 type statement struct {
-	text string
-	args []any
+	text   string
+	args   []any
+	object string // Resolved catalog object for the audit record.
 }
 
 const badSQL = refusal("Use a single catalog view, approved columns, comparisons, COUNT(*), grouping, ordering or LIMIT.")
@@ -73,14 +74,13 @@ type compiler struct {
 }
 
 func (c *compiler) name(raw string) (string, error) {
-	if len(raw) >= 2 {
-		delim := raw[0]
-		if delim == '"' || delim == '\x60' {
-			if (delim == '"') != (c.target.Engine == "postgres") {
-				return "", badSQL
-			}
-			raw = raw[1 : len(raw)-1]
+	if len(raw) >= 2 && (raw[0] == '"' || raw[0] == '\x60') {
+		if (raw[0] == '"') != (c.target.Engine == "postgres") {
+			return "", badSQL
 		}
+		raw = raw[1 : len(raw)-1]
+	} else if c.target.Engine == "postgres" {
+		raw = strings.ToLower(raw)
 	}
 	if !identifier.MatchString(raw) {
 		return "", badSQL
@@ -101,7 +101,7 @@ func (c *compiler) field(raw string, allowed []string) (string, error) {
 	return c.quote(name), nil
 }
 func compileSQL(t *Target, source string, params []any, cap int) (statement, error) {
-	if len(source) == 0 || len(source) > 8000 || len(params) > 100 {
+	if len(source) == 0 || len(source) > 8000 || len(params) > 100 || cap < 1 || cap > RowLimit {
 		return statement{}, badSQL
 	}
 	// Bound recursion before the grammar descends through nested predicates.
@@ -221,17 +221,15 @@ func compileSQL(t *Target, source string, params []any, cap int) (statement, err
 		}
 		query += " ORDER BY " + strings.Join(order, ", ")
 	}
-	limit := cap + 1
+	limit := uint64(cap) + 1
 	if q.Limit != "" {
 		n, err := strconv.ParseUint(q.Limit, 10, 64)
 		if err != nil {
 			return statement{}, badSQL
 		}
-		if n < uint64(limit) {
-			limit = int(n)
-		}
+		limit = min(limit, n)
 	}
-	return statement{query + " LIMIT " + strconv.Itoa(limit), c.bound}, nil
+	return statement{text: query + " LIMIT " + strconv.FormatUint(limit, 10), args: c.bound, object: object}, nil
 }
 func (c *compiler) where(expr *disjunction) (string, error) {
 	var groups []string
@@ -250,14 +248,9 @@ func (c *compiler) where(expr *disjunction) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			value, err := c.value(p.Value)
+			bind, err := c.bind(p.Value)
 			if err != nil {
 				return "", err
-			}
-			c.bound = append(c.bound, value)
-			bind := "?"
-			if c.target.Engine == "postgres" {
-				bind = "$" + strconv.Itoa(len(c.bound))
 			}
 			op := p.Op
 			if op == "!=" {
@@ -269,6 +262,68 @@ func (c *compiler) where(expr *disjunction) (string, error) {
 	}
 	return strings.Join(groups, " OR "), nil
 }
+
+func (c *compiler) bind(token string) (string, error) {
+	value, err := c.value(token)
+	if err != nil {
+		return "", err
+	}
+	bind := "?"
+	if c.target.Engine == "postgres" {
+		bind = "$" + strconv.Itoa(len(c.bound)+1)
+	}
+	if n, numeric := value.(json.Number); numeric {
+		if whole, err := n.Int64(); err == nil {
+			value = whole
+			if c.target.Engine == "postgres" {
+				bind += "::bigint"
+			}
+		} else if c.target.Engine == "postgres" {
+			// Bind text on the wire and let PostgreSQL parse the exact numeric.
+			// Inferring the placeholder type from an integer column loses decimals.
+			bind += "::text::numeric"
+			value = n.String()
+		} else {
+			scale, err := mysqlDecimalScale(n.String())
+			if err != nil {
+				return "", err
+			}
+			bind = "CAST(? AS DECIMAL(65," + strconv.FormatInt(scale, 10) + "))"
+			value = n.String()
+		}
+	}
+	c.bound = append(c.bound, value)
+	return bind, nil
+}
+
+// MySQL otherwise compares a string parameter and an integer as doubles.
+// Choose the exact scale and refuse values DECIMAL(65,s) would round or clip.
+func mysqlDecimalScale(number string) (int64, error) {
+	const outOfRange = refusal("The number exceeds MySQL's exact decimal range.")
+	mantissa, exp, hasExp := strings.Cut(strings.ToLower(number), "e")
+	var power int64
+	if hasExp {
+		var err error
+		power, err = strconv.ParseInt(exp, 10, 32)
+		if err != nil {
+			return 0, outOfRange
+		}
+	}
+	whole, fraction, _ := strings.Cut(strings.TrimPrefix(mantissa, "-"), ".")
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return 0, nil
+	}
+	significant := strings.TrimRight(digits, "0")
+	scale := int64(len(fraction)-(len(digits)-len(significant))) - power
+	integerDigits := max(int64(len(significant))-scale, 0)
+	scale = max(scale, 0)
+	if scale > 30 || integerDigits+scale > 65 {
+		return 0, outOfRange
+	}
+	return scale, nil
+}
+
 func (c *compiler) value(token string) (any, error) {
 	switch {
 	case token == "?":
@@ -278,10 +333,14 @@ func (c *compiler) value(token string) (any, error) {
 		v := c.params[0]
 		c.params = c.params[1:]
 		switch n := v.(type) {
-		case nil, string, bool, int64, float64:
+		case nil:
+			return nil, refusal("SQL comparisons require a non-null parameter.")
+		case string, bool, json.Number:
 			return n, nil
-		case json.Number:
-			return n.String(), nil // Preserve decimal precision through type inference.
+		case int64:
+			return json.Number(strconv.FormatInt(n, 10)), nil
+		case float64:
+			return json.Number(strconv.FormatFloat(n, 'g', -1, 64)), nil
 		default:
 			return nil, badSQL
 		}
@@ -295,8 +354,8 @@ func (c *compiler) value(token string) (any, error) {
 			return nil, refusal("Use a bound parameter for a MySQL string containing a backslash.")
 		}
 		return value, nil
-	case token[0] >= '0' && token[0] <= '9':
-		return token, nil
+	case token[0] == '-' || (token[0] >= '0' && token[0] <= '9'):
+		return json.Number(token), nil
 	default:
 		return nil, badSQL
 	}

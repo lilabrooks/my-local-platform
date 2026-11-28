@@ -84,11 +84,35 @@ drivers open a read-only transaction on the connection that runs the query.
 MongoDB uses a native role with `find` on the view. Every tool invocation
 runs as the configured database identity for that target.
 
+Tool argument names are exact. For example, `mongo_count` with `filters`
+returns `refused` before querying the database. SQL comparisons accept
+integers and decimals either inline or as numeric parameters. PostgreSQL
+folds unquoted identifiers to lowercase and preserves the case of quoted
+names. MySQL refuses exact numeric inputs that its `DECIMAL` type would
+round or clip.
+
+SQL refuses a null comparison parameter. For MongoDB, a filter such as
+`{"state": null}` matches both null and missing fields, and
+`{"state": {"$ne": null}}` matches existing, non-null values.
+MongoDB filter values written as JSON integers use BSON int64. Fractional
+and scientific notation use BSON double precision.
+[MongoDB null comparisons](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/)
+
 Put data suitable for the client into the approved view. Selected scalar
 values can enter the model's context as returned. The application audit on
-stderr records a request ID, the local user label, operation, resolved
-target, outcome, elapsed time, bytes and row count. Client transcripts
-and the database's own logging have their own retention settings.
+stderr records a request ID, the local user label, operation, outcome, elapsed
+time and response bytes. It includes the target and object once resolved
+against the catalog. Row counts measure results delivered to the client.
+For `mongo_count`, returning a count of zero still delivers one result.
+Client transcripts and the database's own logging have their own retention
+settings.
+
+The client and audit use the same outcome code. A malformed tool request or
+catalog refusal returns `refused`. Recognized database type and grouping errors
+return `invalid_query`. Deadline errors return `timeout`, including PostgreSQL's
+server-side query cancellation signal. A client cancellation is recorded as
+`canceled`. Other database errors return `unavailable`. Driver messages can
+contain query values, so the server supplies its own messages.
 
 The server applies a 50-row limit and a 32 KiB compact UTF-8 limit to its
 logical tool response, including metadata. It removes whole rows to fit and
@@ -111,25 +135,32 @@ The demonstration exercises a standalone MongoDB server.
 
 ## Validation
 
-On 2026-11-27 and 2026-11-28, `make db-mcp-test` passed with Go 1.27.4 and
-the race detector on Apple silicon. The tests cover the catalog, allowed and refused queries,
-ordered MongoDB sorts, numeric precision, the UTF-8 response limit,
-certificate and hostname verification against a local TLS server, and
-credential retention after a failed fixture teardown.
+On 2026-11-28, `make db-mcp-test` passed with Go 1.27.4 and the race detector
+on Apple silicon. The tests cover catalog and query refusals, ordered MongoDB
+sorts, numeric precision, the UTF-8 response limit and credential retention
+after a failed fixture teardown. Each driver's TLS configuration verified a
+certificate and rejected a hostname mismatch against a local HTTPS test server.
 
 `make db-mcp-demo` exercised the compiled Go binary against PostgreSQL 18.7,
 MySQL 8.4.13 and MongoDB 8.0.38. All 11 tools ran. Each engine counted 32 ready
-readings and capped a 64-row result at 50. All 35 requests matched individual
-audit records. Separate owner queries confirmed the excluded objects existed.
+readings, counted 63 readings above 10.5 watts and capped a 64-row result at
+50. All 56 requests matched individual audit records. Separate owner queries
+confirmed the excluded objects existed.
 All three native readers were denied a base-data read and a write. MySQL
 also denied the reader access to an existing table in another database.
 The SQL drivers masked a PostgreSQL composite and MySQL geometry value
 while preserving exact decimals and dates.
+Both SQL engines rejected a zero-row update through the MCP transaction even
+with a fixture owner login. Each stopped a slow query on its 15-second server
+timer and honored client cancellation in a separate query. The PostgreSQL
+driver refused to fall back to plaintext when the fixture declined TLS.
 The MongoDB driver sent a server-side deadline for both aggregate and explain.
+An authenticated query over verified TLS to each actual deployment remains
+a pilot prerequisite.
 
-The previous Python client also ran its 32-request rehearsal against the
-Go binary. All 11 tool names, descriptions and input schemas matched those
-advertised by the previous server.
+At revision `a1d2743` a separate client passed a 32-request rehearsal against
+the Go binary. This revision tightens all 11 published input schemas to reject
+unknown arguments.
 
 ## Personal AWS pilot and adoption
 

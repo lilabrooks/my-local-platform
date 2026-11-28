@@ -27,18 +27,26 @@ type definition struct {
 	InputSchema json.RawMessage
 }
 type arguments struct {
-	Target, Database, Table, Collection, SQL, Field string
-	Params                                          []any
-	MaxRows                                         *int `json:"max_rows"`
-	Limit                                           *int
-	Filter, Projection, Sort                        json.RawMessage
-	Pipeline                                        []json.RawMessage
+	Target     string            `json:"target"`
+	Database   string            `json:"database"`
+	Table      string            `json:"table"`
+	Collection string            `json:"collection"`
+	SQL        string            `json:"sql"`
+	Field      string            `json:"field"`
+	Params     []any             `json:"params"`
+	MaxRows    *int              `json:"max_rows"`
+	Limit      *int              `json:"limit"`
+	Filter     json.RawMessage   `json:"filter"`
+	Projection json.RawMessage   `json:"projection"`
+	Sort       json.RawMessage   `json:"sort"`
+	Pipeline   []json.RawMessage `json:"pipeline"`
 }
 type auditRecord struct {
 	ID        string `json:"request_id"`
 	Operation string `json:"operation"`
 	Caller    string `json:"caller"`
 	Target    string `json:"target,omitempty"`
+	Object    string `json:"object,omitempty"`
 	Outcome   string `json:"outcome"`
 	Rows      *int   `json:"rows,omitempty"`
 	Bytes     int    `json:"bytes"`
@@ -92,9 +100,9 @@ func decodeArguments(raw json.RawMessage, shape *jsonschema.Resolved) (arguments
 	if err := json.Unmarshal(raw, &generic); err != nil || shape.Validate(generic) != nil {
 		return a, refusal("Invalid arguments for this tool.")
 	}
-	// Decode only exact schema property names. encoding/json also accepts
-	// case-insensitive struct field names, including fields for other tools.
-	props := make(map[string]json.RawMessage)
+	// Schema validation checks the exact property names. Check duplicates on
+	// the original object because json.Unmarshal would keep only the last one.
+	seen := make(map[string]bool)
 	reader := json.NewDecoder(bytes.NewReader(raw))
 	if _, err := reader.Token(); err != nil {
 		return a, refusal("Invalid arguments for this tool.")
@@ -112,20 +120,15 @@ func decodeArguments(raw json.RawMessage, shape *jsonschema.Resolved) (arguments
 		if err := reader.Decode(&value); err != nil {
 			return a, refusal("Invalid arguments for this tool.")
 		}
-		if _, known := shape.Schema().Properties[key]; known {
-			if _, repeated := props[key]; repeated {
-				return a, refusal("Duplicate tool argument.")
-			}
-			props[key] = value
+		if seen[key] {
+			return a, refusal("Duplicate tool argument.")
 		}
-	}
-	canonical, err := json.Marshal(props)
-	if err != nil {
-		return a, err
+		seen[key] = true
 	}
 	// Raw documents keep Mongo sort priority and large numeric tokens intact.
-	dec := json.NewDecoder(bytes.NewReader(canonical))
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&a); err != nil {
 		return a, refusal("Invalid arguments for this tool.")
 	}
@@ -163,16 +166,15 @@ func (app *application) call(parent context.Context, name string, shape *jsonsch
 		var count int
 		output, count, err = fit(result, cap)
 		if err == nil {
+			if name == "mongo_count" {
+				count = 1 // A scalar count is one returned result, including zero.
+			}
 			record.Rows = &count
 			record.Outcome = "ok"
 		}
 	}
 	if err != nil {
-		code, message := "unavailable", "The database operation could not complete."
-		var denied refusal
-		if errors.As(err, &denied) {
-			code, message = "refused", denied.Error()
-		}
+		code, message := publicError(ctx, err)
 		record.Outcome = code
 		output, _ = json.Marshal(document{"ok": false, "request_id": record.ID, "code": code, "message": message})
 	}
@@ -212,31 +214,34 @@ func (app *application) dispatch(ctx context.Context, name string, a arguments, 
 		if err != nil {
 			return nil, err
 		}
+		record.Object = a.Table
 		return document{"object": a.Table, "fields": fields}, nil
 	}
 	if t.Engine != "mongodb" {
 		if name != "run_sql" && name != "explain_query" {
 			return nil, refusal("Tool does not apply to this engine.")
 		}
-		if name == "explain_query" && (a.SQL == "" || a.Collection != "") {
+		if name == "explain_query" && (a.SQL == "" || a.Collection != "" || a.Pipeline != nil) {
 			return nil, refusal("Specify SQL for this target.")
 		}
 		stmt, err := compileSQL(t, a.SQL, a.Params, cap)
 		if err != nil {
 			return nil, err
 		}
+		record.Object = stmt.object
 		return readSQL(ctx, t, record.ID, stmt, name == "explain_query")
 	}
 	if name == "run_sql" {
 		return nil, refusal("Tool does not apply to this engine.")
 	}
-	if name == "explain_query" && (a.Collection == "" || a.SQL != "") {
+	if name == "explain_query" && (a.Collection == "" || a.SQL != "" || a.Params != nil) {
 		return nil, refusal("Specify a collection and pipeline for this target.")
 	}
 	fields, err := t.fields(a.Collection)
 	if err != nil {
 		return nil, err
 	}
+	record.Object = a.Collection
 	pipeline, err := mongoPipeline(name, fields, a)
 	if err != nil {
 		return nil, err

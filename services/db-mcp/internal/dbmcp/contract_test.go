@@ -2,9 +2,12 @@ package dbmcp
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math"
 	"net/http/httptest"
 	"os"
@@ -15,8 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
@@ -62,7 +68,7 @@ func TestCompileSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(query.args, []any{"ready", "river", "10"}) || strings.Contains(query.text, "ready") || !strings.HasSuffix(query.text, " LIMIT 4") {
+			if !reflect.DeepEqual(query.args, []any{"ready", "river", int64(10)}) || strings.Contains(query.text, "ready") || !strings.HasSuffix(query.text, " LIMIT 4") {
 				t.Fatal(query)
 			}
 			want := `("state" = $1 OR "station" = $2) AND "watts" >= $3`
@@ -90,6 +96,15 @@ func TestCompileSQL(t *testing.T) {
 			if q, err := compileSQL(target, "SELECT * FROM readings LIMIT 0", nil, 3); err != nil || !strings.HasSuffix(q.text, " LIMIT 0") {
 				t.Fatal(q, err)
 			}
+			if q, err := compileSQL(target, "SELECT * FROM readings LIMIT 18446744073709551615", nil, 3); err != nil || !strings.HasSuffix(q.text, " LIMIT 4") {
+				t.Fatal("full-width limit was not capped", q, err)
+			}
+			if _, err := compileSQL(target, "SELECT * FROM readings LIMIT 18446744073709551616", nil, 3); err == nil {
+				t.Fatal("accepted overflowing limit")
+			}
+			if _, err := compileSQL(target, "SELECT state FROM readings WHERE state=?", []any{nil}, 1); err == nil {
+				t.Fatal("accepted NULL comparison")
+			}
 		})
 	}
 }
@@ -110,12 +125,41 @@ func TestDialectIdentifiersAndValues(t *testing.T) {
 	if _, err := compileSQL(cat.byName["demo-mysql"], "SELECT \x60watts\x60 FROM \x60readings\x60", nil, 2); err != nil {
 		t.Fatal(err)
 	}
+	pg := cat.byName["demo-postgres"]
+	if s, err := compileSQL(pg, "SELECT WATTS AS W FROM PUBLIC.READINGS ORDER BY W", nil, 2); err != nil || s.object != "readings" || !strings.Contains(s.text, `"watts" AS "w"`) {
+		t.Fatal(s, err)
+	}
+	if _, err := compileSQL(pg, `SELECT watts FROM "READINGS"`, nil, 2); err == nil {
+		t.Fatal("quoted object lost case sensitivity")
+	}
 }
 
 func TestArgumentsHonorExactSchemaKeys(t *testing.T) {
 	var defs map[string]definition
 	if err := json.Unmarshal(toolContract, &defs); err != nil {
 		t.Fatal(err)
+	}
+	// Every advertised property must have an explicit decoder field, and every
+	// decoder field must be reachable through at least one tool.
+	advertised := map[string]bool{}
+	for name, def := range defs {
+		var spec struct {
+			Properties           map[string]json.RawMessage
+			AdditionalProperties *bool
+		}
+		if err := json.Unmarshal(def.InputSchema, &spec); err != nil || spec.AdditionalProperties == nil || *spec.AdditionalProperties {
+			t.Fatalf("%s must advertise a closed input object: %v", name, err)
+		}
+		for key := range spec.Properties {
+			advertised[key] = true
+		}
+	}
+	decoded := map[string]bool{}
+	for _, field := range reflect.VisibleFields(reflect.TypeFor[arguments]()) {
+		decoded[field.Tag.Get("json")] = true
+	}
+	if !reflect.DeepEqual(advertised, decoded) {
+		t.Fatalf("schema keys %v, decoder fields %v", advertised, decoded)
 	}
 	var schema jsonschema.Schema
 	if err := json.Unmarshal(defs["list_databases"].InputSchema, &schema); err != nil {
@@ -125,12 +169,15 @@ func TestArgumentsHonorExactSchemaKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeArguments(json.RawMessage(`{"target":"demo-mysql","Target":"other"}`), shape)
+	got, err := decodeArguments(json.RawMessage(`{"target":"demo-mysql"}`), shape)
 	if err != nil || got.Target != "demo-mysql" {
 		t.Fatal(got, err)
 	}
 	if _, err := decodeArguments(json.RawMessage(`{"target":"demo-mysql","target":"other"}`), shape); err == nil {
 		t.Fatal("accepted duplicate target")
+	}
+	if _, err := decodeArguments(json.RawMessage(`{"target":"demo-mysql","Target":"other"}`), shape); err == nil {
+		t.Fatal("accepted a case-mismatched argument")
 	}
 }
 
@@ -186,6 +233,46 @@ func TestWholeResponseBudget(t *testing.T) {
 	}
 	if _, _, err := fit(document{"targets": strings.Repeat("a", ByteLimit)}, 50); err == nil {
 		t.Fatal("oversized metadata accepted")
+	}
+}
+
+func TestMySQLDecimalScale(t *testing.T) {
+	for _, tt := range []struct {
+		number string
+		scale  int64 // -1 means the comparison would lose precision.
+	}{
+		{"10.500", 1}, {"1.05e1", 1}, {"-1e-30", 30}, {"100e-32", 30},
+		{"1e64", 0}, {"1e65", -1}, {"1e-31", -1}, {"1e2147483648", -1},
+		{strings.Repeat("9", 35) + "." + strings.Repeat("1", 30), 30},
+		{strings.Repeat("9", 36) + "." + strings.Repeat("1", 30), -1},
+	} {
+		got, err := mysqlDecimalScale(tt.number)
+		if (err != nil) != (tt.scale == -1) || err == nil && got != tt.scale {
+			t.Errorf("%s: scale=%d, err=%v", tt.number, got, err)
+		}
+	}
+}
+
+func TestSafeErrorCodes(t *testing.T) {
+	const secret = "sentinel-private-value"
+	for _, tt := range []struct {
+		err  error
+		want string
+	}{
+		{&pgconn.PgError{Code: "22P02", Message: secret}, "invalid_query"},
+		{&pgconn.PgError{Code: "42501", Message: secret}, "unavailable"},
+		{&mysql.MySQLError{Number: 1140, Message: secret}, "invalid_query"},
+		{&mysql.MySQLError{Number: 1045, Message: secret}, "unavailable"},
+		{mongo.CommandError{Code: 14, Message: secret}, "invalid_query"},
+		{mongo.CommandError{Code: 50, Message: secret}, "timeout"},
+		{mongo.CommandError{Code: 13, Message: secret}, "unavailable"},
+		{context.DeadlineExceeded, "timeout"}, {context.Canceled, "canceled"},
+		{errors.New(secret), "unavailable"},
+	} {
+		code, message := publicError(t.Context(), fmt.Errorf("driver %s: %w", secret, tt.err))
+		if code != tt.want || strings.Contains(message, secret) {
+			t.Errorf("expected safe %s, got %s %q", tt.want, code, message)
+		}
 	}
 }
 func TestPlanContainsOnlyOperators(t *testing.T) {

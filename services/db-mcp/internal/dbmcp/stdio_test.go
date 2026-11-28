@@ -45,6 +45,14 @@ func connectTestClient(t *testing.T, cmd *exec.Cmd) *stdioClient {
 }
 func (c *stdioClient) call(t *testing.T, tool string, args any, ok bool) document {
 	t.Helper()
+	outcome := "ok"
+	if !ok {
+		outcome = "refused"
+	}
+	return c.callOutcome(t, tool, args, outcome)
+}
+func (c *stdioClient) callOutcome(t *testing.T, tool string, args any, outcome string) document {
+	t.Helper()
 	result, err := c.session.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil || result.IsError || len(result.Content) != 1 {
 		t.Fatalf("%s: bad protocol result: %v", tool, err)
@@ -57,24 +65,17 @@ func (c *stdioClient) call(t *testing.T, tool string, args any, ok bool) documen
 	if err := json.Unmarshal([]byte(text.Text), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["ok"] != ok {
+	if payload["ok"] != (outcome == "ok") || (outcome != "ok" && payload["code"] != outcome) {
 		t.Fatalf("%s: unexpected reply %v", tool, payload)
 	}
 	id, _ := payload["request_id"].(string)
 	if _, seen := c.calls[id]; id == "" || seen {
 		t.Fatal("missing or repeated request ID")
 	}
-	outcome := "ok"
-	if !ok {
-		outcome, _ = payload["code"].(string)
-		if outcome != "refused" {
-			t.Fatalf("expected refusal, got %s", outcome)
-		}
-	}
 	c.calls[id] = observed{tool, outcome, len(text.Text)}
 	return payload
 }
-func (c *stdioClient) checkAudit(t *testing.T) {
+func (c *stdioClient) checkAudit(t *testing.T) map[string]auditRecord {
 	t.Helper()
 	if err := c.session.Close(); err != nil {
 		t.Fatal(err)
@@ -83,7 +84,7 @@ func (c *stdioClient) checkAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := bufio.NewScanner(c.logs)
-	seen := map[string]bool{}
+	seen := map[string]auditRecord{}
 	for lines.Scan() {
 		var e auditRecord
 		var fields map[string]any
@@ -94,15 +95,15 @@ func (c *stdioClient) checkAudit(t *testing.T) {
 			t.Fatal(err)
 		}
 		for key := range fields {
-			if !slices.Contains([]string{"request_id", "operation", "caller", "outcome", "target", "rows", "bytes", "elapsed_ms"}, key) {
+			if !slices.Contains([]string{"request_id", "operation", "caller", "outcome", "target", "object", "rows", "bytes", "elapsed_ms"}, key) {
 				t.Errorf("unexpected audit field %s", key)
 			}
 		}
 		call, ok := c.calls[e.ID]
-		if !ok || seen[e.ID] || call.Operation != e.Operation || call.Outcome != e.Outcome || call.Bytes != e.Bytes || e.Caller == "" {
+		if !ok || seen[e.ID].ID != "" || call.Operation != e.Operation || call.Outcome != e.Outcome || call.Bytes != e.Bytes || e.Caller == "" {
 			t.Errorf("uncorrelated record: %+v", e)
 		}
-		seen[e.ID] = true
+		seen[e.ID] = e
 	}
 	if err := lines.Err(); err != nil {
 		t.Fatal(err)
@@ -111,6 +112,7 @@ func (c *stdioClient) checkAudit(t *testing.T) {
 		t.Fatalf("%d audit records for %d calls", len(seen), len(c.calls))
 	}
 	t.Logf("%d MCP requests matched individual metadata-only audit records", len(seen))
+	return seen
 }
 
 // Start a real SDK stdio process during ordinary go test, including an empty catalog.

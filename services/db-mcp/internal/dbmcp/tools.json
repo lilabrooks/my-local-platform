@@ -3,6 +3,7 @@
     "description": "Return the fields the catalog exposes for this object.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -16,6 +17,7 @@
     "description": "Return plan operators for an approved SQL query or MongoDB aggregation, without execution statistics.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -32,6 +34,7 @@
     "description": "List databases exposed on this target.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"}
       },
@@ -43,6 +46,7 @@
     "description": "List the approved SQL views or MongoDB collections and views.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"}
@@ -55,6 +59,7 @@
     "description": "List catalog targets with their engine and non-production environment.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
       },
       "title": "list_targetsArguments"
@@ -64,6 +69,7 @@
     "description": "Aggregate with $match, $sort, $limit and $group count accumulators.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -79,6 +85,7 @@
     "description": "Count matching documents in an approved collection or view.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -93,6 +100,7 @@
     "description": "Return a bounded set of distinct values of an approved field.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -109,6 +117,7 @@
     "description": "Read approved fields with scalar comparisons, inclusion projection and sort.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -126,6 +135,7 @@
     "description": "Read an approved view using SELECT, ? parameters, comparisons, COUNT(*), GROUP BY, ORDER BY and LIMIT.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "target": {"title": "Target", "type": "string"},
         "database": {"title": "Database", "type": "string"},
@@ -141,6 +151,7 @@
     "description": "Return the local process user and transport.",
     "inputSchema": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
       },
       "title": "whoamiArguments"
