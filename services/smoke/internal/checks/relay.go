@@ -262,7 +262,7 @@ type tempoTrace struct {
 // row and its span do.
 type attemptKey struct {
 	SubscriptionID int64
-	AttemptNumber  int
+	AttemptNumber  int64
 }
 
 // relayTraceSpans is what one Tempo response says about this event.
@@ -292,7 +292,7 @@ func (s relayTraceSpans) String() string {
 func awaitRelayTrace(ctx context.Context, tempoURL, traceID, eventID string, wantAttempts []deliveryAttempt) error {
 	want := make(map[attemptKey]int, len(wantAttempts))
 	for _, attempt := range wantAttempts {
-		want[attemptKey{attempt.SubscriptionID, attempt.AttemptNumber}]++
+		want[attemptKey{attempt.SubscriptionID, int64(attempt.AttemptNumber)}]++
 	}
 	if len(want) == 0 {
 		return fmt.Errorf("event %s persisted no delivery attempts, so there is nothing to match spans against", eventID)
@@ -383,7 +383,7 @@ func fetchRelayTrace(ctx context.Context, tempoURL, traceID, eventID string) (re
 				if !okSub || !okAttempt {
 					continue
 				}
-				out.attempts[attemptKey{subscription, int(attempt)}]++
+				out.attempts[attemptKey{subscription, attempt}]++
 			}
 		}
 	}

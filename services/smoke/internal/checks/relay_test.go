@@ -145,6 +145,25 @@ func TestFetchRelayTraceSelectsNamedSpansForTheEvent(t *testing.T) {
 	}
 }
 
+func TestFetchRelayTracePreserves64BitAttemptNumber(t *testing.T) {
+	t.Parallel()
+
+	const trace = `{"batches":[{"scopeSpans":[{"spans":[
+		{"name":"relay.webhook.attempt","attributes":[
+			{"key":"relay.event.id","value":{"stringValue":"evt_test"}},
+			{"key":"relay.subscription.id","value":{"intValue":"7"}},
+			{"key":"relay.delivery.attempt","value":{"intValue":"2147483648"}}]}
+	]}]}]}`
+	got, err := fetchRelayTrace(context.Background(), tempoServer(t, trace), "0102", "evt_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := attemptKey{SubscriptionID: 7, AttemptNumber: 1 << 31}
+	if got.attempts[want] != 1 {
+		t.Errorf("attempt spans = %v, want one for %+v", got.attempts, want)
+	}
+}
+
 // One span per persisted attempt is the assertion; the previous version of this
 // check passed on any single relay.webhook.attempt span, which is exactly the
 // collapse it was meant to catch.
