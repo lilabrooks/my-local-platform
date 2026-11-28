@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/lilabrooks/my-local-platform/db-mcp/internal/dbmcp"
@@ -42,15 +41,14 @@ type Router struct {
 	tools                     *dbmcp.Tools
 	account, reader, observer string
 	invoke                    Invoke
-	audit                     io.Writer
-	mu                        sync.Mutex
+	audit                     *dbmcp.AuditSink
 }
 
 func NewRouter(tools *dbmcp.Tools, account, reader, observer string, invoke Invoke, audit io.Writer) (*Router, error) {
 	if !accountPattern.MatchString(account) || !rolePattern.MatchString(reader) || !rolePattern.MatchString(observer) || reader == observer {
 		return nil, errors.New("configure the pilot account and two distinct IAM role IDs")
 	}
-	return &Router{tools: tools, account: account, reader: reader, observer: observer, invoke: invoke, audit: audit}, nil
+	return &Router{tools: tools, account: account, reader: reader, observer: observer, invoke: invoke, audit: dbmcp.NewAuditSink(audit)}, nil
 }
 
 func roleSession(account, arn string) string {
@@ -78,12 +76,13 @@ func (r *Router) identity(e events.LambdaFunctionURLRequest) (caller, role strin
 }
 
 type auditEvent struct {
-	RequestID string `json:"request_id"`
-	Caller    string `json:"caller,omitempty"`
-	RoleID    string `json:"role_id,omitempty"`
-	Operation string `json:"operation"`
-	Target    string `json:"target,omitempty"`
-	Outcome   string `json:"outcome"`
+	RequestID  string `json:"request_id"`
+	Caller     string `json:"caller,omitempty"`
+	RoleID     string `json:"role_id,omitempty"`
+	Operation  string `json:"operation"`
+	Target     string `json:"target,omitempty"`
+	Outcome    string `json:"outcome"`
+	AuditState string `json:"audit_state,omitempty"`
 }
 
 func failure(id, code, message string) json.RawMessage {
@@ -104,13 +103,16 @@ func (r *Router) Handle(ctx context.Context, e events.LambdaFunctionURLRequest) 
 	}
 	id := hex.EncodeToString(random[:])
 	caller, role := r.identity(e)
+	slot := r.audit.Reserve()
 	record := auditEvent{RequestID: id, Caller: caller, RoleID: role, Operation: "unknown", Outcome: "denied"}
 	code := http.StatusForbidden
 	body := failure(id, "denied", "Access denied.")
 	if caller != "" {
 		code = http.StatusOK
 		name, ok := strings.CutPrefix(e.RawPath, toolPath)
-		if e.Version != "2.0" || e.RequestContext.HTTP.Method != "POST" || !ok || !r.tools.Known(name) || e.IsBase64Encoded || e.RawQueryString != "" || len(e.Body) > 64*1024 {
+		if slot == nil {
+			body = dbmcp.AuditUnavailable(id)
+		} else if e.Version != "2.0" || e.RequestContext.HTTP.Method != "POST" || !ok || !r.tools.Known(name) || e.IsBase64Encoded || e.RawQueryString != "" || len(e.Body) > 64*1024 {
 			record.Outcome = "refused"
 			body = failure(id, "refused", "Invalid tool request.")
 		} else {
@@ -118,11 +120,16 @@ func (r *Router) Handle(ctx context.Context, e events.LambdaFunctionURLRequest) 
 			body, record.Outcome = r.route(ctx, &record, json.RawMessage(e.Body))
 		}
 	}
-	r.mu.Lock()
-	err := json.NewEncoder(r.audit).Encode(record)
-	r.mu.Unlock()
-	if err != nil {
-		return events.LambdaFunctionURLResponse{}, errors.New("could not record database access")
+	if slot != nil {
+		terminal := record
+		terminal.AuditState = "response_denied"
+		if caller != "" {
+			terminal.Outcome = "unavailable"
+			terminal.AuditState = "response_withheld"
+		}
+		if !slot.Record(record, terminal) && caller != "" {
+			body = dbmcp.AuditUnavailable(id)
+		}
 	}
 	return events.LambdaFunctionURLResponse{StatusCode: code, Headers: map[string]string{"content-type": "application/json", "cache-control": "no-store"}, Body: string(body)}, nil
 }

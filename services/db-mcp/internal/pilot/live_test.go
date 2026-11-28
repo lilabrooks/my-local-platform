@@ -61,11 +61,11 @@ func TestLivePilot(t *testing.T) {
 				t.Fatal("could not start the signed MCP bridge")
 			}
 			t.Cleanup(func() { _ = session.Close() })
-			identity := toolCall(t, session, "whoami", "{}")
+			identity := toolCall(t, session, "whoami", "{}", "ok")
 			if identity["user"] != arn || identity["transport"] != "aws-iam" {
 				t.Fatal("router identity differs from STS")
 			}
-			discovery := toolCall(t, session, "list_targets", "{}")
+			discovery := toolCall(t, session, "list_targets", "{}", "ok")
 			targets, ok := discovery["targets"].([]any)
 			if !ok || role == "reader" && len(targets) != 1 || role == "observer" && len(targets) != 0 {
 				t.Fatal("incorrect discovery entitlement")
@@ -76,22 +76,20 @@ func TestLivePilot(t *testing.T) {
 					t.Fatal("reader discovered the wrong target")
 				}
 			}
-			read := toolCall(t, session, "run_sql", countArgs)
-			rows, _ := json.Marshal(read["rows"])
 			readOutcome := "ok"
 			switch {
 			case role == "observer":
 				readOutcome = "denied"
-				if read["code"] != "denied" {
-					t.Fatal("known target was not denied to the observer")
-				}
 			case phase == "identity":
 				readOutcome = "unavailable"
-				if read["code"] != "unavailable" {
-					t.Fatal("identity-only stage unexpectedly reached an executor")
-				}
-			default:
-				if read["ok"] != true || string(rows) != "[[32]]" {
+			}
+			read := toolCall(t, session, "run_sql", countArgs, readOutcome)
+			if role == "reader" && phase == "identity" && read["message"] != "The private database executor is unavailable." {
+				t.Fatal("identity-stage reader did not report its unconfigured executor")
+			}
+			if readOutcome == "ok" {
+				rows, _ := json.Marshal(read["rows"])
+				if string(rows) != "[[32]]" {
 					t.Fatal("private reader failed the known count")
 				}
 			}

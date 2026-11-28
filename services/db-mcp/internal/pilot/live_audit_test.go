@@ -29,6 +29,9 @@ func matchAuditMessages(data []byte, expected map[string]auditEvent) (int, error
 		if !ok || got.Caller != want.Caller || got.Operation != want.Operation || got.Outcome != want.Outcome {
 			return 0, errors.New("unexpected request, caller, operation or outcome in CloudWatch")
 		}
+		if got.AuditState != "" {
+			return 0, errors.New("the pilot response was withheld by its audit destination")
+		}
 		seen[got.RequestID] = true
 	}
 	return len(seen), nil
@@ -179,6 +182,18 @@ func TestCloudWatchPilotAudit(t *testing.T) {
 		}
 		if err := waitForPilotAudit(ctx, calls, true, read, time.Second); !errors.Is(err, context.Canceled) {
 			t.Fatalf("missing delivery returned %v", err)
+		}
+	})
+	t.Run("audit recovery cannot satisfy identity-stage unavailability", func(t *testing.T) {
+		reader := calls[2]
+		reader.Outcome = "unavailable"
+		correction := reader
+		correction.AuditState = "response_withheld"
+		expected := map[string]auditEvent{reader.RequestID: reader}
+		for _, messages := range [][]auditEvent{{correction}, {reader, correction}} {
+			if _, err := matchAuditMessages(encode(messages), expected); err == nil {
+				t.Fatal("accepted a withheld response as the identity-stage reader result")
+			}
 		}
 	})
 	t.Run("observer appears after reader delivery", func(t *testing.T) {

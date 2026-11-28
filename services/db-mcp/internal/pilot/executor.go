@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 
 	"github.com/lilabrooks/my-local-platform/db-mcp/internal/dbmcp"
 )
@@ -14,7 +13,7 @@ type Executor struct {
 	Account, ReaderRole, Host, CAFile string
 	Port                              int
 	Password                          func(context.Context) (string, error)
-	Audit                             io.Writer
+	Audit                             *dbmcp.AuditSink
 }
 
 func (e *Executor) Handle(ctx context.Context, call Invocation) (json.RawMessage, error) {
@@ -26,6 +25,11 @@ func (e *Executor) Handle(ctx context.Context, call Invocation) (json.RawMessage
 	if err != nil || target != TargetName {
 		return nil, errors.New("invalid executor target or tool")
 	}
+	slot := e.Audit.Reserve()
+	if slot == nil {
+		return dbmcp.AuditUnavailable(call.RequestID), nil
+	}
+	defer slot.Release()
 	password, err := e.Password(ctx)
 	if err != nil {
 		return nil, errors.New("reader credential unavailable")
@@ -34,5 +38,5 @@ func (e *Executor) Handle(ctx context.Context, call Invocation) (json.RawMessage
 	if err != nil {
 		return nil, errors.New("invalid reader configuration")
 	}
-	return e.Tools.Execute(ctx, catalog, e.Audit, call.Caller, call.RequestID, call.Tool, call.Arguments)
+	return e.Tools.Execute(ctx, catalog, slot, call.Caller, call.RequestID, call.Tool, call.Arguments)
 }
