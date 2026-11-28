@@ -19,6 +19,15 @@ reader access to the base table and a zero-row update. An unrelated CA
 failed the same allowed query. The local HTTP test verifies SigV4 signatures
 with fixture keys and supplies the corresponding AWS event shape.
 
+Both the router and the executor reserve audit capacity before sending work
+downstream. An entitled caller receives `unavailable` if either component
+cannot record its outcome. An executor `ok` record can precede a router
+failure that withholds the rows from the caller. Correlate both components
+by request ID. The pilot verifier requires a healthy audit record for each
+expected outcome. An unverified identity still receives HTTP 403. If the
+router recovers from a failed audit of that denial, it records
+`audit_state: "response_denied"`. [Audit failures and recovery](../README.md#when-the-audit-destination-stops-reading)
+
 `make db-mcp-test` covers role/session handling, target-scoped tools and the
 audit verifier with delayed, missing and unexpected log records. Terraform
 mock plans check identity only, package staging, hourly dispatch, private

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	runtime "github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,6 +18,7 @@ import (
 )
 
 func main() {
+	signal.Ignore(syscall.SIGPIPE)
 	tools, err := dbmcp.LoadTools()
 	if err != nil {
 		log.Fatal("invalid database tool contract")

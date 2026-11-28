@@ -192,15 +192,22 @@ func signedHarness(t *testing.T, router *Router) func(string) *mcp.ClientSession
 	}
 }
 
-func toolCall(t *testing.T, client *mcp.ClientSession, name, args string) map[string]any {
+func toolCall(t *testing.T, client *mcp.ClientSession, name, args, outcome string) map[string]any {
 	t.Helper()
 	result, err := client.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: json.RawMessage(args)})
-	if err != nil || result.IsError || len(result.Content) != 1 {
-		t.Fatalf("%s: %v %v", name, result, err)
+	if err != nil || len(result.Content) != 1 {
+		t.Fatalf("%s: bad protocol result: %v", name, err)
+	}
+	content, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("%s: expected text content", name)
 	}
 	var body map[string]any
-	if err := json.Unmarshal([]byte(result.Content[0].(*mcp.TextContent).Text), &body); err != nil {
+	if err := json.Unmarshal([]byte(content.Text), &body); err != nil {
 		t.Fatal(err)
+	}
+	if result.IsError != (outcome != "ok") || body["ok"] != (outcome == "ok") || outcome != "ok" && body["code"] != outcome {
+		t.Fatalf("%s: isError=%t, ok=%v, code=%v, want %s", name, result.IsError, body["ok"], body["code"], outcome)
 	}
 	if id, _ := body["request_id"].(string); !requestIDPattern.MatchString(id) {
 		t.Fatal("missing request ID")
@@ -217,11 +224,11 @@ func TestSignedDiscovery(t *testing.T) {
 	client := signedHarness(t, r)
 	for _, role := range []string{testReader, testObserver} {
 		session := client(role)
-		me := toolCall(t, session, "whoami", "{}")
+		me := toolCall(t, session, "whoami", "{}", "ok")
 		if me["transport"] != "aws-iam" || !strings.Contains(me["user"].(string), "/"+role+"/") {
 			t.Fatal(me)
 		}
-		targets := toolCall(t, session, "list_targets", "{}")["targets"].([]any)
+		targets := toolCall(t, session, "list_targets", "{}", "ok")["targets"].([]any)
 		if role == testReader && len(targets) != 1 || role == testObserver && len(targets) != 0 {
 			t.Fatal(targets)
 		}

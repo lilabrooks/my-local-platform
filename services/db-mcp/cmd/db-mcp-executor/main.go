@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -14,6 +16,7 @@ import (
 )
 
 func main() {
+	signal.Ignore(syscall.SIGPIPE)
 	tools, err := dbmcp.LoadTools()
 	if err != nil {
 		log.Fatal("invalid database tool contract")
@@ -25,7 +28,7 @@ func main() {
 	api := secretsmanager.NewFromConfig(cfg)
 	secret := os.Getenv("READER_SECRET_ARN")
 	e := pilot.Executor{Tools: tools, Account: os.Getenv("PILOT_ACCOUNT"), ReaderRole: os.Getenv("READER_ROLE_ID"),
-		Host: os.Getenv("MYSQL_HOST"), Port: 3306, CAFile: "/var/task/mysql-ca.pem", Audit: os.Stdout,
+		Host: os.Getenv("MYSQL_HOST"), Port: 3306, CAFile: "/var/task/mysql-ca.pem", Audit: dbmcp.NewAuditSink(os.Stdout),
 		Password: func(ctx context.Context) (string, error) {
 			out, err := api.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: &secret})
 			if err != nil || out.SecretString == nil || *out.SecretString == "" {

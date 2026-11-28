@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -46,21 +45,20 @@ type arguments struct {
 	Pipeline   []json.RawMessage `json:"pipeline"`
 }
 type auditRecord struct {
-	ID        string `json:"request_id"`
-	Operation string `json:"operation"`
-	Caller    string `json:"caller"`
-	Target    string `json:"target,omitempty"`
-	Object    string `json:"object,omitempty"`
-	Outcome   string `json:"outcome"`
-	Rows      *int   `json:"rows,omitempty"`
-	Bytes     int    `json:"bytes"`
-	Elapsed   int64  `json:"elapsed_ms"`
+	ID         string `json:"request_id"`
+	Operation  string `json:"operation"`
+	Caller     string `json:"caller"`
+	Target     string `json:"target,omitempty"`
+	Object     string `json:"object,omitempty"`
+	Outcome    string `json:"outcome"`
+	AuditState string `json:"audit_state,omitempty"`
+	Rows       *int   `json:"rows,omitempty"`
+	Bytes      int    `json:"bytes"`
+	Elapsed    int64  `json:"elapsed_ms"`
 }
 type application struct {
 	catalog *Catalog
 	caller  string
-	audit   io.Writer
-	logMu   sync.Mutex
 }
 
 func NewServer(catalog *Catalog, caller string, audit io.Writer) (*mcp.Server, error) {
@@ -68,13 +66,14 @@ func NewServer(catalog *Catalog, caller string, audit io.Writer) (*mcp.Server, e
 	if err != nil {
 		return nil, err
 	}
-	app := &application{catalog: catalog, caller: caller, audit: audit}
+	app := &application{catalog: catalog, caller: caller}
+	sink := NewAuditSink(audit)
 	return tools.Server(func(ctx context.Context, name string, raw json.RawMessage) (json.RawMessage, error) {
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err != nil {
 			return nil, errors.New("request ID unavailable")
 		}
-		return app.call(ctx, name, tools.definitions[name].shape, raw, hex.EncodeToString(id[:]))
+		return app.call(ctx, name, tools.definitions[name].shape, raw, hex.EncodeToString(id[:]), sink.Reserve())
 	}), nil
 }
 
@@ -112,7 +111,16 @@ func (t *Tools) Server(call func(context.Context, string, json.RawMessage) (json
 			if err != nil {
 				return nil, err
 			}
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(output)}}}, nil
+			var outcome struct {
+				OK *bool `json:"ok"`
+			}
+			if err := json.Unmarshal(output, &outcome); err != nil || outcome.OK == nil {
+				return nil, errors.New("invalid database tool response")
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: string(output)}},
+				IsError: !*outcome.OK,
+			}, nil
 		})
 	}
 	return server
@@ -130,13 +138,14 @@ func (t *Tools) Target(name string, raw json.RawMessage) (string, error) {
 	return args.Target, err
 }
 
-func (t *Tools) Execute(ctx context.Context, catalog *Catalog, audit io.Writer, caller, requestID, name string, raw json.RawMessage) (json.RawMessage, error) {
+func (t *Tools) Execute(ctx context.Context, catalog *Catalog, audit *AuditSlot, caller, requestID, name string, raw json.RawMessage) (json.RawMessage, error) {
 	def, ok := t.definitions[name]
 	if !ok {
+		audit.Release()
 		return nil, errors.New("unknown tool")
 	}
-	app := application{catalog: catalog, caller: caller, audit: audit}
-	return app.call(ctx, name, def.shape, raw, requestID)
+	app := application{catalog: catalog, caller: caller}
+	return app.call(ctx, name, def.shape, raw, requestID, audit)
 }
 
 func decodeArguments(raw json.RawMessage, shape *jsonschema.Resolved) (arguments, error) {
@@ -186,7 +195,10 @@ func decodeArguments(raw json.RawMessage, shape *jsonschema.Resolved) (arguments
 	return a, nil
 }
 
-func (app *application) call(parent context.Context, name string, shape *jsonschema.Resolved, raw json.RawMessage, requestID string) (json.RawMessage, error) {
+func (app *application) call(parent context.Context, name string, shape *jsonschema.Resolved, raw json.RawMessage, requestID string, audit *AuditSlot) (json.RawMessage, error) {
+	if audit == nil {
+		return AuditUnavailable(requestID), nil
+	}
 	start := time.Now()
 	record := auditRecord{ID: requestID, Operation: name, Caller: app.caller}
 	ctx, cancel := context.WithTimeout(parent, queryTimeout)
@@ -226,11 +238,12 @@ func (app *application) call(parent context.Context, name string, shape *jsonsch
 		output, _ = json.Marshal(document{"ok": false, "request_id": record.ID, "code": code, "message": message})
 	}
 	record.Bytes, record.Elapsed = len(output), time.Since(start).Milliseconds()
-	app.logMu.Lock()
-	logErr := json.NewEncoder(app.audit).Encode(record)
-	app.logMu.Unlock()
-	if logErr != nil {
-		return nil, errors.New("could not record database access")
+	unavailable := AuditUnavailable(requestID)
+	terminal := record
+	terminal.AuditState = "response_withheld"
+	terminal.Outcome, terminal.Rows, terminal.Bytes = "unavailable", nil, len(unavailable)
+	if !audit.Record(record, terminal) {
+		return unavailable, nil
 	}
 	return output, nil
 }

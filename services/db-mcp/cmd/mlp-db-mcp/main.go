@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"os/user"
 	"syscall"
+	"time"
 
 	"github.com/lilabrooks/my-local-platform/db-mcp/internal/dbmcp"
 	"github.com/lilabrooks/my-local-platform/db-mcp/internal/pilot"
@@ -49,7 +50,11 @@ func run() error {
 }
 
 func main() {
+	// Let the audit sink handle a disconnected stderr pipe as a write error.
+	signal.Ignore(syscall.SIGPIPE)
 	if err := run(); err != nil {
+		// A final diagnostic uses the same descriptor and may also block.
+		time.AfterFunc(dbmcp.AuditWriteTimeout, func() { os.Exit(1) })
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

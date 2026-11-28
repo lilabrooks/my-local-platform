@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -54,8 +55,11 @@ func (c *stdioClient) call(t *testing.T, target, tool string, args any, ok bool)
 func (c *stdioClient) callOutcome(t *testing.T, target, tool string, args any, outcome string) document {
 	t.Helper()
 	result, err := c.session.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: args})
-	if err != nil || result.IsError || len(result.Content) != 1 {
+	if err != nil || len(result.Content) != 1 {
 		t.Fatalf("%s: bad protocol result: %v", tool, err)
+	}
+	if result.IsError != (outcome != "ok") {
+		t.Fatalf("%s: isError=%t for %s outcome", tool, result.IsError, outcome)
 	}
 	text, valid := result.Content[0].(*mcp.TextContent)
 	if !valid || len(text.Text) > ByteLimit {
@@ -137,9 +141,10 @@ func TestStdioChild(t *testing.T) {
 	}
 	os.Exit(0)
 }
-func TestEmptyCatalogOverStdio(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "empty.toml")
-	if err := os.WriteFile(path, []byte("targets = []\n"), 0600); err != nil {
+func stdioWithCatalog(t *testing.T, catalog string) *stdioClient {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "catalog.toml")
+	if err := os.WriteFile(path, []byte(catalog), 0600); err != nil {
 		t.Fatal(err)
 	}
 	exe, err := os.Executable()
@@ -148,7 +153,11 @@ func TestEmptyCatalogOverStdio(t *testing.T) {
 	}
 	cmd := exec.Command(exe, "-test.run=^TestStdioChild$")
 	cmd.Env = append(os.Environ(), "MLP_DB_MCP_TEST_CATALOG="+path)
-	c := connectTestClient(t, cmd)
+	return connectTestClient(t, cmd)
+}
+
+func TestEmptyCatalogOverStdio(t *testing.T) {
+	c := stdioWithCatalog(t, "targets = []\n")
 	list, err := c.session.ListTools(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -170,9 +179,75 @@ func TestEmptyCatalogOverStdio(t *testing.T) {
 	}
 	c.call(t, "", "list_databases", document{"target": "sentinel-excluded"}, false)
 	c.call(t, "", "run_sql", document{"target": "x"}, false)
+	if _, err := c.session.CallTool(t.Context(), &mcp.CallToolParams{Name: "unknown_tool", Arguments: document{}}); err == nil {
+		t.Fatal("unknown tool did not produce a protocol error")
+	}
 	c.checkAudit(t)
 	data, _ := os.ReadFile(c.logs.Name())
 	if strings.Contains(string(data), "sentinel-excluded") {
 		t.Fatal("audit included unknown target")
+	}
+}
+
+func TestUnavailableOverStdio(t *testing.T) {
+	c := stdioWithCatalog(t, `[[targets]]
+name = "fixture-mysql"
+engine = "mysql"
+environment = "local"
+host = "127.0.0.1"
+port = 3306
+database = "meter_demo"
+username = "meter_reader"
+password_file = "sentinel-missing-reader"
+tls = "local"
+[targets.objects]
+readings = ["watts"]
+`)
+	result := c.callOutcome(t, "fixture-mysql", "run_sql", document{
+		"target": "fixture-mysql", "database": "meter_demo", "sql": "SELECT watts FROM readings",
+	}, "unavailable")
+	if result["message"] != "The database operation could not complete." {
+		t.Fatal("unexpected public error for an unavailable reader credential")
+	}
+	c.checkAudit(t)
+}
+
+func TestToolResultEnvelope(t *testing.T) {
+	const original = `{ "request_id": "fixture-id", "ok": false, "code": "denied", "message": "Access denied." }`
+	tools, err := LoadTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := tools.Server(func(_ context.Context, tool string, _ json.RawMessage) (json.RawMessage, error) {
+		switch tool {
+		case "whoami":
+			return json.RawMessage(original), nil
+		case "list_targets":
+			return json.RawMessage(`{"message":"private fixture detail"}`), nil
+		default:
+			return nil, errors.New("fixture transport failure")
+		}
+	})
+	a, b := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), a, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	client := mcp.NewClient(&mcp.Implementation{Name: "envelope-test", Version: "1"}, nil)
+	session, err := client.Connect(t.Context(), b, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	result, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "whoami", Arguments: document{}})
+	if err != nil || !result.IsError || len(result.Content) != 1 || result.Content[0].(*mcp.TextContent).Text != original {
+		t.Fatal("tool error did not preserve the exact text payload")
+	}
+	for tool, message := range map[string]string{"list_targets": "invalid database tool response", "list_databases": "fixture transport failure"} {
+		_, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: document{"target": "fixture"}})
+		if err == nil || !strings.Contains(err.Error(), message) || strings.Contains(err.Error(), "private fixture detail") {
+			t.Errorf("%s did not return the expected sanitized protocol error", tool)
+		}
 	}
 }
