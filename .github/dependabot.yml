@@ -16,7 +16,9 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker-compose
-    directory: "/local"
+    directories:
+      - "/local"
+      - "/tools/golangci-lint"
     schedule:
       interval: weekly
     groups:
