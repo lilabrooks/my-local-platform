@@ -50,7 +50,7 @@ The workflow applies these controls to every job:
 
 ### CI topology
 
-A flowchart is useful here because the workflow fans out into 8 prerequisite
+A flowchart is useful here because the workflow fans out into 9 prerequisite
 job groups and then folds their results into 1 branch-protection result. GitHub
 [renders Mermaid diagrams in Markdown files](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-diagrams),
 so the diagram stays editable beside the workflow it describes.
@@ -61,6 +61,7 @@ flowchart TD
     event --> go[Go: 7-module matrix]
     event --> terraform[Terraform: 3-stack matrix]
     event --> python[Python tests and M4 repository preflight]
+    event --> database[Database MCP: three-engine rehearsal]
     event --> smoke[Smoke: ordered runtime suite]
     event --> image[Images: 3-service matrix]
     event --> modules[Go-module coverage]
@@ -70,6 +71,7 @@ flowchart TD
     go --> required[Required checks aggregate]
     terraform --> required
     python --> required
+    database --> required
     smoke --> required
     image --> required
     modules --> required
@@ -80,8 +82,8 @@ flowchart TD
     push[Push to protected branch] -. documented GitHub setup .-> codeql[CodeQL default setup]
 ```
 
-The 3 matrices expand the 9 tracked job definitions into 19 job instances on a
-pull request: 7 Go jobs, 3 Terraform jobs, Python, smoke, 3 image jobs, module
+The 3 matrices expand the 10 tracked job definitions into 20 job instances on a
+pull request: 7 Go jobs, 3 Terraform jobs, Python, database MCP, smoke, 3 image jobs, module
 coverage, lint, dependency review, and the aggregate. A manual run has the same
 shape with dependency review skipped.
 
@@ -92,6 +94,7 @@ shape with dependency review skipped.
 | `go` | 7 modules | 15 minutes | Format, build, vet, module tidiness, golangci-lint, and tests. |
 | `terraform` | 3 stacks | 15 minutes | Format, backend-free initialization, configuration validation, and stack tests where present. |
 | `python` | 1 | 5 minutes | Python tests, the Go-backed live-run Make entry-point check, and the account-independent M4 repository preflight. |
+| `database-mcp` | 1 | 15 minutes | Exercise the catalog, stdio client, synthetic databases and native grants. |
 | `smoke` | 1 | 30 minutes | Start the local platform and run smoke, trace, replay, ordering, drain, and crash checks. |
 | `image` | 3 services | 20 minutes | Pull each pinned build base, build the service image, and verify its commit label. |
 | `go-modules-covered` | 1 | 5 minutes | Compare discovered `go.mod` files with the Go matrix. |
@@ -224,7 +227,7 @@ Dependency review runs only for pull requests. It uses the pinned
 ### Aggregate result
 
 The `required` job uses `if: always()` and waits for Go, Terraform, Python,
-smoke, images, Go-module coverage, lint, and dependency review. It accepts `success`
+database MCP, smoke, images, Go-module coverage, lint, and dependency review. It accepts `success`
 or `skipped` from each prerequisite and fails on every other result. The
 expected skip is dependency review during a manual dispatch.
 

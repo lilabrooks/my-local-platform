@@ -1,0 +1,67 @@
+# Opt-in synthetic fixtures. Start with make db-mcp-up.
+name: mlp-db-mcp
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+    ports: ["127.0.0.1:58432:5432"]
+    environment:
+      POSTGRES_DB: meter_demo
+      POSTGRES_PASSWORD: ${METER_PG_OWNER:?use make db-mcp-up}
+      METER_READER: ${METER_PG_READER:?use make db-mcp-up}
+    volumes:
+      - meter-pg:/var/lib/postgresql
+      - ./bootstrap/db-mcp/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$METER_READER" psql -h 127.0.0.1 -U meter_reader -d meter_demo
+          -Atqc 'select count(*) from readings' | grep -qx 64
+      interval: 3s
+      timeout: 5s
+      retries: 60
+  mysql:
+    image: mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00
+    ports: ["127.0.0.1:58306:3306"]
+    environment:
+      MYSQL_DATABASE: meter_demo
+      MYSQL_USER: meter_reader
+      MYSQL_PASSWORD: ${METER_MY_READER:?use make db-mcp-up}
+      MYSQL_ROOT_PASSWORD: ${METER_MY_OWNER:?use make db-mcp-up}
+      METER_READER: ${METER_MY_READER:?use make db-mcp-up}
+    volumes:
+      - meter-my:/var/lib/mysql
+      - ./bootstrap/db-mcp/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$$METER_READER" mysql -h 127.0.0.1 -u meter_reader -NB meter_demo
+          -e 'select count(*) from readings' | grep -qx 64
+      interval: 3s
+      timeout: 5s
+      retries: 60
+  mongo:
+    image: mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01
+    ports: ["127.0.0.1:58017:27017"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: fixture_admin
+      MONGO_INITDB_ROOT_PASSWORD: ${METER_MG_OWNER:?use make db-mcp-up}
+      MONGO_INITDB_DATABASE: meter_demo
+      METER_READER: ${METER_MG_READER:?use make db-mcp-up}
+    volumes:
+      - meter-mg:/data/db
+      - ./bootstrap/db-mcp/mongo:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet meter_demo -u meter_reader -p "$$METER_READER" --authenticationDatabase meter_demo
+          --eval 'quit(db.readings.countDocuments({}) === 64 ? 0 : 1)'
+      interval: 4s
+      timeout: 8s
+      retries: 50
+volumes:
+  meter-pg:
+  meter-my:
+  meter-mg:

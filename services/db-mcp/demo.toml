@@ -1,0 +1,39 @@
+[[targets]]
+name = "demo-postgres"
+engine = "postgres"
+environment = "local"
+host = "127.0.0.1"
+port = 58432
+database = "meter_demo"
+schema = "public"
+username = "meter_reader"
+password_file = "../../local/tmp/db-mcp/pg-reader"
+tls = "local"
+[targets.objects]
+readings = ["sequence_no", "station", "state", "watts"]
+
+[[targets]]
+name = "demo-mysql"
+engine = "mysql"
+environment = "local"
+host = "127.0.0.1"
+port = 58306
+database = "meter_demo"
+username = "meter_reader"
+password_file = "../../local/tmp/db-mcp/my-reader"
+tls = "local"
+[targets.objects]
+readings = ["sequence_no", "station", "state", "watts"]
+
+[[targets]]
+name = "demo-mongo"
+engine = "mongodb"
+environment = "local"
+host = "127.0.0.1"
+port = 58017
+database = "meter_demo"
+username = "meter_reader"
+password_file = "../../local/tmp/db-mcp/mg-reader"
+tls = "local"
+[targets.objects]
+readings = ["sequence_no", "station", "state", "watts"]

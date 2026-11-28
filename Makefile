@@ -227,6 +227,19 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 # services/relay/internal/bootstrap/topics.txt file.
 UNCACHED_MODULES := k8s/validate
 
+.PHONY: db-mcp-up db-mcp-test db-mcp-demo db-mcp-down
+db-mcp-up: ## Start isolated synthetic PostgreSQL, MySQL and MongoDB fixtures
+	python3 services/db-mcp/demo.py up
+
+db-mcp-test: ## Test the database MCP catalog, query boundaries and response limits
+	uv run --locked --directory services/db-mcp python -m unittest discover -s tests -p 'test_*.py' -v
+
+db-mcp-demo: db-mcp-up ## Read synthetic meters over MCP and verify the native grants
+	uv run --locked --directory services/db-mcp python -m unittest discover -s tests -p demo_smoke.py -v
+
+db-mcp-down: ## Remove this checkout's database MCP fixtures, volumes and generated logins
+	python3 services/db-mcp/demo.py down
+
 .PHONY: test
 test: ## Run Go module and infrastructure guard tests
 	@for m in $(GO_MODULES); do \
