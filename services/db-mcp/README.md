@@ -28,7 +28,8 @@ files named in its catalog.
 
 Use `make db-mcp-up` to start just the fixtures. When finished, run
 `make db-mcp-down` to delete this checkout's fixture containers, data
-volumes and generated passwords.
+volumes and generated passwords. When upgrading the fixture database
+majors, run it before `make db-mcp-demo` to seed fresh synthetic data.
 
 ## Connect an MCP client
 
@@ -176,6 +177,10 @@ a pilot prerequisite.
 At revision `a1d2743` a separate client passed a 32-request rehearsal against
 the Go binary. The tests now check each of the 11 published input schemas
 against the arguments its handler consumes.
+
+The November 28 upgrade rehearsal repeated all nine integration tests on
+PostgreSQL 19.0, MySQL 26.10.0 and MongoDB 9.0.8. The 69 routine and boundary
+calls and three native permission denials all matched their audit records.
 
 ## Personal AWS pilot and adoption
 

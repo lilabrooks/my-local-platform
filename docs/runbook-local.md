@@ -511,6 +511,107 @@ docker volume rm mlp_grafana-data
 
 Nothing is lost. Every dashboard and datasource here is provisioned from files.
 
+## Upgrading Postgres from 18 to 19
+
+Fresh installations can use `make up`. On an existing installation, the
+19 image exits when it finds the 18 cluster in the selected volume. Preserve
+the original volume and restore the cluster into a second one before starting
+the writers. These commands use the Compose database owner `platform`.
+[PostgreSQL major upgrades](https://www.postgresql.org/docs/19/upgrading.html)
+
+### Capture the 18 cluster
+
+While the 18 container still exists, record its exact image, volume and Compose
+project. Stop external writers, including relay pods in Minikube. `make down`
+stops the Compose stack and preserves its volumes. Restart only the source
+database in an isolated container. Repeat the readiness check until it succeeds.
+
+```bash
+old_image=$(docker inspect -f '{{.Image}}' mlp-postgres)
+old_volume=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}{{end}}{{end}}' mlp-postgres)
+project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' mlp-postgres)
+make down
+upgrade_net=$(docker network create --internal "${project}_pg_upgrade_$(date +%s)")
+docker run -d --name mlp-pg18-export --network "$upgrade_net" \
+  -v "$old_volume:/var/lib/postgresql" "$old_image"
+docker exec mlp-pg18-export pg_isready -h 127.0.0.1 -U platform -d platform
+```
+
+If Compose already replaced the container and 19 refused the volume, take
+the volume name from the stopped container and use your previous 18 image
+for `old_image`. Check `SHOW server_version` on the source before dumping.
+
+Keep the backup private. A cluster dump includes role password hashes and may
+contain relay signing secrets. Check that `mlp_upgrade_admin` is unused on the
+source before using it as the temporary destination login. Record the reads,
+sequence state and grants that matter to this installation. If you use custom
+tablespaces or extensions, prepare those on the destination before restoring.
+[Cluster dump and restore](https://www.postgresql.org/docs/19/app-pg-dumpall.html)
+
+```bash
+umask 077
+backup=$(mktemp -d "$HOME/mlp-pg18-backup.XXXXXX")
+docker exec mlp-pg18-export psql -XAt -U platform -d platform \
+  -c "SELECT rolname FROM pg_roles WHERE rolname = 'mlp_upgrade_admin'"
+docker exec mlp-pg18-export pg_dumpall -U platform --quote-all-identifiers > "$backup/cluster.sql"
+```
+
+### Restore and select the 19 volume
+
+Continue after the dump exits successfully. Pick a new, unused volume name.
+If a restore fails, retry from the backup into a fresh volume. The original
+18 volume remains available for rollback.
+
+```bash
+new_volume="${project}_pg19_$(date +%Y%m%d%H%M%S)"
+docker volume create --label "com.docker.compose.project=$project" \
+  --label com.docker.compose.volume=postgres-data "$new_volume"
+POSTGRES_PASSWORD="$(openssl rand -hex 32)" docker run -d --name mlp-pg19-restore \
+  --network "$upgrade_net" -v "$new_volume:/var/lib/postgresql" -e POSTGRES_PASSWORD \
+  -e POSTGRES_USER=mlp_upgrade_admin -e POSTGRES_DB=postgres postgres:19-alpine
+docker exec mlp-pg19-restore pg_isready -h 127.0.0.1 -U mlp_upgrade_admin -d postgres
+```
+
+When the destination is ready, restore with error checking. Connect as the
+restored owner and disable the temporary bootstrap login. Compare the source
+and destination data. Test an existing login from a separate client container
+on the private network. Substitute the application's role for `platform` to
+check its grants.
+
+```bash
+docker exec -i mlp-pg19-restore psql -X -v ON_ERROR_STOP=1 -U mlp_upgrade_admin \
+  -d postgres < "$backup/cluster.sql"
+docker exec mlp-pg19-restore psql -X -v ON_ERROR_STOP=1 -U platform -d platform \
+  -c 'ALTER ROLE mlp_upgrade_admin NOLOGIN PASSWORD NULL'
+docker run --rm -it --network "$upgrade_net" postgres:19-alpine \
+  psql -X -W -h mlp-pg19-restore -U platform -d platform
+docker stop mlp-pg18-export mlp-pg19-restore
+docker rm mlp-pg18-export mlp-pg19-restore
+docker network rm "$upgrade_net"
+```
+
+Set `MLP_POSTGRES_VOLUME` to the value of `new_volume` in the local `.env`
+file or the `ENV_FILE` passed to Make. Start only PostgreSQL, then verify
+the mounted name and a data read from the normal service before restarting
+writers. `make up` also runs the seed script.
+
+```bash
+docker compose --env-file "${ENV_FILE:-.env}" -f local/docker-compose.yml \
+  --profile core up -d --wait postgres
+docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}{{end}}{{end}}' mlp-postgres
+docker exec mlp-postgres psql -XAt -U platform -d platform -c 'SELECT count(*) FROM relay_subscriptions'
+```
+
+Before accepting writes, rollback consists of stopping the 19 service,
+selecting the recorded 18 image and original volume, and checking the same
+reads. Use `make down` to keep both volumes available through this window.
+Once writers resume on 19, reconcile those writes before rolling back.
+
+On November 28, 2026 a disposable 18.6 cluster restored into 19.0 with 19
+relay subscriptions, event JSON, a delivery attempt and sequence state intact.
+An ordinary login kept its view grant and was denied reads on the base table.
+Restarting 18 on the original volume returned the same data and grants.
+
 ## Upgrading Postgres past 17
 
 Postgres 18 changed where the official image expects its volume. It now writes
