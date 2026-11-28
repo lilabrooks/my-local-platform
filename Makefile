@@ -227,18 +227,22 @@ GO_MODULES := $(shell find . -name go.mod -not -path './*/.terraform/*' \
 # services/relay/internal/bootstrap/topics.txt file.
 UNCACHED_MODULES := k8s/validate
 
-.PHONY: db-mcp-up db-mcp-test db-mcp-demo db-mcp-down
+.PHONY: db-mcp-build db-mcp-up db-mcp-test db-mcp-demo db-mcp-down
+db-mcp-build: ## Build the database MCP stdio executable in bin/
+	mkdir -p bin
+	CGO_ENABLED=0 go -C services/db-mcp build -trimpath -o ../../bin/mlp-db-mcp ./cmd/mlp-db-mcp
+
 db-mcp-up: ## Start isolated synthetic PostgreSQL, MySQL and MongoDB fixtures
-	python3 services/db-mcp/demo.py up
+	go -C services/db-mcp run ./cmd/db-mcp-fixtures -root ../.. up
 
 db-mcp-test: ## Test the database MCP catalog, query boundaries and response limits
-	uv run --locked --directory services/db-mcp python -m unittest discover -s tests -p 'test_*.py' -v
+	go -C services/db-mcp test -race -count=1 ./...
 
-db-mcp-demo: db-mcp-up ## Read synthetic meters over MCP and verify the native grants
-	uv run --locked --directory services/db-mcp python -m unittest discover -s tests -p demo_smoke.py -v
+db-mcp-demo: db-mcp-build db-mcp-up ## Read synthetic meters over MCP and verify the native grants
+	go -C services/db-mcp test -tags=integration -count=1 -v -run '^TestDemo' ./internal/dbmcp
 
 db-mcp-down: ## Remove this checkout's database MCP fixtures, volumes and generated logins
-	python3 services/db-mcp/demo.py down
+	go -C services/db-mcp run ./cmd/db-mcp-fixtures -root ../.. down
 
 .PHONY: test
 test: ## Run Go module and infrastructure guard tests

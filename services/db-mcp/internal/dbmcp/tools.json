@@ -1,0 +1,149 @@
+{
+  "describe_table": {
+    "description": "Return the fields the catalog exposes for this object.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "table": {"title": "Table", "type": "string"}
+      },
+      "title": "describe_tableArguments",
+      "required": ["target", "database", "table"]
+    }
+  },
+  "explain_query": {
+    "description": "Return plan operators for an approved SQL query or MongoDB aggregation, without execution statistics.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "sql": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Sql"},
+        "params": {"anyOf": [{"items": {}, "type": "array"}, {"type": "null"}], "default": null, "title": "Params"},
+        "collection": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Collection"},
+        "pipeline": {"anyOf": [{"items": {"additionalProperties": true, "type": "object"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Pipeline"}
+      },
+      "title": "explain_queryArguments",
+      "required": ["target", "database"]
+    }
+  },
+  "list_databases": {
+    "description": "List databases exposed on this target.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"}
+      },
+      "title": "list_databasesArguments",
+      "required": ["target"]
+    }
+  },
+  "list_tables": {
+    "description": "List the approved SQL views or MongoDB collections and views.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"}
+      },
+      "title": "list_tablesArguments",
+      "required": ["target", "database"]
+    }
+  },
+  "list_targets": {
+    "description": "List catalog targets with their engine and non-production environment.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+      },
+      "title": "list_targetsArguments"
+    }
+  },
+  "mongo_aggregate": {
+    "description": "Aggregate with $match, $sort, $limit and $group count accumulators.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "collection": {"title": "Collection", "type": "string"},
+        "pipeline": {"items": {"additionalProperties": true, "type": "object"}, "title": "Pipeline", "type": "array"},
+        "limit": {"default": 50, "title": "Limit", "type": "integer"}
+      },
+      "title": "mongo_aggregateArguments",
+      "required": ["target", "database", "collection", "pipeline"]
+    }
+  },
+  "mongo_count": {
+    "description": "Count matching documents in an approved collection or view.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "collection": {"title": "Collection", "type": "string"},
+        "filter": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Filter"}
+      },
+      "title": "mongo_countArguments",
+      "required": ["target", "database", "collection"]
+    }
+  },
+  "mongo_distinct": {
+    "description": "Return a bounded set of distinct values of an approved field.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "collection": {"title": "Collection", "type": "string"},
+        "field": {"title": "Field", "type": "string"},
+        "filter": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Filter"},
+        "limit": {"default": 50, "title": "Limit", "type": "integer"}
+      },
+      "title": "mongo_distinctArguments",
+      "required": ["target", "database", "collection", "field"]
+    }
+  },
+  "mongo_find": {
+    "description": "Read approved fields with scalar comparisons, inclusion projection and sort.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "collection": {"title": "Collection", "type": "string"},
+        "filter": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Filter"},
+        "projection": {"anyOf": [{"additionalProperties": {"type": "integer"}, "type": "object"}, {"type": "null"}], "default": null, "title": "Projection"},
+        "sort": {"anyOf": [{"additionalProperties": {"type": "integer"}, "type": "object"}, {"type": "null"}], "default": null, "title": "Sort"},
+        "limit": {"default": 50, "title": "Limit", "type": "integer"}
+      },
+      "title": "mongo_findArguments",
+      "required": ["target", "database", "collection"]
+    }
+  },
+  "run_sql": {
+    "description": "Read an approved view using SELECT, ? parameters, comparisons, COUNT(*), GROUP BY, ORDER BY and LIMIT.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {"title": "Target", "type": "string"},
+        "database": {"title": "Database", "type": "string"},
+        "sql": {"title": "Sql", "type": "string"},
+        "params": {"anyOf": [{"items": {}, "type": "array"}, {"type": "null"}], "default": null, "title": "Params"},
+        "max_rows": {"default": 50, "title": "Max Rows", "type": "integer"}
+      },
+      "title": "run_sqlArguments",
+      "required": ["target", "database", "sql"]
+    }
+  },
+  "whoami": {
+    "description": "Return the local process user and transport.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+      },
+      "title": "whoamiArguments"
+    }
+  }
+}

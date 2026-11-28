@@ -31,7 +31,7 @@ jobs:
         # its list from go.mod for the same reason; a matrix cannot, so adding a
         # module means adding it here -- and `discover` below fails the build if
         # anyone forgets.
-        module: [services/smoke, services/echo, services/relay, services/sink, k8s/validate, tools/m4-bootstrap, tools/m4-live-run]
+        module: [services/smoke, services/echo, services/relay, services/sink, services/db-mcp, k8s/validate, tools/m4-bootstrap, tools/m4-live-run]
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -156,10 +156,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          python-version: "3.13"
-      - run: python -m pip install uv==0.13.10
+          go-version-file: services/db-mcp/go.mod
+          cache-dependency-path: services/db-mcp/go.sum
       - run: make db-mcp-test
       - run: make db-mcp-demo
       - if: always()

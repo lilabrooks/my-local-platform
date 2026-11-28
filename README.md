@@ -187,8 +187,8 @@ A local MCP client can query synthetic charging-station readings in PostgreSQL,
 MySQL and self-hosted MongoDB. Each database grants a dedicated identity read
 access to one view. The demo uses separate, loopback-only containers.
 
-With Docker, Python 3 and uv installed, run `make db-mcp-demo`. It launches
-the stdio server, checks the same counts across all three engines, and checks
+With Go and Docker Compose installed, run `make db-mcp-demo`. It builds the
+Go stdio server, checks the same counts across all three engines, and checks
 the reader grants directly. `make db-mcp-down` removes the demo data.
 See the [client configuration and application validation](services/db-mcp/README.md).
 
@@ -350,7 +350,7 @@ Each architecture decision records its verification evidence.
 Run the checks that cover your change:
 
 ```bash
-make test          # race-enabled tests across 6 Go modules, then Python tests
+make test          # race-enabled tests across the Go modules, then platform Python tests
 make lint          # source, docs, infrastructure, security, and secret checks
 make k8s-validate  # manifest tests and schema validation; no cluster or AWS
 ```

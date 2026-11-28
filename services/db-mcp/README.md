@@ -7,17 +7,16 @@ the reader cannot access.
 
 ## Run the showcase
 
-From the repository root on macOS or Linux, use Docker with Compose, uv and
-Python 3.12–3.14. The first run downloads the pinned database images and
-Python dependencies.
+From the repository root on macOS or Linux, use Go 1.27 and Docker with
+Compose. The first run downloads the pinned database images and Go modules.
 
 ```sh
 make db-mcp-test
 make db-mcp-demo
 ```
 
-The demo starts three dedicated containers, launches the server as an MCP
-subprocess and compares its answers with known values. All three engines
+The demo builds `bin/mlp-db-mcp`, starts three dedicated containers, and
+launches the binary as an MCP subprocess. All three engines
 should report 32 ready readings out of 64. The final lines report the
 database permission checks and the number of requests matched to audit records.
 
@@ -33,19 +32,16 @@ volumes and generated passwords.
 
 ## Connect an MCP client
 
-Point your client's stdio server configuration at the absolute checkout
-path. The example uses the `mcpServers` configuration accepted by Claude
-Code. The `uv` executable must be on the client's PATH.
+Run `make db-mcp-build` to build the executable. Use absolute paths for the
+binary and catalog in your client's stdio configuration. The example uses
+the `mcpServers` configuration accepted by Claude Code.
 
 ```json
 {
   "mcpServers": {
     "platform-data": {
-      "command": "uv",
-      "args": [
-        "run", "--locked", "--directory", "/absolute/path/to/my-local-platform/services/db-mcp",
-        "mlp-db-mcp", "--catalog", "demo.toml"
-      ]
+      "command": "/absolute/path/to/my-local-platform/bin/mlp-db-mcp",
+      "args": ["--catalog", "/absolute/path/to/my-local-platform/services/db-mcp/demo.toml"]
     }
   }
 }
@@ -81,7 +77,10 @@ on `demo-mongo` with the same database, collection `readings`, and filter
 
 The catalog maps a target to one database, a database identity, and approved
 objects and fields. The SQL compiler emits a new parameterized statement
-from its supported grammar. The SQL drivers open a read-only transaction.
+from its supported grammar. It quotes catalog identifiers for the selected
+engine and binds values through pgx or the Go MySQL driver. Use `?`
+parameters for input values, including strings with backslashes. The SQL
+drivers open a read-only transaction on the connection that runs the query.
 MongoDB uses a native role with `find` on the view. Every tool invocation
 runs as the configured database identity for that target.
 
@@ -94,7 +93,8 @@ and the database's own logging have their own retention settings.
 The server applies a 50-row limit and a 32 KiB compact UTF-8 limit to its
 logical tool response, including metadata. It removes whole rows to fit and
 reports truncation. Drivers may receive larger values before the response
-is sized. Query timeouts are 15 seconds. The server marks database values
+is sized. Tool arguments are limited to 64 KiB and SQL text to 8,000 bytes.
+Query timeouts are 15 seconds. The server marks database values
 as untrusted content.
 
 For your own development database, supply a separate TOML catalog following
@@ -102,7 +102,8 @@ For your own development database, supply a separate TOML catalog following
 grants on the exact view or collection, and put its password in a protected
 file. Relative paths resolve against the catalog. TLS defaults to certificate
 and hostname verification. Set `ca_file` for a private CA. Cleartext fixture
-connections require a local target and a literal loopback address.
+connections require a local target and a literal loopback address. MongoDB
+pins these connections to the configured member. Replica discovery uses TLS.
 MongoDB accepts `auth_database` and an optional `replica_set`. Configuring
 a replica set defaults to secondary reads. Set `read_preference` to
 `primary` or `secondaryPreferred` only when that placement is intended.
@@ -110,17 +111,25 @@ The demonstration exercises a standalone MongoDB server.
 
 ## Validation
 
-On 2026-11-27, `make db-mcp-test` passed 9 checks. These included target
-discovery through stdio with an empty catalog and the complete UTF-8
-response budget for oversized rows.
+On 2026-11-27 and 2026-11-28, `make db-mcp-test` passed with Go 1.27.4 and
+the race detector on Apple silicon. The tests cover the catalog, allowed and refused queries,
+ordered MongoDB sorts, numeric precision, the UTF-8 response limit,
+certificate and hostname verification against a local TLS server, and
+credential retention after a failed fixture teardown.
 
-On the same date, `make db-mcp-demo` passed on Apple silicon using Python
-3.12, PostgreSQL 18.7, MySQL 8.4.13 and MongoDB 8.0.38. A real MCP client
-exercised all 11 tools. All three returned the expected count and capped
-a 64-reading result at 50. All 32 request IDs appeared in the audit.
-Separate owner queries established the excluded objects existed. Each native
-reader was denied a base-data read and a write. MySQL also denied the reader
-access to an existing table in another database.
+`make db-mcp-demo` exercised the compiled Go binary against PostgreSQL 18.7,
+MySQL 8.4.13 and MongoDB 8.0.38. All 11 tools ran. Each engine counted 32 ready
+readings and capped a 64-row result at 50. All 35 requests matched individual
+audit records. Separate owner queries confirmed the excluded objects existed.
+All three native readers were denied a base-data read and a write. MySQL
+also denied the reader access to an existing table in another database.
+The SQL drivers masked a PostgreSQL composite and MySQL geometry value
+while preserving exact decimals and dates.
+The MongoDB driver sent a server-side deadline for both aggregate and explain.
+
+The previous Python client also ran its 32-request rehearsal against the
+Go binary. All 11 tool names, descriptions and input schemas matched those
+advertised by the previous server.
 
 ## Personal AWS pilot and adoption
 
