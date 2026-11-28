@@ -112,16 +112,23 @@ Put data suitable for the client into the approved view. Selected scalar
 values can enter the model's context as returned. The application audit on
 stderr records a request ID, the local user label, operation, outcome, elapsed
 time and response bytes. It includes the target and object once resolved
-against the catalog. Row counts measure results delivered to the client.
-For `mongo_count`, returning a count of zero still delivers one result.
+against the catalog. On a successful call, the row count describes the
+result prepared for the client. A `mongo_count` of zero is one result.
+Query text, parameter values and returned rows stay out of the audit.
 Client transcripts and the database's own logging have their own retention
 settings.
 
-The client and audit use the same outcome code. A malformed tool request or
-catalog refusal returns `refused`. A native permission denial on the configured
-reader returns `denied`. Recognized database type and grouping errors
-return `invalid_query`. Deadline errors return `timeout`, including PostgreSQL's
-server-side query cancellation signal. A client cancellation is recorded as
+MCP clients can check `isError` on the tool result. It is false on success
+and true for a tool execution failure. The JSON text also carries `ok`, the
+request ID and, on failure, the public outcome code. Transport and JSON-RPC
+errors follow their own protocol paths.
+[MCP tool error handling](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#error-handling)
+
+A malformed tool argument or catalog refusal returns `refused`. A native
+permission denial on the configured reader returns `denied`. Recognized database
+type and grouping errors return `invalid_query`. Deadline errors return
+`timeout`, including PostgreSQL's server-side query cancellation signal.
+A client cancellation is recorded as
 `canceled`. Other database errors return `unavailable`. Driver messages can
 contain query values, so the server supplies its own messages.
 
@@ -143,6 +150,31 @@ MongoDB accepts `auth_database` and an optional `replica_set`. Configuring
 a replica set defaults to secondary reads. Set `read_preference` to
 `primary` or `secondaryPreferred` only when that placement is intended.
 The demonstration exercises a standalone MongoDB server.
+
+### When the audit destination stops reading
+
+The stdio server reserves an audit slot before it runs a tool. The pilot
+router reserves one before it invokes the executor, and the executor reserves
+its own slot before it requests the database password. Each process can hold
+32 reservations and has one writer. When the slots are full or a known write
+failure is awaiting recovery, callers receive `unavailable` with their request
+ID before that process starts the work. This applies to `whoami` as well as
+database reads.
+
+A read already in flight can finish. Its result is released only after the
+audit writer acknowledges the complete line. A write error or a wait of
+250 ms withholds the result. The client receives `isError: true`,
+`unavailable` and the original request ID. When a blocked write resumes,
+the writer records the final outcome with `audit_state: "response_withheld"`.
+After a write error, the next request triggers a retry of that record. A
+delayed write can put an earlier `ok` for the same ID in the log. Use the
+terminal record to interpret that pair. If a writer accepts the whole line
+and also reports an error, a retry can repeat the same correction.
+
+Requests refused before admission get their receipt in the caller's response.
+A process that exits while its writer is blocked can lose pending records.
+The 250 ms allowance bounds the audit wait for each process. Database
+execution, network transit and client scheduling add to the total call time.
 
 ## Validation
 
@@ -181,6 +213,23 @@ against the arguments its handler consumes.
 The November 28 upgrade rehearsal repeated all nine integration tests on
 PostgreSQL 19.0, MySQL 26.10.0 and MongoDB 9.0.8. The 69 routine and boundary
 calls and three native permission denials all matched their audit records.
+
+### Audit recovery and tool errors
+
+On November 28, 2026, the Go 1.27.4 race suite (`make db-mcp-test`) and
+both local rehearsals passed for implementation `490d0be` on Apple silicon.
+The stdio SDK and signed-client tests checked the error flag, public code,
+request ID and audit outcome for a successful read, a catalog refusal, a
+native database denial and a transient failure. The signed MySQL rehearsal
+also distinguished a denied observer from an entitled reader using the wrong CA.
+
+In `make db-mcp-demo`, the compiled server withheld a MySQL read in 259 ms
+with stderr full. A subsequent `whoami` returned `unavailable` in 0.53 ms.
+After the pipe drained, the test matched the correction to the original ID
+and the same query returned 32. Closing stdin with stderr still full exited
+in 1.9 ms. The race tests also decoded the entire audit stream after partial
+writes and confirmed that a known outage prevented another executor call or
+password lookup. These timings describe this local run.
 
 ## Personal AWS pilot and adoption
 
